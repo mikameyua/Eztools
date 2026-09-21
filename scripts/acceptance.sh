@@ -485,13 +485,15 @@ step "9/11  托盘：menus.input 契约 + 菜单自动合成"
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 items = d.get("items") or []
-ok = (d.get("count") == 2 and len(items) == 2
-      and all("input" in i and i.get("groupTitle") for i in items))
+by_id = {i["commandId"]: i for i in items}
+ok = (d.get("count") == 3 and len(items) == 3
+      and all("input" in i and i.get("groupTitle") for i in items)
+      and by_id.get("preview.show", {}).get("input") == "shellSelection")
 print(f"  [信息] 托盘项: {[i['commandId'] for i in items]}")
 sys.exit(0 if ok else 1)
 PY
 if [ $? -eq 0 ]; then
-  pass "托盘菜单自动合成（2 项，含 input 与分组）"
+  pass "托盘菜单自动合成（3 项，含 input 与分组；preview.show 声明 shellSelection）"
 else
   fail "托盘菜单合成异常：$(tr -d '\r\n' < "$WORK/tray.json" | head -c 200)"
 fi
@@ -561,7 +563,7 @@ fi
 "$EZ" disable filehash --quiet >/dev/null 2>&1
 DISABLED_COUNT=$("$EZ" tray --json --quiet --tools-dir tools 2>/dev/null \
   | tr -d ' \n' | grep -o '"count":[0-9]*' | head -1 | cut -d: -f2)
-check "禁用 filehash 后托盘项降为 1" "1" "$DISABLED_COUNT"
+check "禁用 filehash 后托盘项降为 2" "2" "$DISABLED_COUNT"
 "$EZ" enable filehash --quiet >/dev/null 2>&1
 
 # ── 10. 托盘进程（Eztools.Desktop）──────────────────────────────────────────

@@ -65,6 +65,8 @@ user32.SetClipboardData.restype = ctypes.c_void_p
 user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
 
 
 def set_clipboard(text: str) -> None:
@@ -140,19 +142,21 @@ def main() -> int:
     m = re.search(r"工具 (\d+) 个 · 托盘项 (\d+) 个 · 热键注册 (\d+) 个 · 图标 (\d+)x(\d+)", line)
     ck("自检结果可读且格式正确", m is not None, repr(line[:150]))
     if m:
-        ck("托盘项 = 2（与 Cli 侧一致 —— 同一个合成器）", m.group(2) == "2", m.group(2))
-        ck("热键注册 = 2（RegisterHotKey 真实成功，仲裁无落选）", m.group(3) == "2", m.group(3))
+        ck("托盘项 = 3（与 Cli 侧一致 —— 同一个合成器；filehash/wordcount/preview）",
+           m.group(2) == "3", m.group(2))
+        ck("热键注册 = 3（RegisterHotKey 真实成功，仲裁无落选）", m.group(3) == "3", m.group(3))
         ck("图标按 SmallIconSize 取到 16x16", m.group(4) == "16" and m.group(5) == "16",
            f"{m.group(4)}x{m.group(5)}")
 
     # ── 1b. P1b 设置窗口：schema → 控件映射清单（自检附带输出）────────────────
     # 期望映射（§7）：boolean→CheckBox · string+enum→ComboBox · integer→TextBox
-    # P3 起加了 pinfo（limit 字段）—— 4 个有 schema 的工具 / 8 个字段
+    # preview 起加入了第 5 个有 schema 的工具（3 个 integer 字段）—— 共 11 个字段
     expected = {
         "echo": {"uppercase=CheckBox"},
         "wordcount": {"countWhitespace=CheckBox", "language=ComboBox", "maxFileSizeMb=TextBox"},
         "filehash": {"algorithm=ComboBox", "uppercase=CheckBox", "chunkSizeKb=TextBox"},
         "pinfo": {"limit=TextBox"},
+        "preview": {"maxTextBytes=TextBox", "maxLines=TextBox", "binaryProbeBytes=TextBox"},
     }
     got = {}
     for ln in lines[1:]:
@@ -267,6 +271,94 @@ def main() -> int:
     r = run(["--probe-hotkey", "echo.echo"])   # echo 未声明任何热键
     ck("未声明热键的命令走该探针 → 明确非零（不静默成功）",
        r.returncode != 0, f"code={r.returncode}")
+
+    # ── 2c. ★ shellSelection 注入（速览的上下文来源，剪贴板断言覆盖不到）──────────
+    #     观测量 = preview.show 的返回值（recorded / paths，经探针 --out 落盘）——
+    #     只看退出码分不清"拿到 1 项"和"什么都没拿到"。
+    #     确定性三要素（实测教训）：
+    #       ① 预清理：关掉此前遗留的、选中项为测试目标的窗口（用 IWebBrowser2.Quit()，
+    #          🔴 绝不能 taskkill explorer.exe —— 那会连任务栏一起杀）；
+    #       ② 开窗后**轮询等待**前台真的变成 Explorer 文件夹窗口（CabinetWClass），
+    #          固定 sleep 会被冷启动抖动打败；
+    #       ③ 反向断言放宽为"结果不含目标"—— 此时前台可能是用户自己的其它窗口，
+    #          它的选中项不该被我们污染。
+    probe_out = os.path.join(repo, "_scratch", "probe-hotkey.json")
+    target = os.path.join(repo, "README.md")
+    ps_quit_target = (
+        "$sh = New-Object -ComObject Shell.Application;"
+        "foreach($w in $sh.Windows()){"
+        "try{$s=$w.Document.SelectedItems();"
+        "for($k=0;$k -lt $s.Count;$k++){"
+        f"if($s.Item($k).Path -eq '{target}'){{ $w.Quit(); break }}"
+        "}}catch{}}"
+    )
+
+    def close_windows_with_target() -> None:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_quit_target],
+                       capture_output=True, timeout=60)
+        time.sleep(1.5)
+
+    def dump_shell_windows() -> str:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+             os.path.join(repo, "scripts", "_dump-shell-windows.ps1")],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        return (r.stdout or "").strip() or "(无输出)"
+
+    try:
+        if os.path.exists(probe_out):
+            os.remove(probe_out)
+        close_windows_with_target()
+
+        # 开窗 + 轮询等待"前台窗口的选中项包含目标"—— 判据直接对齐产品需要的状态。
+        # 不能只等"前台是 CabinetWClass"：已在前台的其它 Explorer 窗口（Home/此电脑）
+        # 会提前满足，探针读到的就是别人的选中项（实测踩到）。
+        # 🔴 这两条断言是**环境依赖**的：桌面正被人使用时前台会漂移，等待可能超时 ——
+        #    超时报【跳过】并附现场状态（诚实暴露，不假红也不假绿）；
+        #    机制本身由 2b 的热键断言与"反向"断言共同守。
+        w = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", os.path.join(repo, "scripts", "_wait-selection.ps1"),
+             "-Target", target],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        first = (w.stdout or "").strip().splitlines()
+        opened = bool(first) and first[0].startswith("OK")
+
+        if not opened:
+            info("跳过两条选中项断言：20 秒内前台未出现目标选中状态（桌面正被使用？）。现场：")
+            for ln in dump_shell_windows().splitlines():
+                info("  " + ln)
+        else:
+            r = run(["--probe-hotkey", "preview.show", "--out", probe_out])
+            ck("热键项【速览】触发成功（input=shellSelection）", r.returncode == 0,
+               f"code={r.returncode} err={r.stderr[:120]}")
+
+            got = {}
+            if os.path.exists(probe_out):
+                with open(probe_out, encoding="utf-8") as fh:
+                    got = json.load(fh)
+            got_paths = got.get("paths") or []
+            ck("工具真的收到了选中的文件（recorded=1 且路径命中）",
+               got.get("recorded") == 1 and len(got_paths) >= 1
+               and any(os.path.normcase(str(p)) == os.path.normcase(target) for p in got_paths),
+               f"got={got}")
+
+            # 反向：关掉我们的窗口后再探 —— 结果不得再含目标
+            #（验证"读的是真实前台状态"，同时证明上一条不是恒真）
+            close_windows_with_target()
+            if os.path.exists(probe_out):
+                os.remove(probe_out)
+            r = run(["--probe-hotkey", "preview.show", "--out", probe_out])
+            empty = {}
+            if os.path.exists(probe_out):
+                with open(probe_out, encoding="utf-8") as fh:
+                    empty = json.load(fh)
+            empty_paths = [os.path.normcase(str(p)) for p in (empty.get("paths") or [])]
+            ck("反向：关闭窗口后结果不再含目标（读的是真实前台状态，不残留）",
+               r.returncode == 0 and os.path.normcase(target) not in empty_paths, f"got={empty}")
+    finally:
+        if os.path.exists(probe_out):
+            os.remove(probe_out)
 
     # ── 3. 单实例 ───────────────────────────────────────────────────────────
     subprocess.Popen([desktop, "--no-prompt"], env=env, cwd=repo,

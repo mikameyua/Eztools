@@ -54,6 +54,15 @@
   </ItemGroup>
 
   <!--
+    Shell 选中项读取（input: shellSelection）不使用 <COMReference>：
+    .NET SDK 版 MSBuild **不支持** ResolveComReference（MSB4803，那是 .NET Framework MSBuild 的任务）。
+    改走 IDispatch 动态绑定（Shell.Application / ShellWindows / IWebBrowser2 都是自动化对象，
+    用 dynamic 按名调度，无 vtable 风险）；只有 typelib 之外的视图接口
+    （IShellBrowser / IFolderView / IShellItemArray / IShellItem）由 ShellSelectionReader.cs
+    自行声明 —— 槽位序对照过公开 API 定义，一个都不能省。
+  -->
+
+  <!--
     P2 的桌面宿主（托盘 + 将来的设置窗口）。
 
     与 Eztools.Cli 的**职责分界**（这不是偏好，是平台约束）：

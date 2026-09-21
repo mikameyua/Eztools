@@ -1,0 +1,88 @@
+{
+  "id": "preview",
+  "name": "速览",
+  "version": "0.1.0",
+  "description": "速览资源管理器选中的文件：元信息 + 纯文本内容预览",
+  "author": "Eztools",
+  "license": "GPL-3.0-or-later",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "full",
+  "lifecycle": "transient",
+  "needs": ["files.userSelected", "ui.panel"],
+
+  "contributes": {
+    "commands": [
+      {
+        "id": "preview.show",
+        "title": "速览选中的文件",
+        "handler": "show",
+        "description": "记录资源管理器当前选中项（宿主按 input: shellSelection 注入），供面板读取"
+      },
+      {
+        "id": "preview.reload",
+        "title": "刷新面板",
+        "handler": "reload",
+        "description": "面板按钮用：触发宿主重拉面板数据（协议 §4.1 的自动重拉机制）"
+      },
+      {
+        "id": "preview.openExternal",
+        "title": "用系统程序打开",
+        "handler": "openExternal",
+        "description": "用系统默认程序打开面板正在速览的文件"
+      }
+    ],
+    "panels": [
+      {
+        "id": "main",
+        "title": "速览",
+        "description": "选中项的元信息与内容",
+        "width": 720,
+        "height": 560,
+        "refreshMs": 0,
+        "commands": ["preview.reload", "preview.openExternal"]
+      }
+    ],
+    "menus": [
+      { "location": "tray", "command": "preview.show", "group": "tool", "input": "shellSelection" }
+    ],
+    "hotkeys": [
+      {
+        "command": "preview.show",
+        "default": "Ctrl+Alt+P",
+        "title": "速览选中的文件",
+        "input": "shellSelection"
+      }
+    ]
+  },
+
+  "config": {
+    "type": "object",
+    "properties": {
+      "maxTextBytes": {
+        "type": "integer",
+        "default": 65536,
+        "minimum": 1024,
+        "maximum": 1048576,
+        "title": "文本预览上限 (字节)",
+        "description": "面板数据走 JSON-RPC 单帧，文本必须截断"
+      },
+      "maxLines": {
+        "type": "integer",
+        "default": 200,
+        "minimum": 10,
+        "maximum": 5000,
+        "title": "文本预览行数上限"
+      },
+      "binaryProbeBytes": {
+        "type": "integer",
+        "default": 4096,
+        "minimum": 64,
+        "maximum": 65536,
+        "title": "二进制探测字节数",
+        "description": "前 N 字节出现 NUL 即按二进制处理，只显示元信息"
+      }
+    }
+  }
+}

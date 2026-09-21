@@ -42,6 +42,15 @@ public sealed class ToolHotkey
     public string? Title { get; init; }
 
     /// <summary>
+    /// 触发时宿主注入的上下文来源。**缺省 = <see cref="MenuInput.Clipboard"/>** ——
+    /// 这是**兼容性默认值**，不是随手取的：热键命令可能根本没有 menus 项可继承
+    /// <c>input</c> 声明（<c>filehash.hash</c> 正是这种），而热键路径历史上就一律注入剪贴板。
+    /// 缺省定成 Clipboard，"未声明"才与历史行为严格等价；要换来源须**显式**声明
+    /// （如 <c>"input": "shellSelection"</c>）。
+    /// </summary>
+    public MenuInput Input { get; init; } = MenuInput.Clipboard;
+
+    /// <summary>
     /// 规范化后的组合键；null = 原始串无法解析（已有 HotkeyInvalid 诊断，此处保留原样不崩溃）。
     /// 仲裁与独占资源声明都基于它。
     /// </summary>

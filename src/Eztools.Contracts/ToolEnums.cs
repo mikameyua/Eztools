@@ -51,6 +51,20 @@ public enum MenuInput
 
     /// <summary>以剪贴板文本为输入。由宿主读取并注入到 <c>args["input"]</c>，工具自行映射到自己的参数名。</summary>
     Clipboard,
+
+    /// <summary>
+    /// 以**资源管理器当前选中项**为输入。由宿主读取并注入到
+    /// <c>args["input"]</c>（string，首项路径；无选中项为 <c>""</c>）与
+    /// <c>args["inputPaths"]</c>（string[]，全部选中项，可为空数组）。
+    ///
+    /// **为什么 <c>input</c> 恒为字符串**：与 <see cref="Clipboard"/> 保持同一类型，
+    /// 避免"同一个键在不同声明下类型不同"——那正是 <c>JsonSerializer</c> 严格类型下
+    /// 最容易踩的坑。多选信息不丢，在 <c>inputPaths</c> 里。
+    ///
+    /// 拿不到选中项**不算错误**（前台不是资源管理器 / 宿主已提权都是常态），
+    /// 一律注入空值，由工具自己决定怎么提示。
+    /// </summary>
+    ShellSelection,
 }
 
 public static class ToolEnumExtensions
@@ -80,6 +94,7 @@ public static class ToolEnumExtensions
     public static string ToWire(this MenuInput i) => i switch
     {
         MenuInput.Clipboard => "clipboard",
+        MenuInput.ShellSelection => "shellSelection",
         _ => "none",
     };
 
@@ -152,6 +167,7 @@ public static class ToolEnumExtensions
             case "":
             case "none": input = MenuInput.None; return true;
             case "clipboard": input = MenuInput.Clipboard; return true;
+            case "shellselection": input = MenuInput.ShellSelection; return true;
             default: return false;
         }
     }

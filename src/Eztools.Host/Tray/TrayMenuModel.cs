@@ -19,7 +19,10 @@ public sealed class TrayMenuItem
     /// <summary>分组原始键（<c>menus[].group</c>）。空 = 直接挂在托盘顶层。</summary>
     public required string GroupKey { get; init; }
 
-    /// <summary>输入来源。菜单点击**没有上下文**，靠它决定要不要注入剪贴板内容。</summary>
+    /// <summary>
+    /// 输入来源。菜单/热键触发**本身没有上下文**，靠它决定宿主注入什么
+    /// （剪贴板文本 / 资源管理器当前选中项）。
+    /// </summary>
     public MenuInput Input { get; init; }
 
     /// <summary>
@@ -28,12 +31,34 @@ public sealed class TrayMenuItem
     /// 约定：取到的内容放进 <c>args["input"]</c>，**宿主不必知道各工具把参数叫什么名字**
     /// ——工具侧自己从 <c>args["input"]</c> 映射到 <c>text</c> / <c>path</c> …
     /// 这样避免"宿主硬编码参数名"的耦合（设计方案 §4.5 的"贡献点是加法"）。
+    ///
+    /// <see cref="MenuInput.ShellSelection"/> 的注入形状：<c>input</c> = 首项路径
+    /// （string，无选中项为 <c>""</c>），<c>inputPaths</c> = 全部选中项（string[]，可为空数组）。
+    /// **刻意不让 <c>input</c> 在两种声明下类型不同** —— 严格类型下
+    /// "同一个键两种类型"正是工具侧最容易踩的坑。
     /// </summary>
-    public JsonObject BuildArgs(string? clipboardText) => Input switch
+    public JsonObject BuildArgs(string? clipboardText, IReadOnlyList<string>? shellPaths = null) => Input switch
     {
         MenuInput.Clipboard => new JsonObject { ["input"] = clipboardText ?? string.Empty },
+        MenuInput.ShellSelection => BuildShellSelectionArgs(shellPaths),
         _ => new JsonObject(),
     };
+
+    private static JsonObject BuildShellSelectionArgs(IReadOnlyList<string>? paths)
+    {
+        var list = paths ?? Array.Empty<string>();
+        var array = new JsonArray();
+        foreach (var path in list)
+        {
+            array.Add(path);
+        }
+
+        return new JsonObject
+        {
+            ["input"] = list.Count > 0 ? list[0] : string.Empty,
+            ["inputPaths"] = array,
+        };
+    }
 
     public override string ToString() => $"{Title} [{CommandId}] input={Input.ToWire()}";
 }

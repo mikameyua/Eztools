@@ -30,10 +30,10 @@ internal sealed class TrayApplication : IDisposable
     private readonly NotifyIcon _icon;
 
     private EztoolsHost? _host;
-private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
+    private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
     private HotkeyHook? _hotkeys;
 
-        private bool _busy;
+    private bool _busy;
     private bool _disposed;
     private IDisposable? _eventSubscription;
 
@@ -513,7 +513,7 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
         {
             // 必须异步：工具的默认超时是 30s（lite 档），
             // 在 UI 线程同步等待会让托盘在这段时间里完全没响应（连菜单都打不开）。
-            var args = item.BuildArgs(ReadClipboardSafely());
+            var args = BuildInvocationArgs(item);
             var result = await _host!.Processes.InvokeCommandAsync(item.CommandId, args);
 
             var text = result.Result is null ? "（无返回值）" : JsonText.Write(result.Result, indented: false);
@@ -675,6 +675,9 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
         _hotkeyItems.Clear();
         var order = 0;
         var claims = new List<HotkeyClaim>();
+        // 声明的上下文来源（toolId:command → input）。仲裁只裁决"键归谁"，
+        // 不携带清单字段 —— 所以这里另建一张表，赢家再按它取声明的 Input。
+        var declaredInputs = new Dictionary<string, MenuInput>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (tool, hotkey, effective) in _host!.Registry.Hotkeys(_host.StateStore))
         {
@@ -686,6 +689,7 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
             }
 
             claims.Add(new HotkeyClaim(tool.Id, hotkey.Command, combo, order++));
+            declaredInputs[$"{tool.Id}:{hotkey.Command}"] = hotkey.Input;
         }
 
         var result = HotkeyArbitration.Arbitrate(claims);
@@ -703,13 +707,19 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
                 continue;
             }
 
+            // input：按清单声明注入。**未声明回落 Clipboard** —— 这是兼容默认值
+            //（ToolHotkey.Input 的缺省也是它）：热键命令可能没有 menus 项可继承声明
+            //（filehash.hash 正是这种），而热键路径历史上就一律注入剪贴板。
+            // 上面的 4 条热键注入断言（verify-desktop.py §2b）守的就是这个回落语义。
             _hotkeyItems[id.Value] = new TrayMenuItem
             {
                 ToolId = winner.ToolId,
                 CommandId = winner.Command,
                 Title = $"{winner.Combo.Normalized}（{winner.ToolId}）",
                 GroupKey = "hotkey",
-                Input = MenuInput.Clipboard, // 热键与托盘菜单同语义：剪贴板作为上下文注入
+                Input = declaredInputs.TryGetValue($"{winner.ToolId}:{winner.Command}", out var declared)
+                    ? declared
+                    : MenuInput.Clipboard,
             };
 
             // 注册成功 = 占住这个独占资源
@@ -881,7 +891,7 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
         }
 
         var item = model.Items[Math.Clamp(index, 0, model.Count - 1)];
-        return InvokeBlocking(item) ? 0 : 5;
+        return InvokeBlocking(item, out _) ? 0 : 5;
     }
 
     /// <summary>
@@ -905,25 +915,77 @@ private readonly Dictionary<int, TrayMenuItem> _hotkeyItems = new();
             return 6;
         }
 
-        var ok = InvokeBlocking(item);
+        var ok = InvokeBlocking(item, out var result);
+
+        // 结果落盘（UTF-8 无 BOM，与自检输出同一约定）：脚本据此断言
+        // "工具真的收到了注入的上下文"，而不只是"调用退出码为 0"。
+        if (_options.OutFile is { Length: > 0 } outFile)
+        {
+            try
+            {
+                File.WriteAllText(
+                    outFile,
+                    (result ?? new JsonObject()).ToJsonString(),
+                    new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                _host!.Log.Warn($"热键探针写 {outFile} 失败：{ex.Message}", "selfcheck");
+            }
+        }
+
         _host!.Log.Info(
             $"热键探针 {commandId}（input={item.Input.ToWire()}）→ {(ok ? "成功" : "失败")}", "selfcheck");
         return ok ? 0 : 5;
     }
 
     /// <summary>
+    /// 按条目声明的 <c>Input</c> 取上下文并构造调用参数。
+    ///
+    /// 为什么单独一个助手：取上下文本身有代价（读剪贴板 / 枚举 Shell 窗口），
+    /// **只应按声明取需要的那一种**。这里集中"取什么"，
+    /// <see cref="TrayMenuItem.BuildArgs"/> 保持纯映射（只做"内容 → args"的形状转换）。
+    /// </summary>
+    private JsonObject BuildInvocationArgs(TrayMenuItem item) => item.Input switch
+    {
+        MenuInput.ShellSelection => item.BuildArgs(null, ReadShellSelectionLogged()),
+        _ => item.BuildArgs(ReadClipboardSafely()),
+    };
+
+    /// <summary>
+    /// 读 Shell 选中项并留痕。"拿不到"是常态而非异常（按空注入），
+    /// 但**原因必须进日志** —— 否则"为什么速览拿不到文件"只能靠猜。
+    /// </summary>
+    private IReadOnlyList<string> ReadShellSelectionLogged()
+    {
+        var paths = ShellSelectionReader.ReadForegroundSelection();
+        if (ShellSelectionReader.LastError is { } reason)
+        {
+            _host?.Log.Info($"未取得资源管理器选中项（按空注入）：{reason}", "tray");
+        }
+
+        return paths;
+    }
+
+    /// <summary>
     /// 同步触发一次（自动化用）。**只在没有消息循环时可用** ——
     /// 一旦 <c>Application.Run</c> 跑起来，在 UI 线程同步等待异步调用就会死锁。
+    ///
+    /// <paramref name="result"/> 带回工具的原始返回值（调用失败为 null）——
+    /// 热键探针要把它写进 <c>--out</c>：shellSelection 注入的观测量是工具返回的
+    /// <c>recorded / paths</c>，只看退出码分不清"拿到 1 项"和"什么都没拿到"。
     /// </summary>
-    private bool InvokeBlocking(TrayMenuItem item)
+    private bool InvokeBlocking(TrayMenuItem item, out JsonObject? result)
     {
+        result = null;
         try
         {
-            var args = item.BuildArgs(ReadClipboardSafely());
-            var result = _host!.Processes.InvokeCommandAsync(item.CommandId, args).GetAwaiter().GetResult();
+            var args = BuildInvocationArgs(item);
+            var invocation = _host!.Processes.InvokeCommandAsync(item.CommandId, args).GetAwaiter().GetResult();
 
             _host.Log.Info(
-                $"自动触发 {item.CommandId} 成功，用时 {result.Elapsed.TotalMilliseconds:F0}ms", "selfcheck");
+                $"自动触发 {item.CommandId} 成功，用时 {invocation.Elapsed.TotalMilliseconds:F0}ms", "selfcheck");
+            result = invocation.Result as JsonObject;
             return true;
         }
         catch (Exception ex)

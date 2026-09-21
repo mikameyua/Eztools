@@ -467,11 +467,32 @@ public static class ManifestParser
                         $"热键引用了本工具未声明的命令 '{command}'");
                 }
 
+                // input：**未声明（null/空）= Clipboard** —— 兼容默认，不是随手取的：
+                // 热键路径历史上就一律注入剪贴板，且热键命令可能没有 menus 项可继承声明
+                //（filehash.hash 正是这种）。
+                // 🔴 不能把 TryParseMenuInput 的"缺省 = None"语义直接落到字段上 ——
+                //    那会把"未声明"静默变成"不注入"，工具侧表现为"缺少参数"。
+                //    （verify-desktop.py §2b 的两条热键断言守的就是这个语义。）
+                // 只有"写了但不认识"才警告 —— 与 menus / weight / lifecycle 同口径。
+                var hkInputRaw = Str(hotkeyObj, "input");
+                MenuInput hkInput;
+                if (string.IsNullOrWhiteSpace(hkInputRaw))
+                {
+                    hkInput = MenuInput.Clipboard;
+                }
+                else if (!ToolEnumExtensions.TryParseMenuInput(hkInputRaw, out hkInput))
+                {
+                    hkInput = MenuInput.Clipboard;
+                    Warn(DiagnosticCodes.MenuUnknownInput,
+                        $"热键 '{command}' 的 input '{hkInputRaw}' 无法识别，按 clipboard 处理（可选 none / clipboard / shellSelection）");
+                }
+
                 hotkeys.Add(new ToolHotkey
                 {
                     Command = command,
                     Default = def,
                     Title = Str(hotkeyObj, "title"),
+                    Input = hkInput,
                     Resolved = HotkeyCombo.TryParse(def),
                 });
             }
@@ -510,7 +531,7 @@ public static class ManifestParser
                     if (!string.IsNullOrWhiteSpace(inputRaw))
                     {
                         Warn(DiagnosticCodes.MenuUnknownInput,
-                            $"菜单项 '{command}' 的 input '{inputRaw}' 无法识别，按 none 处理（可选 none / clipboard）");
+                            $"菜单项 '{command}' 的 input '{inputRaw}' 无法识别，按 none 处理（可选 none / clipboard / shellSelection）");
                     }
                 }
 
