@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Eztools.Host</RootNamespace>
+    <AssemblyName>Eztools.Host</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Eztools.Contracts\Eztools.Contracts.csproj" />
+  </ItemGroup>
+
+  <!--
+    宿主框架库（P0 的主体）。
+    刻意做成类库而不是可执行文件：P1 的 WinUI 3 设置应用与 P0 的 ezt CLI 都直接引用它，
+    UI 与宿主同进程零 IPC（设计方案 §3 分层原则）。
+
+    零第三方依赖：只用 BCL（含 .NET 7 的 System.Formats.Tar，用于运行时载荷解压）。
+  -->
+
+</Project>

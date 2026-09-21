@@ -1,0 +1,50 @@
+<Project>
+
+  <!--
+    全仓统一的构建属性。
+    注意 CodePage=65001：本仓所有源码为 UTF-8 无 BOM，必须显式告知 Roslyn 按 UTF-8 解码，
+    否则中文注释/字面量在非英文区域设置下可能被按 ANSI 代码页解出乱码。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      LangVersion 刻意**不固定**，跟随 TFM（net10.0 → C# 14）。
+
+      P0 时钉死过 LangVersion=11，但**在 .NET 10 SDK 下会直接编译失败**：
+      SDK 自带的 System.Text.RegularExpressions.Generator 生成的代码用了"集合表达式"，
+      要求 C# 12+，报 `error CS9058: 功能"集合表达式"在 C# 11.0 中不可用`。
+      （ConsoleUi.cs 用了 [GeneratedRegex]，正好会走到这个生成器。）
+
+      ⇒ 教训：升 TFM 不是"只改一个数字"。**SDK 自带的源码生成器会跟着 SDK 走**，
+        它们的产出可能要求更新的语言版本。这类报错发生在 obj/ 下的生成文件里，
+        不在你的源码里，第一眼很容易以为是自己的代码有问题。
+    -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <CodePage>65001</CodePage>
+    <NeutralLanguage>zh-Hans</NeutralLanguage>
+    <Product>Eztools</Product>
+    <Company>Eztools</Company>
+    <Version>0.1.0</Version>
+    <Copyright>Eztools</Copyright>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+  </PropertyGroup>
+
+  <!--
+    ★ 目标框架：net10.0（2026-09-19 由 net7.0 升上来）
+
+    为什么非升不可：.NET 7 是 STS，**2024-05-14 就终止支持了**；
+    .NET 8（LTS）与 .NET 9 同时在 2026-11-10 终止。唯一合理的落点是 .NET 10（LTS，支持到 2028-11-14）。
+
+    SDK 位置：**便携安装**在 D:\dotnet10（`C:\Program Files\dotnet` 不可写，故没并入系统）。
+      D:/dotnet10/dotnet.exe build Eztools.sln
+    .NET 10 自带 Microsoft.WindowsDesktop.App，所以 WPF 在这条路上同样可用。
+
+    LangVersion 见上面的说明：不固定，跟随 TFM 走。
+  -->
+  <PropertyGroup>
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+  </PropertyGroup>
+
+</Project>

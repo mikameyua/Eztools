@@ -1,0 +1,39 @@
+# ── 构建产物 ──
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ── 运行时载荷（体积大，不入库；由 scripts/make-payload.* 生成）──
+payload/
+
+# ── 便携分发包（体积大 ~87MB，不入库；由 scripts/make-portable.sh 生成）──
+dist/
+
+# ── spike 实验目录（1300+ 文件，含大量可重生成产物，整体不入库）──
+spike/
+
+# ── Python ──
+__pycache__/
+*.pyc
+.venv/
+
+# ── 本机临时 ──
+_scratch/
+_verify/
+_review/
+*.log
+
+# ── 参照克隆（PowerToys 上游源码，仅作对照阅读，不入库）──
+# 它是独立 git 仓库且含 6500+ 文件；不排除的话 `git add .` 会把它整个吞进去。
+PowerToys/
+
+# ── 本地记忆与工具配置（含项目级 memory / 自动化，不入库）──
+.workbuddy/
+
+# ── 兜底：散落的构建产物 ──
+*.dll
+*.pdb
+*.so
+*.dylib

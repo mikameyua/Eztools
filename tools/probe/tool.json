@@ -1,0 +1,26 @@
+{
+  "id": "probe",
+  "name": "诊断探针",
+  "version": "0.2.0",
+  "description": "探测工具进程的真实运行环境（隔离是否生效、编码是否可控），并提供崩溃/挂起自检钩子供 ezt selftest 使用",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "transient",
+  "needs": [],
+  "contributes": {
+    "commands": [
+      { "id": "probe.env", "title": "查看工具运行环境", "handler": "env", "description": "输出 sys.path / 隔离标志 / 编码状态，用于排查环境不一致" },
+      { "id": "probe.echo", "title": "回显", "handler": "echo" },
+      { "id": "probe.storage", "title": "私有存储往返", "handler": "storage", "description": "写入后读回，验证 host.storage 双向通路与数据目录分离" },
+      { "id": "probe.crash", "title": "主动崩溃（自检用）", "handler": "crash", "description": "立即终止进程，验证宿主的崩溃检测与熔断" },
+      { "id": "probe.hang", "title": "挂起（自检用）", "handler": "hang", "description": "长时间不返回，验证宿主的超时回收" },
+      { "id": "probe.delegate", "title": "转调其他工具的命令", "handler": "delegate", "description": "通过 host.invokeTool 调用另一个工具的命令，验证工具间协作通路与归属校验" },
+      { "id": "probe.selfCall", "title": "自调用（应被拒绝）", "handler": "self_call", "description": "试图调用自己，验证调用链环检测：必须回 -32004 而不是挂起" },
+      { "id": "probe.progress", "title": "尝试上报进度（应被拒绝）", "handler": "progress", "description": "host.progress 按设计方案 §5.3 仅对 lifecycle: task 开放，本工具是 transient，应回 -32005" },
+      { "id": "probe.notify", "title": "请求弹通知", "handler": "notify", "description": "调用 host.notify 并把宿主回的 delivered 原样带回，验证通知通道是按宿主能力如实回报而非恒定值" }
+    ]
+  }
+}

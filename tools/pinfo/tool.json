@@ -1,0 +1,25 @@
+{
+  "id": "pinfo",
+  "name": "进程信息",
+  "version": "0.1.0",
+  "description": "列出系统进程 —— P3 特权原语的端到端示例（工具 → 宿主 → Core 全链路）",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "transient",
+  "needs": ["system.inspect"],
+  "elevatedPrimitives": ["process.enumerate"],
+  "contributes": {
+    "commands": [
+      { "id": "pinfo.list", "title": "列出进程", "handler": "list", "description": "经特权原语返回进程列表（可按名称过滤）" }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "properties": {
+      "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20, "title": "返回条数上限" }
+    }
+  }
+}

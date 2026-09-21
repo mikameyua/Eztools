@@ -1,0 +1,53 @@
+{
+  "id": "paneltool",
+  "name": "面板演示",
+  "version": "0.1.0",
+  "description": "P4 Wave 2c 验收工具：声明一个面板，按协议返回全部 6 种节点类型，用于验证面板数据通道与渲染",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "full",
+  "lifecycle": "transient",
+  "needs": ["ui.panel"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "paneltool.ping",
+        "title": "探活",
+        "handler": "ping",
+        "description": "返回固定字符串，供面板按钮回调断言"
+      }
+    ],
+    "panels": [
+      {
+        "id": "main",
+        "title": "面板演示",
+        "description": "验证 6 种节点类型的渲染",
+        "width": 720,
+        "height": 520,
+        "refreshMs": 0,
+        "commands": ["paneltool.ping"]
+      },
+      {
+        "id": "empty",
+        "title": "空面板",
+        "description": "返回空 nodes，验证「无内容」路径",
+        "width": 400,
+        "height": 300
+      },
+      {
+        "id": "weird",
+        "title": "含未知节点",
+        "description": "节点里混入一个未识别的 type，验证宿主跳过而不整包失败",
+        "width": 500,
+        "height": 360
+      },
+      {
+        "id": "broken",
+        "title": "格式错误面板",
+        "description": "返回非对象，验证宿主的容错路径（不崩溃）"
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "keepalive",
+  "name": "常驻探针",
+  "version": "0.1.0",
+  "description": "resident 生命周期验收工具：进程常驻，ping 返回自身 pid 与调用计数，crash 故意崩溃用于验证自动重启与熔断",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "resident",
+  "needs": [],
+  "contributes": {
+    "commands": [
+      {
+        "id": "keepalive.ping",
+        "title": "探活",
+        "handler": "ping",
+        "description": "返回 pid 与调用计数（同进程应递增）"
+      },
+      {
+        "id": "keepalive.crash",
+        "title": "故意崩溃",
+        "handler": "crash",
+        "description": "以退出码 3 结束进程，验证宿主自动重启与熔断"
+      }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "properties": {}
+  }
+}

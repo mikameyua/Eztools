@@ -1,0 +1,28 @@
+{
+  "id": "my-tool",
+  "name": "我的工具",
+  "version": "0.1.0",
+  "description": "一句话说明这个工具做什么",
+  "author": "菲比",
+
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "transient",
+
+  "needs": ["files.userSelected"],
+
+  "contributes": {
+    "commands": [
+      { "id": "my-tool.run", "title": "运行", "handler": "run" }
+    ]
+  },
+
+  "config": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean", "default": true, "title": "启用" }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Eztools.Contracts</RootNamespace>
+    <AssemblyName>Eztools.Contracts</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    契约层：零第三方依赖，只有 BCL。
+    宿主、CLI、将来的 WinUI 设置应用、测试都引用它。
+    这里放"工具与宿主之间达成一致的东西"：清单模型、贡献点、协议方法名、帧模型。
+  -->
+
+</Project>

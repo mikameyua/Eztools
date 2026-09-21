@@ -1,0 +1,35 @@
+{
+  "id": "oneshot",
+  "name": "单发工具",
+  "version": "0.1.0",
+  "description": "weight: script 档的参考实现：每次调用起一个进程、用完即退，只有基础 API（日志 / 通知），无依赖、无设置界面",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "script",
+  "lifecycle": "transient",
+  "needs": [],
+  "contributes": {
+    "commands": [
+      {
+        "id": "oneshot.echo",
+        "title": "回显（基础 API）",
+        "handler": "echo",
+        "description": "只走 host.log 与返回值，验证 script 档的正常路径"
+      },
+      {
+        "id": "oneshot.storage",
+        "title": "尝试用私有存储（应被拒绝）",
+        "handler": "storage",
+        "description": "script 档按设计方案 §5.1 只提供基础 API，宿主应回 -32005"
+      },
+      {
+        "id": "oneshot.call",
+        "title": "尝试调用其他工具（应被拒绝）",
+        "handler": "call",
+        "description": "同上：host.invokeTool 对 script 档关闭"
+      }
+    ]
+  }
+}

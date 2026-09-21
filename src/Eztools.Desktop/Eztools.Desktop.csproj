@@ -1,0 +1,69 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Eztools.Desktop</RootNamespace>
+    <AssemblyName>Eztools.Desktop</AssemblyName>
+    <RollForward>LatestMajor</RollForward>
+
+    <!-- 覆盖 Directory.Build.props 里的 net10.0：托盘要 WinForms -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- P1b 设置窗口：WPF 与 WinForms 同进程（2026-09-19 探针实测共存成立，见设计文档 §2.1 注） -->
+    <UseWPF>true</UseWPF>
+
+    <!-- exe 自身的图标（资源管理器里显示的那个） -->
+    <ApplicationIcon>assets\eztools.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Eztools.Host\Eztools.Host.csproj" />
+  </ItemGroup>
+
+  <!--
+    托盘图标单独嵌一份资源。为什么不复用 exe 的关联图标：
+    ExtractAssociatedIcon 只给一个尺寸，高 DPI 下会被拉糊；
+    从流里用 new Icon(stream, SystemInformation.SmallIconSize) 才能让系统按 DPI 挑合适的那一档。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="assets\eztools.ico" LogicalName="eztools.ico" />
+  </ItemGroup>
+
+  <!--
+    两个 UI 栈同开时，SDK 会同时注入 WinForms（System.Windows.Forms / System.Drawing）与
+    WPF（System.Windows / System.Windows.Controls …）的全局 using，类型名大量重名
+    （Application / CheckBox / MessageBox …）—— 探针实测每个文件都编译不过（CS0104）。
+    约定：全局只保留 WPF 的；WinForms / Drawing 由各文件显式 using（与既有代码一致），
+    两栈混用的文件用 `WinForms.` 别名消歧。
+  -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <!--
+      实测注意（SDK 10.0.401）：同时开 UseWPF + UseWindowsForms 时，基座隐式 using 集合
+      **不含 System.IO**（生成文件只有 System/Collections.Generic/Linq/Threading/Tasks 五条）——
+      与 .NET 7 时代的记忆不同，别凭印象假设 System.IO 还在全局里。
+    -->
+    <Using Include="System.IO" />
+    <!-- 两栈混用的文件统一用 `WinForms.` / `Drawing.` 别名引用（全局别名，文件里不用再声明） -->
+    <Using Include="System.Windows.Forms" Alias="WinForms" />
+    <Using Include="System.Drawing" Alias="Drawing" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="iNKORE.UI.WPF.Modern" Version="0.10.2.1" />
+  </ItemGroup>
+
+  <!--
+    P2 的桌面宿主（托盘 + 将来的设置窗口）。
+
+    与 Eztools.Cli 的**职责分界**（这不是偏好，是平台约束）：
+      · Cli 是控制台 Exe（OutputType=Exe）—— 改成 WinExe 会让它所有命令行输出消失
+      · 本项是 GUI 宿主（WinExe）—— 改成 Exe 会顶着一个黑窗常驻
+    一个项目只能取一个 OutputType，所以两者必须分开。
+
+    注意：**框架依赖**形态下运行需要机器上有 .NET 10 运行时
+    （开发期 `DOTNET_ROOT=D:\dotnet10`）。自包含/裁剪的体积与取舍见
+    docs/P2-托盘-实施方案.md §1.4。
+  -->
+
+</Project>

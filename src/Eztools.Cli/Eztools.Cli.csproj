@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Eztools.Cli</RootNamespace>
+    <!-- 可执行文件名就是命令名：ezt -->
+    <AssemblyName>ezt</AssemblyName>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Eztools.Host\Eztools.Host.csproj" />
+  </ItemGroup>
+
+  <!--
+    P0 的可运行入口。
+    刻意先做 CLI 而不是 WinUI：
+      · P0 的验收标准是"新增工具目录 → 宿主自动发现可用"，这件事与 UI 无关
+      · 本机未安装 WindowsAppRuntime（WinUI 3 依赖），P0 不该被 UI 依赖阻塞
+      · CLI 是验收测试最可靠的载体——可脚本化、可断言、可进 CI
+    P1 的 WinUI 设置应用会直接引用同一个 Eztools.Host，两者只是同一门面的不同前端。
+  -->
+
+</Project>

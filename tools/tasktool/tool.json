@@ -1,0 +1,27 @@
+{
+  "id": "tasktool",
+  "name": "启动任务",
+  "version": "0.1.0",
+  "description": "task 生命周期验收工具：常驻宿主启动时由宿主执行一次 startup 命令（写标记文件），验证启动钩子",
+  "author": "Eztools",
+  "runtime": "python",
+  "runtimeVersion": ">=3.11",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "task",
+  "needs": [],
+  "contributes": {
+    "commands": [
+      {
+        "id": "tasktool.startup",
+        "title": "启动任务",
+        "handler": "startup",
+        "description": "写标记文件（EZTOOLS_TASKTOOL_MARKER 指定路径），证明启动钩子执行过"
+      }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "properties": {}
+  }
+}

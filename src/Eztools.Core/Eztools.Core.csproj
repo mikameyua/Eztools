@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Eztools.Core</RootNamespace>
+    <!--
+      特权层必须是独立可执行文件（ ezt-core.exe ），不是宿主的一部分：
+      它是唯一的提权边界，边界必须在进程上成立（设计方案 §3 分层原则）。
+
+      TFM 用 net10.0-windows：命名管道 ACL（NamedPipeServerStreamAcl）与
+      WindowsIdentity 都是 Windows 专属 API。不带 -windows 的 net10.0 下这些类型
+      要靠 NuGet 补包且带平台告警，直接用 Windows TFM 最干净。
+      （Cli/Host 保持 net10.0 不动 —— 客户端连接命名管道不需要 ACL API。）
+    -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- 可执行文件名：ezt-core（与 ezt 并排放在安装根 bin 下） -->
+    <AssemblyName>ezt-core</AssemblyName>
+    <RollForward>LatestMajor</RollForward>
+    <!-- 句柄表 / USN 记录 / 令牌信息都要裸指针解析（结构体是变长的，Marshal 类不适用） -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Eztools.Contracts\Eztools.Contracts.csproj" />
+  </ItemGroup>
+
+  <!--
+    管道 ACL（PipeSecurity / NamedPipeServerStreamAcl）与 RunImpersonated 都在这个
+    程序集里 —— net10.0-windows 的引用包不含它，需要显式引用。
+  -->
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
+  </ItemGroup>
+
+  <!--
+    Core 特权原语服务（P3）。
+
+    职责（设计方案 §9）：
+      · 监听命名管道，执行**有限的第一方原语**（PrimitiveNames.Known）
+      · 三道安全闸：管道 ACL → 调用方身份/完整性校验 → 每原语参数校验
+      · 每条调用写审计日志（logs\audit-*.log）
+    红线：**工具代码永不进入本进程**（§9.3）。缺能力 = 新增一个原语，不开通用后门。
+
+    零第三方依赖：只用 BCL（Windows TFM 自带 Pipes.AccessControl / Principal.Windows）。
+  -->
+
+</Project>
