@@ -2111,3 +2111,62 @@ sha256 `d7e370c4…d6c206`。解压后 `bin/ezt.exe version` 在 **`DOTNET_ROOT`
 exit 0。P4 全部 Wave（1 / 2a / 2b / 2c）收官 —— 设计方案 §12 路线图里
 除 `search` 贡献点（仍标"未实现·未排期"）与项目自有工具的持续增补外，**P0~P4 无遗留**。
 
+> ⬆ 计数已过期：**当前 169 项**（速览 + 气泡摘要约定，见 §26，2026-09-22）。
+
+
+---
+
+## 26. 速览（preview）与气泡摘要约定（2026-09-21/22）
+
+### 26.1 上下文注入契约的第三个值：`input: shellSelection`
+
+`menus[].input` 原本只有 `none` / `clipboard`（宿主注入剪贴板文本）。速览需要一个
+**过去没有来源**的输入：文件资源管理器里"当前选中的文件"。落地方式是**扩既有契约**而不是
+新增协议方法 —— 少改三处（`ProtocolMethods` / 白名单 / 面板协议档位表），且"上下文从哪来"
+本就该是清单声明的事。
+
+| 位置 | 改动 |
+|---|---|
+| `ToolEnums.MenuInput` | 加 `ShellSelection`（`ToWire` = `shellSelection`） |
+| `ToolHotkey.Input` | 新增字段，**缺省 `Clipboard`**（兼容既有清单） |
+| `ManifestParser` | 解析 `hotkeys[].input`；**未声明 = 缺省回落**，只有"写了但不认识"才 Warn |
+| `TrayMenuModel.BuildArgs` | 按 `Input` 分支；`input` 恒为字符串 + `inputPaths` 数组 |
+| `ShellSelectionReader`（新增） | 纯 IDispatch 读前台 Explorer 选中项 |
+
+**实测推翻计划路线**：原计划照 PowerToys Peek 走 `IShellWindows` → `IShellBrowser` →
+`IFolderView`。但 Win11 上 `QueryService(SID_SShellBrowser)` 返回 **E_NOTIMPL**，
+整条路不可用。改为 `Shell.Application.Windows()` → 匹配前台 HWND →
+`Document.SelectedItems()`（`ShellFolderViewDual`）—— **零手写 COM**，
+且意外支持桌面图标选中。
+
+### 26.2 气泡摘要约定：优先 `result.hint`，无则回落 JSON
+
+**问题**：工具返回值是**协议载荷**，不是给人读的话。`preview.show` 的载荷轻松上百字符，
+内联进气泡会被 `Shorten(…, 240)` 拦腰截断 —— 用户看到的是断了头的 JSON。
+
+**约定**：返回值是对象且 `hint` 是**非空白字符串**时，气泡只显示 `hint`；否则回落整份 JSON 内联
+（兼容既有工具的短状态对象，如 `{"pong":true}`）。`hint` 非字符串（如对象）**不算数** ——
+静默 `ToString()` 成类型名不如显示 JSON 有用。
+
+意义：把"载荷"与"摘要"分开，**工具最清楚哪几个字有意义**，托盘不该去猜字段语义。
+约定只有一处实现（`TrayApplication.DescribeResult`）+ 一处声明（工具返回 `hint`）。
+
+### 26.3 验收（169 项全绿）
+
+| 段 | 条数 | 守什么 |
+|---|---|---|
+| `verify-desktop.py` §2b | 4 | 热键路径注入剪贴板（有热键无 menus ⇒ 回落默认值） |
+| §2c | 3 | `shellSelection` 真读到前台选中项（环境依赖，桌面忙时跳过并打现场） |
+| §2d | 6 | 气泡摘要：正向 2 · 回落 1 · 反向 2 · 两端口径一致 1 |
+
+**§2d 的判据经过两轮突变验证**（`"改成假值测试还会不会过"`）：
+
+1. 去掉 C# 侧 hint 分支 + shim 同款改动 → 正向 2 条红（167/2）✅
+2. shim 改成"无条件接受 `hint` 键" → 空白 hint 那条红；但**非字符串那条放行了** ——
+   因为原判据只查 `"weird" in d`，而把 dict 直接 `str()` 出来也含 `weird`。
+   **收紧为"解析后必须等于原对象，且不含 Python repr 特征（`'weird'` / `: 1`）"**，复验变红 ✅
+3. 收紧后 `json.loads` 在突变态会抛异常，**把后续 5 条断言整段断掉**（日志只剩 1 条 FAIL）——
+   那是"脚本崩了"而非"断言失败"，两者必须能分辨。加 `try/except` 兜底，保留 `d4_obj = None` 让断言自己说话。
+
+**教训**：反向断言的判据是"输出**长什么样**"，就必须写到格式级 ——
+"含某个子串"在字符串化输出面前几乎永远为真。

@@ -99,7 +99,7 @@ def open_external(args):
         raise FileNotFoundError(f"文件不存在（可能已被移动或删除）：{target}")
 
     os.startfile(target)  # noqa: S606 - Windows 专用，交给系统默认程序
-    return {"opened": target}
+    return {"opened": target, "hint": f"已用默认程序打开：{os.path.basename(target)}"}
 
 
 def _head_nodes(paths: list) -> list:

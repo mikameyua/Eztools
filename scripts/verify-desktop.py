@@ -44,6 +44,39 @@ def info(text: str) -> None:
     print(f"[信息] {text}")
 
 
+# ── 气泡摘要（result.hint）──────── 轻量 shim，避免为 5 行逻辑拉起整个 .NET 托盘 ──────────
+#
+# 为什么是"照抄规则"而不是"调真实代码"：TrayApplication.DescribeResult / Shorten 都是
+# private static，宿主进程又不接受"给我看一眼你会显示什么"这种请求（连气泡本身都
+# 可能被 Win11 勿扰静默丢弃，所以也不能靠观感判断）。这两条规则短且稳定，
+# 照抄的漂移风险由 §2d 第 ⑥ 条断言守：工具侧与托盘侧的键名必须同时在场。
+# 🔴 改 TrayApplication.DescribeResult 时必须同步这里 —— 否则断言会继续绿着骗人。
+class _TrayDesc:
+    """复刻 TrayApplication.#DescribeResult + #Shorten 的行为（口径见其 XML 注释）。"""
+
+    SEP = "…"
+
+    def shorten(self, text: str, max_len: int = 240) -> str:
+        flat = text.replace("\r", " ").replace("\n", " ").strip()
+        return flat if len(flat) <= max_len else flat[:max_len] + self.SEP
+
+    def describe(self, result) -> str:
+        if result is None:
+            return "（无返回值）"
+
+        # 与 C# 侧同一条护栏：hint 必须是 JSON 字符串，且去空白后非空
+        if isinstance(result, dict):
+            hint = result.get("hint")
+            if isinstance(hint, str) and hint.strip():
+                return hint
+
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _touch_tray_desc_module() -> _TrayDesc:
+    return _TrayDesc()
+
+
 def sh(cmd: list[str], **kw):
     """调外部命令。统一 errors='replace' —— tasklist/taskkill 的输出是系统 ANSI 代码页
     （中文 Windows 上是 GBK），按 UTF-8 解会抛 UnicodeDecodeError 并让 stdout 变成 None。"""
@@ -359,6 +392,70 @@ def main() -> int:
     finally:
         if os.path.exists(probe_out):
             os.remove(probe_out)
+
+    # ── 2d. ★ 气泡摘要约定：优先 result.hint，无则回落 JSON ─────────────────
+    #     气泡与调用结果**同一时刻生成、同一处截断**（Shorten(…, 240)），所以这里
+    #     用真的返回值 + 真的 Shorten 规则在 Python 侧重算一遍"气泡会显示什么"，
+    #     再断言它是给话人看的 hint，而不是被拦腰截断的 JSON。
+    #     为什么必须有：hint 一旦丢失（比如某次重构只改 TrayApplication 不改工具），
+    #     症状是"气泡里是断头 JSON"—— 功能没坏、退出码 0、日志照样有，没有任何测试会红。
+    desc = _touch_tray_desc_module()
+
+    # ① 正向：preview.show 空选中时的返回值 → 气泡该显示 hint 那段话本身
+    sample = {
+        "recorded": 0,
+        "hint": "未拿到选中项：请在资源管理器中选中文件后，再按 Ctrl+Alt+P（或托盘 → 速览选中的文件）",
+    }
+    d = desc.describe(sample)
+    ck("有 hint 时气泡显示 hint 原文（不外露 recorded 等协议字段）",
+       d == sample["hint"] and "recorded" not in d, repr(d[:120]))
+
+    # ② 关键：hint 与"240 字符截断"一起看 —— 这正是落 JSON 会翻车的场景。
+    #    判据 = 同一份载荷，走 hint 完整可见、走 JSON 内联会被截断（带 …）。
+    long_hint = "已记录 1 个文件。打开 托盘 → 面板 → 速览 查看；面板开着时按『刷新』换下一个文件"
+    payload = {
+        "recorded": 1,
+        "paths": ["D:/01-项目代码/Eztools/" + "很长的路径片段" * 30 + "/README.md"],
+        "hint": long_hint,
+    }
+    d2 = desc.describe(payload)
+    json_inline = desc.shorten(desc.describe({k: v for k, v in payload.items() if k != "hint"}))
+    ck("同一载荷：hint 完整进气泡，JSON 内联则被 240 字符截断（hint 的价值所在）",
+       d2 == long_hint and not d2.endswith("…") and json_inline.endswith("…"),
+       f"hint={d2[:60]!r}… json={json_inline[-20:]!r}")
+
+    # ③ 回落：既有工具（echo/filehash/wordcount）的短状态对象没有 hint，仍显示 JSON
+    d3 = desc.describe({"pong": True})
+    ck("无 hint 的旧工具回落显示 JSON（兼容既有工具，不显示『无返回值』）",
+       "pong" in d3 and "无返回值" not in d3, repr(d3))
+
+    # ④ 反向：hint 必须是**字符串**才算数；写成对象是工具写错了类型，不能 ToString 成类名。
+    #    判据必须严到"输出里不含裸类型名，且是被引号包起来的 JSON 值"——
+    #    只查 `"weird" in d4` 是不够的：把 dict 直接 str() 出来也含 weird（突变验证实测放行了）。
+    d4 = desc.describe({"hint": {"weird": 1}, "ok": True})
+    # 解析先做且带兜底：突变态下 describe 可能返回非 JSON 文本，直接 json.loads 会抛异常
+    # 把**后续断言整段断掉**（实测：突变验证时后面 5 条直接消失，只剩 1 条 FAIL）——
+    # 那是"测试脚本崩了"，不是"断言失败了"，两者在 CI 日志里必须能分辨。
+    try:
+        d4_obj = json.loads(d4)
+    except ValueError:
+        d4_obj = None
+    ck("反向：hint 非字符串时回落 JSON（不把对象 ToString 成类型名）",
+       d4_obj == {"hint": {"weird": 1}, "ok": True}
+       and "'weird'" not in d4 and ": 1" not in d4 and "JsonObject" not in d4,
+       repr(d4))
+
+    # ⑤ 反向：空/空白 hint 等同没有 —— 否则气泡会显示一片空白
+    d5 = desc.describe({"hint": "   ", "ok": True})
+    ck("反向：空白 hint 回落 JSON（不显示空白气泡）", "ok" in d5 and d5.strip() != "",
+       repr(d5))
+
+    # ⑥ 两端口径一致：工具返回值里带了 hint，且与托盘读的是同一个键名（防"改了工具没改宿主"）
+    preview_main = os.path.join(repo, "tools", "preview", "main.py")
+    with open(preview_main, encoding="utf-8") as fh:
+        src = fh.read()
+    ck("preview 工具的 show/openExternal 都返回 hint（与托盘读取的键名一致）",
+       src.count('"hint"') >= 2, f"count={src.count(chr(34) + 'hint' + chr(34))}")
 
     # ── 3. 单实例 ───────────────────────────────────────────────────────────
     subprocess.Popen([desktop, "--no-prompt"], env=env, cwd=repo,

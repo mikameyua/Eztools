@@ -20,7 +20,7 @@
 （6 种声明式节点 + 按钮复用 `tool.invoke`，`weight: full` 才可用，协议见
 [`docs/P4-Wave2c-面板协议.md`](docs/P4-Wave2c-面板协议.md)）。
 **两种形态都验证过**：从仓库运行（开发形态）与装到安装根后运行（已安装形态）。
-`scripts/acceptance.sh` 一键复现，**163 项全绿**
+`scripts/acceptance.sh` 一键复现，**169 项全绿**
 （85 基线 + P4 12 + 工程尾巴 7 + Wave 2a 1 + Wave 2b 19 + Wave 2c 24 + 托盘渲染 10
 + 热键注入 4 + 速览 1；速览选中项另有 2 条**环境依赖**断言，桌面被占用时自动跳过并打印现场）。
 
@@ -41,7 +41,7 @@ $E runtime install
 $E list                # 看有哪些工具
 $E invoke echo.echo --text 你好
 $E selftest            # 端到端自检
-bash scripts/acceptance.sh        # 功能验收：163+ 项（速览选中项断言依赖空闲桌面），可重复
+bash scripts/acceptance.sh        # 功能验收：169+ 项（速览选中项断言依赖空闲桌面），可重复
 bash scripts/budget.sh            # 轻量化预算：9 项断言（体积 / 内存 / 启动耗时），超限即非零退出
 $E doctor              # 体检：安装与来源 + 运行时 + 清单诊断
 

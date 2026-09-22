@@ -995,6 +995,37 @@ internal sealed class TrayApplication : IDisposable
         }
     }
 
+    /// <summary>
+    /// 把工具返回值渲染成**给人看的一行字**：优先取 <c>result.hint</c>（结果里的一段短文本），
+    /// 没有才回落成整份 JSON 内联。
+    ///
+    /// 为什么要有这个约定：工具返回值是**协议载荷**，不是给人读的话。`preview.show` 的载荷
+    /// 动辄上百字符（路径、大小、行数、面板 id…），内联进气泡会被 <see cref="Shorten"/> 拦腰截断，
+    /// 用户看到的是一段断了头的 JSON。约定"想让人看什么就放进 <c>hint</c>"，
+    /// 把"载荷"与"摘要"分开：**工具自己最清楚哪几个字有意义**，托盘不该去猜字段语义。
+    ///
+    /// 回落 JSON 是为了兼容既有工具（它们的返回值本来就是短状态对象，如 `{"pong":true}`）。
+    /// </summary>
+    private static string DescribeResult(JsonNode? result)
+    {
+        if (result is null)
+        {
+            return "（无返回值）";
+        }
+
+        // hint 必须是 JSON 字符串才算数：`{"hint": {"a":1}}` 这种是工具写错了字段类型，
+        // 静默内联成 JSON 比把对象 ToString() 成类名更有用。
+        if (result is JsonObject obj
+            && obj["hint"] is JsonValue hintValue
+            && hintValue.TryGetValue<string>(out var hint)
+            && !string.IsNullOrWhiteSpace(hint))
+        {
+            return hint;
+        }
+
+        return JsonText.Write(result, indented: false);
+    }
+
     private static string Shorten(string text, int max)
     {
         var flat = text.Replace("\r", " ").Replace("\n", " ").Trim();
