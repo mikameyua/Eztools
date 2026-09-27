@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Eztools.Index</RootNamespace>
+    <!-- 可执行文件名：ezt-index（Wave 3 的常驻索引进程，设计方案 §5.1 / W3 计划 W3-a-1） -->
+    <AssemblyName>ezt-index</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      引用契约层（零第三方依赖纪律与 Contracts 同源）。
+      ① W3-b-4 实现 search.* 协议时直接用帧模型与错误码（RPC 错误码已在用）；
+      ② 现阶段就引用 = Eztools.Contracts.dll 随解决方案构建一起落到 CLI bin/，
+         `ezt install` 的 bin/ 复制（LayoutInstaller 第 4 步的 dll/exe/json 过滤器）天然带上它
+         —— 这是 W3-a-1 验收③ 的落点（增量构建可能不拷新 DLL，验收跑 no-incremental 构建，S1 坑）。
+    -->
+    <ProjectReference Include="..\Eztools.Contracts\Eztools.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

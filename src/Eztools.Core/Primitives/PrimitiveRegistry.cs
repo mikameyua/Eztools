@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
 
@@ -74,6 +77,26 @@ public static class PrimitiveRegistry
                 RequireString(args, "volume"),
                 OptionalLong(args, "cursor"),
                 OptionalLong(args, "maxRecords"))),
+
+        // ── W3-c 同步层（USN journal；2026-09-24 特权评审：零提权读 USN 实测不可行
+        //    —— 卷设备 SD 不给非提权令牌数据访问权（err=5），FSCTL 在属性句柄上 err=1 ——
+        //    增量读取改为经提权 Core 原语，与 readMft 同族同审计）──
+        [PrimitiveNames.VolumeQueryJournal] = new(
+            PrimitiveNames.VolumeQueryJournal, Risk: "低", RequiresElevation: true,
+            (args, _) => VolumePrimitives.QueryJournal(RequireString(args, "volume"))),
+
+        [PrimitiveNames.VolumeReadUsn] = new(
+            PrimitiveNames.VolumeReadUsn, Risk: "中", RequiresElevation: true,
+            (args, _) => VolumePrimitives.ReadUsn(
+                RequireString(args, "volume"),
+                RequireLong(args, "journalId"),
+                RequireLong(args, "fromUsn"),
+                OptionalLong(args, "maxBytes"))),
+
+        [PrimitiveNames.VolumeWriteUsnClose] = new(
+            PrimitiveNames.VolumeWriteUsnClose, Risk: "中", RequiresElevation: true,
+            (args, _) => VolumePrimitives.WriteUsnClose(
+                RequireString(args, "volume"))),
     };
 
     // ── 参数校验帮手（每个原语的参数面在这里收口，Core 不信任转发层）──

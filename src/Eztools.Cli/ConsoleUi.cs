@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -205,6 +208,10 @@ internal static partial class ConsoleUi
     /// 否则会把制表符之类真的打进终端里。
     /// 代理对是连续两个 <c>\uXXXX</c>，逐字符还原后自然拼回完整的 emoji。
     /// </summary>
+    /// <summary>只还原"真转义"的 \uXXXX：前面紧挨着反斜杠的（即文本里字面出现的 \uXXXX，
+    /// 序列化时反斜杠已被转义为 \\）不还原 —— 否则会吃掉一层转义留下孤反斜杠，产出非法 JSON
+    /// （实测：detail 内嵌 ToJsonString() 输出时，Default 编码器的 \u5FC5 变成 \必，下游解析当场炸）。
+    /// 代价：字面 \uXXXX 文本不再被还原 —— 正确性优先于美观。</summary>
     private static string RestoreNonAsciiEscapes(string json) =>
         UnicodeEscapeRegex().Replace(json, match =>
         {
@@ -212,7 +219,7 @@ internal static partial class ConsoleUi
             return codePoint >= 0x80 ? ((char)codePoint).ToString() : match.Value;
         });
 
-    [System.Text.RegularExpressions.GeneratedRegex(@"\\u([0-9a-fA-F]{4})")]
+    [System.Text.RegularExpressions.GeneratedRegex(@"(?<!\\)\\u([0-9a-fA-F]{4})")]
     private static partial System.Text.RegularExpressions.Regex UnicodeEscapeRegex();
 
     public static void PrintJsonObject(JsonObject node) => PrintJson(node);

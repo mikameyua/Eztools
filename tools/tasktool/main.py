@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """tasktool —— task 生命周期验收工具。
 
 宿主启动钩子（RunStartupLifecycleAsync）执行 startup 命令：宿主审计日志出现

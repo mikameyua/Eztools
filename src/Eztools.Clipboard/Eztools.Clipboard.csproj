@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      W5-a 剪贴板原语层（W5-剪贴板-设计方案.md §3.1）：UI 归 Desktop、原语归本类库、脚本入口归 Cli。
+      net10.0-windows + UseWPF：读系统剪贴板走 System.Windows.Clipboard（WPF 自带，零新 UI 包），
+      它要求 STA 线程 —— 由 ClipboardReader 自建 STA 线程收口，调用方不关心自己的套间。
+      本类库刻意保持"无窗口"：Desktop 与 Cli 两种宿主都要能引用它（Eztools.Ocr 同款纪律）。
+    -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      SQLite + FTS5（D2 拍板：FTS5+trigram 一步到位，<3 字符 LIKE 兜底）。
+      微软官方包（MIT），bundle 自带 SQLite ≥3.4x，满足 trigram 分词要求的 ≥3.34。
+      已登记 THIRD-PARTY-NOTICES.md §2b / docs/参考来源.md §2.6。
+      ⚠️ 命名空间刻意叫 Eztools.ClipboardLib（程序集名仍是 Eztools.Clipboard）：
+         叫 Eztools.Clipboard 的话，Desktop 里所有裸写 `Clipboard.SetText` 的既有代码
+         会被绑到这个**命名空间**上（外层命名空间成员优先于 using 的类型）—— 实测 6 个编译错。
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

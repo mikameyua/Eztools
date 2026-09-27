@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
@@ -52,6 +55,9 @@ internal static unsafe class NativeInterop
     internal const uint ProcessQueryLimitedInformation = 0x1000;
     internal const uint GenericRead = 0x8000_0000;
 
+    /// <summary>GENERIC_WRITE（writeUsnClose 的 FSCTL 是写操作，句柄须带写访问）。</summary>
+    internal const uint GenericWrite = 0x4000_0000;
+
     // CreateFileW
     internal const uint FileShareReadWriteDelete = 0x0000_0007;
     internal const uint OpenExisting = 3;
@@ -72,6 +78,19 @@ internal static unsafe class NativeInterop
     //   （= 有符号 LONGLONG 的 **-1**）→ 过滤区间 [0,-1] 空集 → EOF(38)。
     //   HighUsn 改 long.MaxValue(0x7FFF_FFFF_FFFF_FFFF) 后单次返回 65400 字节真实记录。
     internal const uint FsctlEnumUsnData = 0x0009_00B3;
+
+    // ── W3-c 同步层（USN journal 三个控制码，设计方案 §2.1）──
+    // FSCTL_QUERY_USN_JOURNAL = CTL_CODE(9, 61, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x0009_00F4
+    internal const uint FsctlQueryUsnJournal = 0x0009_00F4;
+    // FSCTL_READ_USN_JOURNAL = CTL_CODE(9, 46, METHOD_NEITHER, FILE_ANY_ACCESS) = 0x0009_00BB
+    internal const uint FsctlReadUsnJournal = 0x0009_00BB;
+    // FSCTL_WRITE_USN_CLOSE_RECORD = CTL_CODE(9, 58, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x0009_00E8
+    internal const uint FsctlWriteUsnCloseRecord = 0x0009_00E8;
+
+    // journal 专用错误（VolumePrimitives 映射为 JournalUnavailable -32021）
+    internal const int ErrorJournalDeleteInProgress = 1178;
+    internal const int ErrorJournalNotActive = 1179;
+    internal const int ErrorJournalEntryDeleted = 1181;
 
     internal const uint ErrorHandleEof = 38;
 
@@ -138,6 +157,33 @@ internal static unsafe class NativeInterop
         public ulong StartFileReferenceNumber;
         public ulong LowUsn;
         public ulong HighUsn;
+    }
+
+    /// <summary>USN_JOURNAL_DATA（FSCTL_QUERY_USN_JOURNAL 的输出，7×8=56 B）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct UsnJournalDataV0
+    {
+        public ulong UsnJournalId;
+        public ulong FirstUsn;
+        public ulong NextUsn;
+        public ulong LowestValidUsn;
+        public ulong MaxUsn;
+        public ulong MaximumSize;
+        public ulong AllocationDelta;
+    }
+
+    /// <summary>READ_USN_JOURNAL_DATA_V1（FSCTL_READ_USN_JOURNAL 的输入，8+4+4+8+8+8+2+2=44 B）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ReadUsnJournalDataV1
+    {
+        public ulong StartUsn;
+        public uint ReasonMask;
+        public uint ReturnOnlyOnClose;
+        public ulong Timeout;
+        public ulong BytesToWaitFor;
+        public ulong UsnJournalId;
+        public ushort MinMajorVersion;
+        public ushort MaxMajorVersion;
     }
 
     /// <summary>USN_RECORD_V2 头部（记录体从偏移 0 起，文件名按 FileNameOffset 定位）。</summary>

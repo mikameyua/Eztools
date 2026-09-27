@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 namespace Eztools.Contracts;
 
 /// <summary>工具重量档位（决定进程怎么起、超时默认值）。见设计方案 §5.1。</summary>

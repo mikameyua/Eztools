@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      W4 屏幕 OCR（W4-屏幕OCR-设计方案.md §6）：
+      带 Windows SDK 版本号的 TFM 让 SDK 自动注入 WinRT 投影（Windows.Media.Ocr / Windows.Globalization），
+      **无需** Microsoft.Windows.CsWinRT 包（PowerToys 用 CsWinRT 是其 AOT + 中央 TFM 约束，本项目无此需求）。
+      仅本类库与 Eztools.Cli 升级 TFM；Eztools.Desktop 保持 net10.0-windows 不动（设计方案 §6）。
+    -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      GDI+ 截图 / 位图缩放 / 样图渲染都在这里用（PowerOCR.Core 同款依赖）。
+      windows TFM 不会自动带上 System.Drawing.Common（那需要 UseWindowsForms/UseWPF），
+      而本类库刻意保持"无 UI 栈"——Desktop 与 Cli 两种宿主都要能引用它。
+    -->
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>

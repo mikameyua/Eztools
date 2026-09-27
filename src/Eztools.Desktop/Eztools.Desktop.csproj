@@ -7,7 +7,13 @@
     <RollForward>LatestMajor</RollForward>
 
     <!-- 覆盖 Directory.Build.props 里的 net10.0：托盘要 WinForms -->
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!--
+      W4-b（2026-09-26，设计方案 §6 修订②）：升到带 SDK 版本的 windows TFM。
+      原因：遮罩窗（OcrOverlayWindow）要引用 Eztools.Ocr（net10.0-windows10.0.19041.0），
+      低 TFM 引用不了高 TFM —— 原计划"Desktop 保持 net10.0-windows 不动"被引用链推翻。
+      影响：输出路径 bin/Debug/<此TFM>，acceptance.sh / verify-desktop.py 的 Desktop 路径已同步。
+    -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <!-- P1b 设置窗口：WPF 与 WinForms 同进程（2026-09-19 探针实测共存成立，见设计文档 §2.1 注） -->
     <UseWPF>true</UseWPF>
@@ -18,6 +24,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Eztools.Host\Eztools.Host.csproj" />
+    <!-- W4-b：OCR 遮罩窗用的引擎/截图原语（引用链要求本项 TFM 同步升级，见上方注释） -->
+    <ProjectReference Include="..\Eztools.Ocr\Eztools.Ocr.csproj" />
+    <!-- W5-b：剪贴板历史面板。存储/捕获/隐私/直贴原语全在类库（UI 归 Desktop 的落位纪律） -->
+    <ProjectReference Include="..\Eztools.Clipboard\Eztools.Clipboard.csproj" />
   </ItemGroup>
 
   <!--

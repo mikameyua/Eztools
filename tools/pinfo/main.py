@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """pinfo —— 特权原语端到端示例（P3）。
 
 它演示的正确姿势（与设计方案 §9 对齐）：

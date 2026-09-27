@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "列出系统进程 —— P3 特权原语的端到端示例（工具 → 宿主 → Core 全链路）",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

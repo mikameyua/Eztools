@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -231,6 +234,44 @@ public static class ManifestParser
         {
             Warn(DiagnosticCodes.LatencyOnNonResident,
                 "latency=interactive 仅对 lifecycle=resident 有意义，当前将被忽略");
+        }
+
+        // ── recover 字段（§8.2 resident 强制要求的清单面；W3 P0-3，2026-09-24）──
+        //
+        // §8.2：resident 崩溃后宿主自动重启并调用 tool.recover 恢复现场（SDK 的
+        // __on_recover__ 钩子）。一个"看似常驻、实则无恢复"的 resident 是最危险的静默失败
+        // —— 崩溃后状态永远回不来，用户只觉得"怎么又从头开始了"，而清单解析毫无信号。
+        // 所以这一条 **fail-closed**：resident 且未声明 recover ⇒ **Error** ⇒ 清单整份出局
+        // （工具不注册），与"带 Error 不注册"的既有语义一致。
+        //
+        // ⚠️ S2 检查：本分支同时用到了 Error（上面的闸门）与 Warn（下面两个镜像告警）
+        //    两个出口 —— 不存在"Error 静默退化成 Warning"的通路。
+        var recoverDeclared = false;
+        var recoverRaw = obj["recover"];
+        if (recoverRaw is not null)
+        {
+            if (recoverRaw is JsonValue recoverVal && recoverVal.TryGetValue<bool>(out var recoverBool))
+            {
+                recoverDeclared = recoverBool;
+                if (recoverBool && lifecycle != ToolLifecycle.Resident)
+                {
+                    Warn(DiagnosticCodes.RecoverWithoutResident,
+                        "recover=true 仅对 lifecycle=resident 有意义，当前将被忽略");
+                }
+            }
+            else
+            {
+                // 写了但不是布尔 = 作者意图没被满足（多半想写 true），警告 + 按 false 处理；
+                // 若此刻恰好是 resident，下一行的闸门会接着报 Error —— 两诊断并存是正确语义。
+                Warn(DiagnosticCodes.RecoverNotBoolean, "recover 必须是布尔值，按未声明处理");
+            }
+        }
+
+        if (lifecycle == ToolLifecycle.Resident && !recoverDeclared)
+        {
+            Error(DiagnosticCodes.ResidentRequiresRecover,
+                "lifecycle=resident 必须声明 \"recover\": true（§8.2：宿主崩溃重启后调用 tool.recover "
+                + "恢复现场；工具需注册 SDK 的 on_recover 钩子）—— 带 Error 的清单不会注册");
         }
 
         // ── needs 收敛集校验 ──
@@ -493,6 +534,10 @@ public static class ManifestParser
                     Default = def,
                     Title = Str(hotkeyObj, "title"),
                     Input = hkInput,
+                    // opensPanel 的值先原样收下，**交叉校验放在 panels 解析之后** ——
+                    // 本循环跑在 ParsePanels 之前（445 vs 550 行），此处根本看不到面板清单；
+                    // 在这里校验只能得到"面板不存在"的假诊断。
+                    OpensPanel = Str(hotkeyObj, "opensPanel"),
                     Resolved = HotkeyCombo.TryParse(def),
                 });
             }
@@ -549,6 +594,12 @@ public static class ManifestParser
         // Error 级只在"结构性缺陷"上用（缺 id）；其余降级可用，一律 Warning。
         var panels = ParsePanels(node["panels"], commands, Warn, Error);
 
+        // ── hotkeys[].opensPanel 的交叉校验（必须在这里，不能在热键循环里）──
+        // 热键循环跑在 ParsePanels 之前，那时 panels 还是空的 ⇒ 在那边校验会把**每一条**合法声明
+        // 都判成"面板不存在"。这类"校验跑在数据就绪之前"的错，症状是满屏假诊断，
+        // 而真问题（真写了错面板名）反而被淹没。
+        hotkeys = ValidateHotkeyPanels(hotkeys, panels, Warn);
+
         return new ToolContributions
         {
             Commands = commands,
@@ -557,6 +608,58 @@ public static class ManifestParser
             Menus = menus,
             Panels = panels,
         };
+    }
+
+    /// <summary>
+    /// 校验 <c>hotkeys[].opensPanel</c> 引用的面板确实存在（本工具内、已声明）。
+    /// 非法引用**保留热键、清空该字段** —— 热键触发本身是好的，只是少了个副作用；
+    /// 若连热键都丢掉，用户会以为"键坏了"，而真相是"面板名写错了"。
+    /// </summary>
+    private static List<ToolHotkey> ValidateHotkeyPanels(
+        List<ToolHotkey> hotkeys,
+        List<ToolPanel> panels,
+        Action<string, string> warn)
+    {
+        List<ToolHotkey>? fixedList = null;
+
+        for (var i = 0; i < hotkeys.Count; i++)
+        {
+            var hotkey = hotkeys[i];
+            if (string.IsNullOrWhiteSpace(hotkey.OpensPanel))
+            {
+                continue;
+            }
+
+            var exists = panels.Exists(
+                p => string.Equals(p.Id, hotkey.OpensPanel, StringComparison.OrdinalIgnoreCase));
+
+            if (exists)
+            {
+                continue;
+            }
+
+            warn(DiagnosticCodes.HotkeyUnknownPanel,
+                $"热键 '{hotkey.Command}' 的 opensPanel '{hotkey.OpensPanel}' 不是本工具声明的面板，"
+                + "该字段已忽略（热键本身仍生效）");
+
+            // 首个非法项才复制：多数清单是合法的，避免无条件重建列表
+            if (fixedList is null)
+            {
+                fixedList = new List<ToolHotkey>(hotkeys);
+            }
+
+            fixedList[i] = new ToolHotkey
+            {
+                Command = hotkey.Command,
+                Default = hotkey.Default,
+                Title = hotkey.Title,
+                Input = hotkey.Input,
+                Resolved = hotkey.Resolved,
+                OpensPanel = null,
+            };
+        }
+
+        return fixedList ?? hotkeys;
     }
 
     /// <summary>

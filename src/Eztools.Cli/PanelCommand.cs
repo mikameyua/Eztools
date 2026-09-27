@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text;
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
@@ -54,7 +57,7 @@ internal static class PanelCommand
         try
         {
             var result = await host.Processes.PanelDataAsync(
-                toolId, panelId, reason: "open", ct: CancellationToken.None);
+                toolId, panelId, reason: PanelDataArgs.Reason.Open, ct: CancellationToken.None);
 
             if (cli.GetBool("json") || !cli.GetBool("text"))
             {
@@ -214,12 +217,43 @@ internal static class PanelCommand
 
         Console.WriteLine(sb.ToString().TrimEnd());
 
+        // ── 节点级校验（协议 §3.7.6）──
+        //
+        // 为什么由 CLI 的渲染路径顺手做：input 节点是**运行时产物**，清单解析期看不到它，
+        // 所以"key 必需 / key 重复 / submitCommandId 引用"这几条只能在拿到载荷之后判。
+        // CLI 是唯一一条"不依赖 GUI 就能跑通载荷"的路径 ⇒ 把它挂在这里，验收脚本就能断言。
+        // （见 docs/P4-Wave2c-面板协议.md §12.2 第 1 步：契约层先行，20.8 / 20.10。）
+        ReportNodeIssues(result);
+
         ConsoleUi.Info($"共 {nodes.Count} 个节点，耗时 {result.Elapsed.TotalMilliseconds:F0}ms");
     }
 
     /// <summary>
+    /// 把 <see cref="PanelNodeValidator"/> 发现的问题打出来。
+    ///
+    /// <b>为什么走 <c>Warn</c> 而不是 <c>Error</c></b>：节点级问题**不阻塞渲染**
+    /// （协议 §3.5：一个坏节点不该让整块面板白屏）。Error 那条流在本项目里意味着
+    /// "清单被拒绝注册"，用在这里会把严重度语义搞乱。
+    /// 严重度只体现在**文案**里（问题本身已经带 code 前缀，见下），
+    /// 于是断言只需匹配 `code`，不必依赖"警告/错误"这两个中文字。
+    ///
+    /// 注意 <see cref="ConsoleUi.Warn"/> 自带 <c>[警告]</c> 前缀，这里**不再重复加**。
+    /// </summary>
+    private static void ReportNodeIssues(PanelDataResult result)
+    {
+        // 已声明命令清单：用于 submitCommandId 的引用校验（口径同 §2.4）。
+        var declared = result.DeclaredCommandIds;
+        var issues = PanelNodeValidator.ValidateNodes(result.Data, declared);
+
+        foreach (var issue in issues)
+        {
+            ConsoleUi.Warn($"{issue.Code}: {issue.Message}");
+        }
+    }
+
+    /// <summary>
     /// 节点渲染（协议 §3.4 的 CLI 版）。
-    /// **简化实现**：只做缩进树，不追求与 WPF 视觉一致（协议 §11.6）。
+    /// **简化实现**：只做缩进树，不追求与 WPF 视觉一致（协议 §11 第 6 条）。
     /// 未知 type 也渲染出来而不是跳过 —— 命令行是排查工具，看见"工具发了个我不认识的节点"比看不见有用。
     /// </summary>
     private static void RenderNode(StringBuilder sb, JsonNode? node, int indent)
@@ -280,6 +314,37 @@ internal static class PanelCommand
 
             case "separator":
                 sb.AppendLine($"{pad}{new string('─', 24)}");
+                break;
+
+            case "input":
+                // 协议 §3.7.1 的 CLI 表示（20.1 的判据）。
+                //
+                // 为什么 `input` 必须在这里被"支持"，而 `image` 可以是"未知节点"：
+                // `image` 在终端里**真的画不出来** —— 报"未知节点"是诚实的；
+                // 而 `input` 能用一行文字完整表达（key + 当前值 + 占位提示），
+                // 报"未知节点"就纯粹是噪音，还会让 CLI 与 WPF 的渲染能力无谓地分叉。
+                //
+                // 值的引号：**总是加**。空串 `""` 与空格 `" "` 在无引号时长得一样 ——
+                // 而 20.6/20.3 恰恰要区分"没输入"和"输入了空白"。引号把这件事变得可见。
+                var key = Text(obj["key"]);
+                var inputValue = Text(obj["value"]);
+                var placeholder = Text(obj["placeholder"]);
+                var submitId = Text(obj["submitCommandId"]);
+
+                var line = new System.Text.StringBuilder();
+                line.Append($"{pad}[输入框 key={key} value=\"{inputValue}\"");
+                if (placeholder.Length > 0)
+                {
+                    line.Append($" placeholder=\"{placeholder}\"");
+                }
+
+                if (submitId.Length > 0)
+                {
+                    line.Append($" submit={submitId}");
+                }
+
+                line.Append(']');
+                sb.AppendLine(line.ToString());
                 break;
 
             default:

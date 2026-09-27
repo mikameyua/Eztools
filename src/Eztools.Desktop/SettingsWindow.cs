@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,10 +22,21 @@ namespace Eztools.Desktop;
 ///    窗口只负责"控件 ↔ 字符串"的翻译。CLI 的 <c>ezt config set</c> 与本窗口改的是同一个文件。
 /// 3. **WPF 跑在 WinForms 消息循环上**（托盘是 WinForms 的）—— 用 <c>ShowDialog</c> 的模态泵，
 ///    这是两栈互操作里最稳的一条路（探针实测共存成立）。
+/// 4. **宿主设置节**（W4-c，FR-9）—— 构造时可选传入一个 <see cref="HostSettingsSection"/>
+///    （桌面宿主的热键 / OCR 语言），渲染与保存与工具配置走**同一条** ConfigStore 链路；
+///    保存成功后经回调通知托盘重读/重注册热键（"改键立即生效"）。
 /// </summary>
 public sealed class SettingsWindow : Window
 {
+    /// <summary>
+    /// 宿主设置节描述：固定 id（进 ConfigStore 的"伪工具"）+ 显示名 + schema 工厂。
+    /// schema 用工厂而不是实例 —— JsonNode 挂过父不能复用，每次取新副本最稳（§四.4）。
+    /// </summary>
+    public sealed record HostSettingsSection(string Id, string Title, Func<JsonObject> SchemaFactory);
+
     private readonly EztoolsHost _host;
+    private readonly HostSettingsSection? _hostSection;
+    private readonly Action? _hostSettingsSaved;
     private readonly ListBox _toolList;
     private readonly StackPanel _fieldPanel;
     private readonly TextBlock _header;
@@ -30,10 +44,13 @@ public sealed class SettingsWindow : Window
     private readonly Button _saveButton;
     private readonly Button _resetButton;
     private RegisteredTool? _selected;
+    private HostSettingsSection? _activeHostSection;
 
-    public SettingsWindow(EztoolsHost host)
+    public SettingsWindow(EztoolsHost host, HostSettingsSection? hostSection = null, Action? hostSettingsSaved = null)
     {
         _host = host;
+        _hostSection = hostSection;
+        _hostSettingsSaved = hostSettingsSaved;
 
         Title = "Eztools 设置";
         Width = 760;
@@ -141,6 +158,13 @@ public sealed class SettingsWindow : Window
     private void PopulateToolList()
     {
         _toolList.Items.Clear();
+
+        // 宿主设置节（W4-c）：固定放列表最上 —— 它是全局设置，优先级高于任何单个工具。
+        if (_hostSection is not null)
+        {
+            _toolList.Items.Add(new HostItem(_hostSection));
+        }
+
         foreach (var tool in _host.Registry.Tools.Where(t => t.Manifest.ConfigSchema is not null).OrderBy(t => t.Manifest.Name))
         {
             _toolList.Items.Add(new ToolItem(tool));
@@ -158,20 +182,43 @@ public sealed class SettingsWindow : Window
 
     private void OnToolSelected()
     {
+        _selected = null;
+        _activeHostSection = null;
+        _fieldPanel.Children.Clear();
+
+        // 宿主设置节（W4-c）：与工具配置走**同一条** Load/渲染/Save 链路，只是目标不同。
+        if (_toolList.SelectedItem is HostItem hostItem)
+        {
+            _activeHostSection = hostItem.Section;
+            _header.Text = hostItem.Section.Title;
+            var hostSchemaJson = hostItem.Section.SchemaFactory();
+            var hostSnapshot = _host.Configs.Load(hostItem.Section.Id, hostSchemaJson);
+            _hint.Text = $"桌面宿主的全局设置（热键 / OCR 语言等），对所有工具生效。配置文件：{hostSnapshot.FilePath}";
+            RenderSnapshot(hostSnapshot, ConfigSchema.FromJson(hostSchemaJson));
+            return;
+        }
+
         if (_toolList.SelectedItem is not ToolItem item)
         {
             return;
         }
 
         _selected = item.Tool;
-        _fieldPanel.Children.Clear();
         _header.Text = item.Tool.Manifest.Name;
         _hint.Text = $"ID：{item.Tool.Manifest.Id}    配置文件：{_host.Configs.ConfigPath(item.Tool.Manifest.Id)}";
 
         var manifest = item.Tool.Manifest;
         var schema = ConfigSchema.FromJson(manifest.ConfigSchema);
         var snapshot = _host.Configs.Load(manifest.Id, manifest.ConfigSchema);
+        RenderSnapshot(snapshot, schema);
+    }
 
+    /// <summary>
+    /// 快照渲染（孤键告警 / 损坏恢复告警 / 字段行）—— 工具配置与宿主设置共用（W4-c 抽出）。
+    /// 两条路径共用渲染是刻意的：宿主设置若另写一套，"schema → 控件"映射就会分叉漂移。
+    /// </summary>
+    private void RenderSnapshot(ConfigSnapshot snapshot, ConfigSchema schema)
+    {
         foreach (var orphan in snapshot.OrphanKeys)
         {
             _fieldPanel.Children.Add(WarnBar(
@@ -318,7 +365,7 @@ public sealed class SettingsWindow : Window
     //    ② 保存期间禁用按钮 —— await 让出 UI 线程期间窗口仍可交互，不挡的话双击"保存"会并发两次。
     private async void Save()
     {
-        if (_selected is null)
+        if (_selected is null && _activeHostSection is null)
         {
             return;
         }
@@ -344,13 +391,14 @@ public sealed class SettingsWindow : Window
 
     private async Task SaveCoreAsync()
     {
-        if (_selected is null)
+        // 当前配置目标：宿主设置节（W4-c）或选中的工具。两者共用同一条 ConfigStore 写入链。
+        var configId = _activeHostSection?.Id ?? _selected?.Manifest.Id;
+        var schemaJson = _activeHostSection?.SchemaFactory() ?? _selected?.Manifest.ConfigSchema;
+        if (configId is null)
         {
             return;
         }
 
-        var toolId = _selected.Manifest.Id;
-        var schemaJson = _selected.Manifest.ConfigSchema;
         var errors = new List<string>();
         var changed = 0;
 
@@ -373,14 +421,14 @@ public sealed class SettingsWindow : Window
                 if (string.IsNullOrWhiteSpace(raw))
                 {
                     // 空值 = 恢复该字段的默认值（从文件里拿掉，让 Effective 回落）
-                    if (_host.Configs.Unset(toolId, key))
+                    if (_host.Configs.Unset(configId, key))
                     {
                         changed++;
                     }
                 }
                 else
                 {
-                    var result = _host.Configs.Set(toolId, schemaJson, key, raw);
+                    var result = _host.Configs.Set(configId, schemaJson, key, raw);
                     if (result.Ok)
                     {
                         changed++;
@@ -405,13 +453,17 @@ public sealed class SettingsWindow : Window
 
         // 变更推送给常驻工具。当前全是 transient（每次调用重起、天然拿新值），
         // 推送会立即完成并返回 false —— 这是通路验证，不报错即可。
-        try
+        // 宿主设置节（desktop）不是工具、没有进程可推 —— 跳过（推了也只是噪音）。
+        if (_activeHostSection is null)
         {
-            await _host.Processes.PushConfigAsync(toolId);
-        }
-        catch (Exception ex)
-        {
-            _host.Log.Error($"配置变更推送失败（{toolId}）：{ex.Message}", "settings");
+            try
+            {
+                await _host.Processes.PushConfigAsync(configId);
+            }
+            catch (Exception ex)
+            {
+                _host.Log.Error($"配置变更推送失败（{configId}）：{ex.Message}", "settings");
+            }
         }
 
         // 顺序有讲究：先重载快照（OnToolSelected 会把 _hint 重置成配置路径），
@@ -419,13 +471,22 @@ public sealed class SettingsWindow : Window
         OnToolSelected();
         if (changed > 0)
         {
-            _hint.Text = $"已保存 {changed} 项（{DateTime.Now:HH:mm:ss}）。transient 工具下次调用即生效。";
+            _hint.Text = _activeHostSection is not null
+                ? $"已保存 {changed} 项（{DateTime.Now:HH:mm:ss}）。热键已重新注册，OCR 语言下次唤出生效。"
+                : $"已保存 {changed} 项（{DateTime.Now:HH:mm:ss}）。transient 工具下次调用即生效。";
+
+            // 宿主设置保存成功 → 通知托盘重读生效值并重注册热键（W4-c FR-9"保存即生效"）。
+            // 放在 changed>0 分支里：什么都没改时不必重注册（也避免一次多余的气泡）。
+            if (_activeHostSection is not null)
+            {
+                _hostSettingsSaved?.Invoke();
+            }
         }
     }
 
     private void ResetToDefaults()
     {
-        if (_selected is null)
+        if (CurrentConfigId is null)
         {
             return;
         }
@@ -437,19 +498,23 @@ public sealed class SettingsWindow : Window
 
         // 配置被 Reset 改名备份（不裸删），但确认框仍然要问：
         // "恢复默认"是破坏性操作，多一次点击的成本远低于误点的损失。
+        var targetName = _activeHostSection?.Title ?? _selected?.Manifest.Name ?? CurrentConfigId!;
         var answer = MessageBox.Show(this,
-            $"确定要恢复 {_selected.Manifest.Name} 的全部默认配置吗？\n\n（当前配置会备份为 .reset-backup-* 文件，不会丢失）",
+            $"确定要恢复 {targetName} 的全部默认配置吗？\n\n（当前配置会备份为 .reset-backup-* 文件，不会丢失）",
             "恢复默认", MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (answer != MessageBoxResult.OK)
         {
             return;
         }
 
-        _host.Configs.Reset(_selected.Manifest.Id);
+        _host.Configs.Reset(CurrentConfigId!);
         OnToolSelected();
     }
 
-    private bool HasSavedConfig => _selected is not null && _host.Configs.HasSavedConfig(_selected.Manifest.Id);
+    /// <summary>当前配置目标（宿主设置节或选中工具）的 id；两个都不是时为 null。</summary>
+    private string? CurrentConfigId => _activeHostSection?.Id ?? _selected?.Manifest.Id;
+
+    private bool HasSavedConfig => CurrentConfigId is not null && _host.Configs.HasSavedConfig(CurrentConfigId);
 
     /// <summary>字段行里唯一可编辑的控件（warn 条没有 editor，返回 null 跳过）。</summary>
     private static FrameworkElement? FindEditor(UIElement row) => row switch
@@ -475,6 +540,7 @@ public sealed class SettingsWindow : Window
     ///
     /// 供 <c>--selfcheck</c> 自动化断言（§7 的 schema → 控件映射是否真的落地）。
     /// 不 Show 窗口 —— WPF 控件允许在未显示的窗口上构建（Main 已是 STA 线程）。
+    /// 宿主设置节（W4-c）同样以 <c>设置清单 &lt;id&gt;: …</c> 格式输出，验收断言无差别消费。
     /// </summary>
     internal IReadOnlyList<string> InventoryForSelfCheck()
     {
@@ -485,7 +551,7 @@ public sealed class SettingsWindow : Window
             _toolList.SelectedIndex = i; // SelectionChanged → OnToolSelected → 同步渲染
             if (_toolList.SelectedItem is not ToolItem item)
             {
-                continue;
+                continue;   // 宿主节（HostItem）在下面单独报
             }
 
             var editors = _fieldPanel.Children.Cast<UIElement>()
@@ -496,6 +562,21 @@ public sealed class SettingsWindow : Window
             lines.Add($"设置清单 {item.Tool.Manifest.Id}: {string.Join(", ", editors)}");
         }
 
+        // 宿主设置节（W4-c）：与工具同格式 —— 断言面统一，消费者不用区分两种来源。
+        if (_hostSection is not null)
+        {
+            _toolList.SelectedItem = _toolList.Items.OfType<HostItem>().FirstOrDefault();
+            if (_toolList.SelectedItem is HostItem)
+            {
+                var hostEditors = _fieldPanel.Children.Cast<UIElement>()
+                    .Select(FindEditor)
+                    .OfType<FrameworkElement>()
+                    .Where(e => FieldKey.Get(e) is not null)
+                    .Select(e => $"{FieldKey.Get(e)}={e.GetType().Name}");
+                lines.Add($"设置清单 {_hostSection.Id}: {string.Join(", ", hostEditors)}");
+            }
+        }
+
         return lines;
     }
 
@@ -504,4 +585,51 @@ public sealed class SettingsWindow : Window
     {
         public override string ToString() => Tool.Manifest.Name;
     }
+
+    /// <summary>左侧列表的宿主设置节项（W4-c）。</summary>
+    private sealed record HostItem(HostSettingsSection Section)
+    {
+        public override string ToString() => Section.Title;
+    }
+
+    // ── 探针入口（W4-c 真机项自动化）────────────────────────────────────────
+    // 先例与纪律：InventoryForSelfCheck 已证明"WPF 控件允许在未显示的窗口上构建"
+    // （Main 是 STA 线程），探针据此可以不 Show 对话框而走完整的数据链路。
+
+    /// <summary>
+    /// 探针：装配列表并选中宿主设置节（不 Show 窗口）。
+    /// 宿主节不存在时返回 false（探针据此报"构造时没传宿主节"）。
+    /// </summary>
+    internal bool ProbeSelectHostSection()
+    {
+        PopulateToolList();
+        var hostItem = _toolList.Items.OfType<HostItem>().FirstOrDefault();
+        if (hostItem is null)
+        {
+            return false;
+        }
+
+        _toolList.SelectedItem = hostItem;   // SelectionChanged → OnToolSelected → 同步渲染
+        return _activeHostSection is not null;
+    }
+
+    /// <summary>探针：按配置键找编辑器并设值（只支持 string 类型的 TextBox —— 宿主节全是）。</summary>
+    internal bool ProbeSetField(string key, string value)
+    {
+        var editor = _fieldPanel.Children
+            .Cast<UIElement>()
+            .Select(FindEditor)
+            .OfType<FrameworkElement>()
+            .FirstOrDefault(e => FieldKey.Get(e) == key);
+        if (editor is not TextBox textBox)
+        {
+            return false;
+        }
+
+        textBox.Text = value;
+        return true;
+    }
+
+    /// <summary>探针：走真实保存链（校验 → ConfigStore.Set → 回调）。同步等待（保存路径无真 await）。</summary>
+    internal Task ProbeSaveAsync() => SaveCoreAsync();
 }

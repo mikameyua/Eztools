@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
 using Eztools.Host;
@@ -64,6 +67,17 @@ internal static class ConfigCommand
                 });
             }
 
+            // 宿主设置节（W4-c）：desktop 保留节与工具配置一样"用户改的、有 schema、该被看见"，
+            // list 里必须有它 —— 否则用户从 CLI 视角根本发现不了宿主设置的存在。
+            var hostSnap = host.Configs.Load(HostSettingsSchema.SectionId, HostSettingsSchema.SchemaJson());
+            rows.Add(new[]
+            {
+                HostSettingsSchema.SectionId,
+                hostSnap.Schema.Fields.Count.ToString(),
+                host.Configs.HasSavedConfig(HostSettingsSchema.SectionId) ? "是" : "—",
+                "（宿主设置：热键 / OCR 语言）",
+            });
+
             if (cli.GetBool("json"))
             {
                 var arr = new JsonArray();
@@ -80,6 +94,17 @@ internal static class ConfigCommand
                     });
                 }
 
+                var hostSnapJson = host.Configs.Load(HostSettingsSchema.SectionId, HostSettingsSchema.SchemaJson());
+                arr.Add(new JsonObject
+                {
+                    ["toolId"] = HostSettingsSchema.SectionId,
+                    ["fieldCount"] = hostSnapJson.Schema.Fields.Count,
+                    ["hasSaved"] = host.Configs.HasSavedConfig(HostSettingsSchema.SectionId),
+                    ["effective"] = hostSnapJson.Effective.DeepClone(),
+                    ["orphanKeys"] = new JsonArray(hostSnapJson.OrphanKeys.Select(k => (JsonNode)JsonValue.Create(k)!).ToArray()),
+                    ["isHostSection"] = true,
+                });
+
                 ConsoleUi.PrintJson(arr);
                 return 0;
             }
@@ -95,13 +120,13 @@ internal static class ConfigCommand
             return 0;
         }
 
-        // 单个工具的明细
-        if (!host.Registry.TryGetTool(toolId, out var one))
+        // 单个工具的明细（desktop 保留节同样可查 —— W4-c 宿主设置）
+        if (!TryResolveSchema(host, toolId, out var detailSchema))
         {
             return NotFound(toolId);
         }
 
-        var detail = host.Configs.Load(toolId, one.Manifest.ConfigSchema);
+        var detail = host.Configs.Load(toolId, detailSchema);
 
         if (!detail.Schema.HasFields)
         {
@@ -170,12 +195,12 @@ internal static class ConfigCommand
         }
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out var tool))
+        if (!TryResolveSchema(host, toolId, out var getSchema))
         {
             return NotFound(toolId);
         }
 
-        var snap = host.Configs.Load(toolId, tool.Manifest.ConfigSchema);
+        var snap = host.Configs.Load(toolId, getSchema);
 
         if (string.IsNullOrWhiteSpace(key))
         {
@@ -225,12 +250,13 @@ internal static class ConfigCommand
         var rawValue = string.Join(" ", valueParts);
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out var tool))
+        if (!TryResolveSchema(host, toolId, out var setSchema))
         {
             return NotFound(toolId);
         }
 
-        var result = host.Configs.Set(toolId, tool.Manifest.ConfigSchema, key, rawValue);
+        var isHostSection = HostSettingsSchema.IsSectionId(toolId);
+        var result = host.Configs.Set(toolId, setSchema, key, rawValue);
         if (!result.Ok)
         {
             ConsoleUi.Error(result.Error!);
@@ -252,13 +278,24 @@ internal static class ConfigCommand
 
         ConsoleUi.Ok($"已写入 {toolId}.{key} = {snapshot}");
 
-        // 主动说清"什么时候生效"——否则会出现"我改了配置怎么没生效"的困惑
-        ConsoleUi.Info(tool.Manifest.Lifecycle == ToolLifecycle.Resident
-            ? "该工具是 resident：宿主会推送变更（属 P2，P1a 只交付通路）"
-            : $"该工具是 {tool.Manifest.Lifecycle.ToWire()}：下次调用即生效（每次调用都会重起进程）");
+        // 主动说清"什么时候生效"——否则会出现"我改了配置怎么没生效"的困惑。
+        // desktop 保留节不是工具，生效语义也不同：热键由托盘在保存/刷新时重注册，
+        // OCR 语言在下次唤出屏幕取字时读取。
+        if (isHostSection)
+        {
+            ConsoleUi.Info("宿主设置：热键在托盘下次「刷新菜单」或设置窗口保存后重新注册；OCR 语言下次唤出屏幕取字生效");
+        }
+        else
+        {
+            // 走到这里时 toolId 必在 Registry（TryResolveSchema 已把非工具非 desktop 的 id 挡在 NotFound）
+            _ = host.Registry.TryGetTool(toolId, out var tool);
+            ConsoleUi.Info(tool!.Manifest.Lifecycle == ToolLifecycle.Resident
+                ? "该工具是 resident：宿主会推送变更（属 P2，P1a 只交付通路）"
+                : $"该工具是 {tool.Manifest.Lifecycle.ToWire()}：下次调用即生效（每次调用都会重起进程）");
+        }
 
         // 若已落盘值与 schema 默认值相同，提示一下（文件里会留一条冗余项，但这是刻意的）
-        var field = ConfigSchema.FromJson(tool.Manifest.ConfigSchema).Field(key);
+        var field = ConfigSchema.FromJson(setSchema).Field(key);
         if (field?.Default is not null && ConfigValues.SameValue(field.Default, result.Value))
         {
             ConsoleUi.Info($"该值等于 schema 里的默认值；它仍会被保留在文件中（这样你能看出是自己设过的）");
@@ -277,7 +314,7 @@ internal static class ConfigCommand
         }
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out _))
+        if (!TryResolveSchema(host, toolId, out _))
         {
             return NotFound(toolId);
         }
@@ -301,7 +338,7 @@ internal static class ConfigCommand
         }
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out _))
+        if (!TryResolveSchema(host, toolId, out _))
         {
             return NotFound(toolId);
         }
@@ -327,7 +364,7 @@ internal static class ConfigCommand
         }
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out _))
+        if (!TryResolveSchema(host, toolId, out _))
         {
             return NotFound(toolId);
         }
@@ -344,12 +381,12 @@ internal static class ConfigCommand
         }
 
         await using var host = await Program.CreateHostAsync(cli, echoLog: false);
-        if (!host.Registry.TryGetTool(toolId, out var tool))
+        if (!TryResolveSchema(host, toolId, out var resolvedSchema))
         {
             return NotFound(toolId);
         }
 
-        var schema = tool.Manifest.ConfigSchema;
+        var schema = resolvedSchema;
         if (schema is null)
         {
             ConsoleUi.Error($"工具 {toolId} 没有声明 config schema");
@@ -361,6 +398,29 @@ internal static class ConfigCommand
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 解析配置目标的 schema 来源：工具清单优先；<b>desktop 保留节</b>（W4-c）回落到
+    /// <see cref="HostSettingsSchema.SchemaJson"/>。后者让宿主设置（热键 / OCR 语言）
+    /// 在 CLI 与设置窗口两个入口改的是同一个文件 —— 缺了 CLI 这一半，闭环就名存实亡。
+    /// </summary>
+    private static bool TryResolveSchema(EztoolsHost host, string toolId, out JsonObject? schemaJson)
+    {
+        if (host.Registry.TryGetTool(toolId, out var tool))
+        {
+            schemaJson = tool.Manifest.ConfigSchema;
+            return true;
+        }
+
+        if (HostSettingsSchema.IsSectionId(toolId))
+        {
+            schemaJson = HostSettingsSchema.SchemaJson();
+            return true;
+        }
+
+        schemaJson = null;
+        return false;
+    }
 
     private static JsonObject BuildDetailJson(ConfigSnapshot snap)
     {

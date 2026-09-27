@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -22,10 +25,20 @@ public static class PrimitiveNames
     /// <summary>读 MFT / USN 记录（中风险，需要管理员）。</summary>
     public const string VolumeReadMft = "volume.readMft";
 
+    /// <summary>查 USN journal 元信息（中风险，需要管理员；W3-c 同步层，2026-09-24 特权评审新增）。</summary>
+    public const string VolumeQueryJournal = "volume.queryJournal";
+
+    /// <summary>读 USN 变更流一批（中风险，需要管理员；≤1MB/次，同 readMft 的"防灌爆"口径）。</summary>
+    public const string VolumeReadUsn = "volume.readUsn";
+
+    /// <summary>写 USN close 记录（心跳；中风险，需要管理员）。</summary>
+    public const string VolumeWriteUsnClose = "volume.writeUsnClose";
+
     /// <summary>Core 当前实现的原语全集 —— 宿主侧用它区分"未声明"与"Core 版本过旧"。</summary>
     public static readonly IReadOnlyList<string> Known = new[]
     {
         ProcessEnumerate, ProcessTerminate, HandlesEnumerate, VolumeEnumerate, VolumeReadMft,
+        VolumeQueryJournal, VolumeReadUsn, VolumeWriteUsnClose,
     };
 }
 
@@ -65,6 +78,12 @@ public static class PrimitiveErrorCodes
 
     /// <summary>参数在语义上被拒绝（如结束关键系统进程 —— 不同于格式错误的 InvalidParams）。</summary>
     public const int PrimitiveDenied = -32018;
+
+    /// <summary>
+    /// USN journal 不可用（未开启 / 删除中 / 条目已删，Win32 1178/1179/1181）。
+    /// W3-c 同步层按此判"该卷静态快照"；消息带原 Win32 码。
+    /// </summary>
+    public const int JournalUnavailable = -32021;
 }
 
 /// <summary>

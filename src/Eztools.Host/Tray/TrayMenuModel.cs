@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
 
@@ -24,6 +27,18 @@ public sealed class TrayMenuItem
     /// （剪贴板文本 / 资源管理器当前选中项）。
     /// </summary>
     public MenuInput Input { get; init; }
+
+    /// <summary>
+    /// 调用**成功后**自动带到前台的面板 id（来自 <c>hotkeys[].opensPanel</c>，菜单项恒为 null）。
+    ///
+    /// 放在托盘条目上而不是让工具自己请求：本项目**没有**"工具操纵宿主 UI"的协议方法，
+    /// 也不该为这一点开（那会让任意工具都能弹宿主窗口）。而"这条热键顺带开哪个面板"
+    /// 是清单本来就写得下的事，宿主读清单即可。
+    ///
+    /// 语义是"**成功后**"而非"触发即"：拿不到上下文时用户该先看到那句解释
+    /// （如速览的"请先选中文件"），而不是收到一个空面板。
+    /// </summary>
+    public string? OpensPanel { get; init; }
 
     /// <summary>
     /// 按声明的输入来源构造调用参数。

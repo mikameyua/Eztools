@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """回显工具：协议往返、UTF-8 编码与大 payload 的活体探针。
 
 这个工具刻意保持极简——它是 `ezt selftest` 的基准工具，用来证明"链路本身是通的"。

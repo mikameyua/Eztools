@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """协议层：分帧、编码、方法名常量、错误类型。
 
 三条硬约束（都是 spike 实测踩出来的，见 spike/README.md）：

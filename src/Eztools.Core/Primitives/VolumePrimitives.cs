@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.Json.Nodes;
@@ -239,6 +242,250 @@ public static unsafe class VolumePrimitives
 
     // ── 帮手 ──
 
+    /// <summary>提权校验 + 开卷句柄（GENERIC_READ；readMft/queryJournal/readUsn 共用；写原语传 writeAccess 加 GENERIC_WRITE）。</summary>
+    private static IntPtr OpenVolumeElevated(string volume, string primitiveName, bool writeAccess = false)
+    {
+        if (!IsElevated())
+        {
+            throw new PrimitiveException(
+                PrimitiveErrorCodes.ElevationRequired,
+                $"{primitiveName} 需要提权的 Core（管理员令牌）。"
+                + "用 `ezt core start --elevate` 或计划任务形态启动后重试。");
+        }
+
+        var volPath = NormalizeVolume(volume);
+        var handle = NativeInterop.CreateFileW(
+            volPath,
+            NativeInterop.GenericRead | (writeAccess ? NativeInterop.GenericWrite : 0),
+            NativeInterop.FileShareReadWriteDelete,
+            IntPtr.Zero,
+            NativeInterop.OpenExisting,
+            0,
+            IntPtr.Zero);
+
+        if (handle == (IntPtr)(-1))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw error switch
+            {
+                5 => new PrimitiveException(
+                    PrimitiveErrorCodes.ElevationRequired,
+                    $"打开 {volPath} 被拒绝（访问被拒）—— 需要 Core 以管理员运行"),
+                _ => new PrimitiveException(
+                    RpcErrorCodes.InternalError, $"打开 {volPath} 失败（Win32 错误 {error}）"),
+            };
+        }
+
+        return handle;
+    }
+
+    /// <summary>journal 专用 Win32 错误 → 结构化 JournalUnavailable（1178/1179/1181）；其余原样 InternalError。</summary>
+    private static PrimitiveException JournalError(string op, int error)
+    {
+        if (error is NativeInterop.ErrorJournalDeleteInProgress
+            or NativeInterop.ErrorJournalNotActive
+            or NativeInterop.ErrorJournalEntryDeleted)
+        {
+            return new PrimitiveException(
+                PrimitiveErrorCodes.JournalUnavailable,
+                $"{op} 失败：journal 不可用（Win32 {error}）");
+        }
+
+        return new PrimitiveException(RpcErrorCodes.InternalError, $"{op} 失败（Win32 错误 {error}）");
+    }
+
+    /// <summary>
+    /// 查 USN journal 元信息（W3-c-3 启动对账第一步，设计方案 §4.2）。
+    /// journal 未开启/删除中 ⇒ 结构化 JournalUnavailable（-32021），调用方按"静态快照"处理。
+    /// </summary>
+    public static JsonNode QueryJournal(string volume)
+    {
+        var volPath = NormalizeVolume(volume);
+        var handle = OpenVolumeElevated(volPath, "volume.queryJournal");
+        try
+        {
+            var data = new NativeInterop.UsnJournalDataV0();
+            uint returned;
+            bool ok;
+            unsafe
+            {
+                ok = NativeInterop.DeviceIoControl(
+                    handle, NativeInterop.FsctlQueryUsnJournal,
+                    null, 0,
+                    &data, (uint)sizeof(NativeInterop.UsnJournalDataV0),
+                    out returned, IntPtr.Zero);
+            }
+
+            if (!ok)
+            {
+                throw JournalError("FSCTL_QUERY_USN_JOURNAL", Marshal.GetLastWin32Error());
+            }
+
+            return new JsonObject
+            {
+                ["volume"] = volPath,
+                ["journalId"] = (JsonNode)(long)data.UsnJournalId,
+                ["firstUsn"] = (JsonNode)(long)data.FirstUsn,
+                ["nextUsn"] = (JsonNode)(long)data.NextUsn,
+                ["lowestValidUsn"] = (JsonNode)(long)data.LowestValidUsn,
+            };
+        }
+        finally
+        {
+            NativeInterop.CloseHandle(handle);
+        }
+    }
+
+    /// <summary>
+    /// 读 USN 变更流一批（W3-c-1）。BytesToWaitFor=0 ⇒ 立即返回（不阻塞不忙等）；
+    /// maxBytes 钳制 [4KB, 1MB]（同 readMft 的"防单次调用灌爆"口径）。reason/attributes
+    /// 原样透传（位掩码，由调用方做位与判断）；frn/parent 与 readMft 同款剥高 16 位序号。
+    /// </summary>
+    public static JsonNode ReadUsn(string volume, long journalId, long fromUsn, long? maxBytes)
+    {
+        if (journalId <= 0)
+        {
+            throw new PrimitiveException(
+                RpcErrorCodes.InvalidParams, $"journalId 必须为正整数（收到 {journalId}）");
+        }
+
+        var volPath = NormalizeVolume(volume);
+        var handle = OpenVolumeElevated(volPath, "volume.readUsn");
+        try
+        {
+            var req = new NativeInterop.ReadUsnJournalDataV1
+            {
+                StartUsn = (ulong)fromUsn,
+                ReasonMask = 0xFFFF_FFFF,   // 全收；过滤是调用方的事
+                ReturnOnlyOnClose = 0,
+                Timeout = 0,
+                BytesToWaitFor = 0,         // 0 = 读到当前尾立即返回
+                UsnJournalId = (ulong)journalId,
+                MinMajorVersion = 2,
+                MaxMajorVersion = 2,
+            };
+
+            var output = new byte[(int)Math.Clamp(maxBytes ?? 0x1_0000, 0x1000, 0x10_0000)];
+            var records = new JsonArray();
+            long nextUsn;
+
+            fixed (byte* outPtr = output)
+            {
+                uint returned;
+                bool ok;
+                unsafe
+                {
+                    ok = NativeInterop.DeviceIoControl(
+                        handle, NativeInterop.FsctlReadUsnJournal,
+                        &req, (uint)sizeof(NativeInterop.ReadUsnJournalDataV1),
+                        outPtr, (uint)output.Length,
+                        out returned, IntPtr.Zero);
+                }
+
+                if (!ok)
+                {
+                    throw JournalError("FSCTL_READ_USN_JOURNAL", Marshal.GetLastWin32Error());
+                }
+
+                // 输出 = 8 B NextUsn + USN_RECORD_V2 逐条紧排
+                if (returned < sizeof(ulong))
+                {
+                    throw new PrimitiveException(
+                        RpcErrorCodes.InternalError,
+                        $"FSCTL_READ_USN_JOURNAL 返回 {returned} 字节（不足 8 字节游标）");
+                }
+
+                nextUsn = *(long*)outPtr;
+                var offset = sizeof(ulong);
+                while (offset + UsnRecordV2HeaderSize <= returned)
+                {
+                    var record = (NativeInterop.UsnRecordV2*)(outPtr + offset);
+                    if (record->RecordLength < UsnRecordV2HeaderSize
+                        || offset + record->RecordLength > returned)
+                    {
+                        break;   // 过短/越界 = 布局异常，停止（防漂移，同 ParseRecords）
+                    }
+
+                    var nameLength = record->FileNameLength / sizeof(char);
+                    if (nameLength > 0)
+                    {
+                        var name = new string(
+                            (char*)(outPtr + offset + record->FileNameOffset), 0, nameLength);
+                        records.Add(new JsonObject
+                        {
+                            ["usn"] = (JsonNode)(long)record->Usn,
+                            ["frn"] = (JsonNode)(long)(record->FileReferenceNumber & FrnMask),
+                            ["parent"] = (JsonNode)(long)(record->ParentFileReferenceNumber & FrnMask),
+                            ["reason"] = (JsonNode)(long)record->Reason,
+                            ["attributes"] = (JsonNode)(long)record->FileAttributes,
+                            ["name"] = name,
+                        });
+                    }
+
+                    offset += (int)record->RecordLength;
+                }
+            }
+
+            return new JsonObject
+            {
+                ["volume"] = volPath,
+                ["nextUsn"] = (JsonNode)nextUsn,
+                ["count"] = records.Count,
+                ["records"] = records,
+            };
+        }
+        finally
+        {
+            NativeInterop.CloseHandle(handle);
+        }
+    }
+
+    /// <summary>
+    /// 心跳：对句柄强制产生一条 CLOSE 记录（W3-c-1）。
+    /// ⚠️ API 契约（winioctl.h 实证修正，2026-09-25）：
+    /// ① FSCTL_WRITE_USN_CLOSE_RECORD **不接收输入缓冲区**（lpInBuffer=NULL, nInBufferSize=0）
+    ///   ——初版把 journalId 塞进输入缓冲是凭空发明（err=87）；
+    /// ② 该 FSCTL **只支持文件/目录句柄**（OSR + 旧版 MSDN "handle to the file or directory"；
+    ///   现代 learn 文档参数表 "handle to volume" 与实测矛盾——卷句柄上 err=1 INVALID_FUNCTION）。
+    /// 本原语按卷句柄形态实现 = 恒失败（结构化 err=1 经 JournalError 透传），
+    /// 心跳按 S9 偏差显式降级（journal 删除风险由 ReadUsn NotActive 分支覆盖，不引入每卷标记文件）。
+    /// </summary>
+    public static JsonNode WriteUsnClose(string volume)
+    {
+        var volPath = NormalizeVolume(volume);
+        var handle = OpenVolumeElevated(volPath, "volume.writeUsnClose", writeAccess: true);
+        try
+        {
+            ulong usnWritten;
+            uint returned;
+            bool ok;
+            unsafe
+            {
+                ok = NativeInterop.DeviceIoControl(
+                    handle, NativeInterop.FsctlWriteUsnCloseRecord,
+                    null, 0,
+                    &usnWritten, sizeof(ulong),
+                    out returned, IntPtr.Zero);
+            }
+
+            if (!ok)
+            {
+                throw JournalError("FSCTL_WRITE_USN_CLOSE_RECORD", Marshal.GetLastWin32Error());
+            }
+
+            return new JsonObject
+            {
+                ["volume"] = volPath,
+                ["ok"] = true,
+                ["usn"] = (JsonNode)(long)usnWritten,
+            };
+        }
+        finally
+        {
+            NativeInterop.CloseHandle(handle);
+        }
+    }
+
     /// <summary>"C" / "C:" / "C:\" / "\\.\C:" → "\\.\C:"。</summary>
     internal static string NormalizeVolume(string volume)
     {
@@ -259,6 +506,18 @@ public static unsafe class VolumePrimitives
         return @"\\.\" + char.ToUpperInvariant(value[0]) + ":";
     }
 
+    private static string SafeLabel(DriveInfo drive)
+    {
+        try
+        {
+            return drive.VolumeLabel;
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     internal static bool IsElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
@@ -277,18 +536,6 @@ public static unsafe class VolumePrimitives
         }
 
         return len > 0 ? new string(target, 0, (int)Math.Min(len, target.Length)).TrimEnd('\0') : "";
-    }
-
-    private static string SafeLabel(DriveInfo drive)
-    {
-        try
-        {
-            return drive.VolumeLabel;
-        }
-        catch
-        {
-            return "";
-        }
     }
 
     private static string SafeFileSystem(DriveInfo drive)

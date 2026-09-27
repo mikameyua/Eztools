@@ -4,11 +4,13 @@
   "version": "0.1.0",
   "description": "resident 生命周期验收工具：进程常驻，ping 返回自身 pid 与调用计数，crash 故意崩溃用于验证自动重启与熔断",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",
   "weight": "lite",
   "lifecycle": "resident",
+  "recover": true,
   "needs": [],
   "contributes": {
     "commands": [

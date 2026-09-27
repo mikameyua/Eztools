@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 
 namespace Eztools.Contracts;
@@ -24,6 +27,21 @@ public static class ProtocolMethods
     /// <summary>工具 → 宿主 的握手（工具已就绪，可接收调用）。</summary>
     public const string HostReady = "host.ready";
 
+    // ── 宿主 → ezt-index.exe（W3 搜索协议 V1.0，docs/W3-搜索协议.md §3；
+    //    常量落位本文件是该冻结文档 §1 的明文要求 —— 契约只有这一份定义）──
+    public const string SearchStart = "search.start";
+    public const string SearchQuery = "search.query";
+    public const string SearchStatus = "search.status";
+
+    /// <summary>
+    /// 暂停 / 恢复索引后台消费（W3-e-1 ③，协议 V1.0 的**加法扩展**，docs/W3-搜索协议.md §3.5）。
+    /// 语义 = 停止消费 USN 变更流但**保持游标**（变更留在 journal，恢复后补齐）；不改 ready、
+    /// 不影响既有查询 —— 已建索引照常服务。恢复是幂等的。
+    /// </summary>
+    public const string SearchPauseIndexing = "search.pauseIndexing";
+
+    /// <inheritdoc cref="SearchPauseIndexing"/>
+    public const string SearchResumeIndexing = "search.resumeIndexing";
     // ── 工具 → 宿主 ──
     public const string HostLog = "host.log";
     public const string HostNotify = "host.notify";
@@ -65,6 +83,13 @@ public static class RpcErrorCodes
     public const int ToolCrashed = -32010;
     public const int ToolTimeout = -32011;
     public const int ToolDisabled = -32012;
+
+    // ── W3 搜索协议（docs/W3-搜索协议.md §4，V1.0 冻结）──
+    // 注意：-32001/-32002 的**数值**在工具协议通道里已作 NotSupported/UnknownCommand；
+    // 两个协议跑在不同的进程对（宿主↔工具 / 宿主↔ezt-index）上，语义按通道隔离，
+    // 常量分列于此避免"复用一个看着不相干的名字"造成误读（协议冻结数值不改）。
+    public const int SearchNotReady = -32001;
+    public const int SearchBadPathFilter = -32002;
 }
 
 /// <summary>协议层抛出的异常基类。</summary>

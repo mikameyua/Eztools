@@ -56,7 +56,7 @@ assert_winpath() {  # assert_winpath <描述> <路径>
 }
 assert_winpath "仓库根" "$REPO"
 
-TFM="${EZTOOLS_TFM:-net10.0}"
+TFM="${EZTOOLS_TFM:-net10.0-windows10.0.19041.0}"
 BINDIR="$REPO/src/Eztools.Cli/bin/Debug/$TFM"
 EZ="$BINDIR/ezt.exe"
 
@@ -90,6 +90,20 @@ else
   INSTALL_ROOT="$LOCALAPPDATA/Eztools"
 fi
 
+# ── 工具源：**必须显式钉到仓库**（S11 教训，2026-09-23）────────────────────────
+# 本脚本有意用**真实安装根**量体积（那正是"装完之后多大"的答案），所以不能整脚本
+# export EZTOOLS_INSTALL_ROOT。但**凡是会拉起工具进程 / 读工具清单**的调用
+# （冷启动计时、峰值内存、残留检查）必须钉住 `--tools-dir`，否则：
+#   本机 %LOCALAPPDATA%\Eztools\tools\ 若有一份**陈旧安装**（它"有清单"），
+#   宿主会优先用它 ⇒ 量的是**陈旧副本的启动/内存**，而不是仓库当前源码。
+# 实测：本机安装根缺 `preview`、且 `paneltool` 只有 4 个面板（少一个 image），
+#   分叉**已经存在**，只是恰好 probe 同版本 ⇒ 现在还没显形（潜伏地雷）。
+# 判据来源：docs/验收断言审视清单.md §12（静默失败登记册 S11）。
+TOOLS_ARGS=(--tools-dir "$REPO/tools")
+# ↑ 用数组而非字符串：路径含空格时不会被词分割。
+#   $REPO 已是 Windows 形式（上面 assert_winpath 已校验），拼 `/tools` 即合法。
+assert_winpath "仓库工具目录" "$REPO/tools"
+
 PASS=0; FAIL=0; SKIP=0
 pass() { PASS=$((PASS+1)); printf '  [PASS] %s\n' "$1"; }
 fail() { FAIL=$((FAIL+1)); printf '  [FAIL] %s\n' "$1"; }
@@ -113,8 +127,16 @@ dusize_kb() {  # dusize_kb <目录> [du 额外参数...]
 
 # ── 内存采样：tasklist 的"内存使用"列形如 "15,988 K"，逗号是千位分隔符 ────────
 #    不要用 `cut -d, -f5` —— 会被数字内部的逗号切错（踩过）。
+#
+#    🔴 `MSYS2_ARG_CONV_EXCL='*'` 是必需的，不是保险：Git Bash 会把 `/FI` 当成
+#    POSIX 路径转换成 `C:/.../PortableGit/.../FI`，于是 tasklist 直接报
+#    「无效参数/选项」，stderr 被 `2>/dev/null` 吞掉、stdout 为空 ⇒ **mem_kb 恒返回 0**
+#    ⇒ 采样失败那条断言必然 FAIL（更糟的情况是静默给出错误数字）。
+#    实测：不加这个变量时 `tasklist /FI ...` → 报错；加了 → 正常。
+#    用 env 前缀而不用 `//FI`：前者在任何 bash 下都正确（非 MSYS 环境忽略该变量，
+#    `/FI` 照常可用），后者只在 MSYS 下成立。
 mem_kb() {  # mem_kb <映像名>
-  tasklist /FI "IMAGENAME eq $1" 2>/dev/null | awk -v img="$1" '
+  MSYS2_ARG_CONV_EXCL='*' tasklist /FI "IMAGENAME eq $1" 2>/dev/null | awk -v img="$1" '
     index($1, img) == 1 { gsub(/,/, "", $(NF-1)); s += $(NF-1) }
     END { print (s ? s : 0) }'
 }
@@ -191,6 +213,8 @@ fi
 printf '\n── 启动/运行开销\n'
 MEDIAN=""
 if [ -n "$PY" ]; then
+  # ★ 只量 `ezt version`：它**不起工具进程**、也不读工具清单，所以无需 --tools-dir。
+  #   （冷启动关心的是宿主自身的启动开销，钉不钉工具源都不影响；保持原样即正确。）
   MEDIAN=$("$PY" - "$EZ" "$COLDSTART_SAMPLES" <<'PY'
 import statistics, subprocess, sys, time
 ez, n = sys.argv[1], int(sys.argv[2])
@@ -218,9 +242,11 @@ fi
 
 # ── 8. 单次调用峰值内存（宿主 + 工具进程之和）───────────────────────────────
 #    用 probe.hang 让调用挂住几秒，才能采到稳态；超时设得比挂起久，让它正常返回。
+# ★ 必须带 TOOLS_ARGS：本调用**真的会拉起 probe 工具进程**，不钉数据源就会
+#   跑到本机陈旧安装的 probe 上（见文件上方 TOOLS_ARGS 的注释 / S11）。
 PY_BEFORE=$(mem_kb python.exe)
 "$EZ" invoke probe.hang --json "{\"seconds\":$PEAK_HANG_SECONDS}" --timeout 20000 \
-  >/dev/null 2>&1 &
+  "${TOOLS_ARGS[@]}" >/dev/null 2>&1 &
 CALL_PID=$!
 
 PEAK=0

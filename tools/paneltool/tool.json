@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "P4 Wave 2c 验收工具：声明一个面板，按协议返回全部 6 种节点类型，用于验证面板数据通道与渲染",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",
@@ -47,6 +48,21 @@
         "id": "broken",
         "title": "格式错误面板",
         "description": "返回非对象，验证宿主的容错路径（不崩溃）"
+      },
+      {
+        "id": "image",
+        "title": "图片节点",
+        "description": "image 节点（协议 §3.6）：真图 / 路径不存在 / 远程地址三条渲染路径",
+        "width": 520,
+        "height": 460
+      },
+      {
+        "id": "input",
+        "title": "输入节点",
+        "description": "input 节点（协议 §3.7）：合法 + 重复 key + 未声明 submitCommandId + 缺 key 四种情形同载荷",
+        "width": 560,
+        "height": 440,
+        "commands": ["paneltool.ping"]
       }
     ]
   }

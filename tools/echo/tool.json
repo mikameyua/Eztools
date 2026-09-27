@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "description": "把输入原样回显，用于验证协议往返、UTF-8 编码与大 payload",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

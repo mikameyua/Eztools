@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "description": "统计文本的字符数、词数、行数，支持直接读文件",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

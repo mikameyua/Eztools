@@ -6,10 +6,35 @@
     <!-- 可执行文件名就是命令名：ezt -->
     <AssemblyName>ezt</AssemblyName>
     <RollForward>LatestMajor</RollForward>
+
+    <!--
+      W4-a（2026-09-25，设计方案 §6 修订）：从 net10.0 升到带 SDK 版本的 windows TFM。
+      原因：本项要引用 Eztools.Ocr（TFM net10.0-windows10.0.19041.0），低 TFM 引用不了高 TFM。
+      影响：① 输出路径 bin/Debug/<此TFM>，acceptance.sh / budget.sh / 探针脚本的 TFM 默认值已同步改；
+            ② 本项目仍是控制台 Exe（OutputType 未动），不引入 UI 栈。
+    -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Eztools.Ocr\Eztools.Ocr.csproj" />
+    <!--
+      W5-a（2026-09-26）：剪贴板历史库原语层。`ezt clip *` 全子命令与 selftest
+      的存储结构用例都走它（S9 同族：协议/存储断言不依赖真进程）。
+    -->
+    <ProjectReference Include="..\Eztools.Clipboard\Eztools.Clipboard.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Eztools.Host\Eztools.Host.csproj" />
+    <!--
+      Wave 3（W3-a-1）：索引进程随解决方案一起构建。
+      引用它有两个目的：① ezt-index.exe / .dll / Eztools.Contracts.dll 一并落到本项目的 bin/，
+      `ezt install` 的 bin/ 复制与 make-portable.sh 天然带上（验收③⑤）；
+      ② `ezt selftest` 直接实例化 IndexRpcServer（StringReader/StringWriter），
+      让 BOM 容忍 / ping 字段 / 错误码这些协议断言不依赖真进程就能跑（S9 同族防御）。
+    -->
+    <ProjectReference Include="..\Eztools.Index\Eztools.Index.csproj" />
   </ItemGroup>
 
   <!--

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """诊断探针：把"工具进程真实看到的世界"暴露出来。
 
 它存在的理由很具体——spike 阶段两个最贵的坑都是"工具侧看到的和宿主以为的不一样"：

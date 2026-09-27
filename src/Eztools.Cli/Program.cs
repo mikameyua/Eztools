@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
@@ -18,6 +21,13 @@ internal static class Program
         var command = cli.Command;
         try
         {
+            // W4-a：`--probe-ocr` 顶层探针别名（等价 `ezt ocr probe`）。
+            // 必须在 switch 之前接住 —— 纯 flag 调用时 command 为 null，会被 case null 当成 help 吞掉。
+            if (cli.GetBool("probe-ocr"))
+            {
+                return await OcrCommand.RunAsync(cli);
+            }
+
             switch (command)
             {
                 case null:
@@ -85,6 +95,15 @@ internal static class Program
 
                 case "core":
                     return await CoreCommand.RunAsync(cli);
+
+                case "search":
+                    return await SearchCommand.RunAsync(cli);
+
+                case "ocr":
+                    return await OcrCommand.RunAsync(cli);
+
+                case "clip":
+                    return await ClipCommand.RunAsync(cli);
 
                 case "diag":
                     return await DiagCommand.RunAsync(cli);
@@ -156,6 +175,29 @@ ezt —— Eztools 宿主命令行 ({HostVersion()})
   hotkey set/unset          用户改键（写 state.json，托盘刷新后生效）
 
   selftest                  端到端自检：往返 / UTF-8 / 大 payload / 崩溃 / 超时回收
+
+搜索索引 (W3)
+  search status             索引到底长什么样：就绪 / 总条目 / 卷清单 / 跳过 / 失败 + 守恒自检
+                            （起一个临时索引实例问清就退出；--wait-ready <ms> 等待自检完成）
+  search pause | resume     不提供 —— 索引进程是宿主的 stdio 子进程，无跨进程端点，
+                            CLI 只能改到自己临时起的实例。请用托盘菜单「搜索索引」或
+                            搜索窗底部的「索引已暂停」徽标（点击即恢复）。
+
+屏幕 OCR (W4)
+  ocr langs                 可用 OCR 语言包清单（--json 机器可读；缺失时给安装引导，退出码 7）
+  ocr file <图片路径>       本地图片 OCR（--lang <tag>；--json → chars/lines/elapsedMs/text）
+  ocr probe / --probe-ocr   引擎自检：语言数 + 内置样图识别字数 + 耗时（--json 可断言；
+                            --save-sample <png> 导出内置样图供 ocr file 复测）
+
+剪贴板历史 (W5-a)
+  clip capture              读一次当前剪贴板入库（调试/探针出口；常驻监听 W5-c 接线）
+  clip list                 历史列表（--kind text|image|filelist；--limit N；--json）
+  clip search <关键词>      搜索（≥3 字符 FTS trigram / <3 字符 LIKE 兜底；--json）
+  clip pin|unpin <id>       置顶 / 取消（置顶条目不被清理删除）
+  clip delete <id>          单条删除（图片条目连带删盘上文件）
+  clip copy <id>            重新复制回剪贴板（W5-a 仅文本条目）
+  clip clear [--keep-pinned]  清空历史
+  clip status               库状态（总数 / 分类型 / 置顶 / 库与图片体积；--json 可断言）
 
 特权层 (P3)
   core status               Core 特权服务状态（端点登记 + 管道探测）

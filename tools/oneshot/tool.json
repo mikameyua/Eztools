@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "weight: script 档的参考实现：每次调用起一个进程、用完即退，只有基础 API（日志 / 通知），无依赖、无设置界面",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

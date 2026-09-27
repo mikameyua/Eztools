@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.IO.Pipes;
 using Eztools.Host;
 using System.Diagnostics;

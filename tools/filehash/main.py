@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """文件校验工具：带 vendor 依赖策略的示范，也是"新增工具不改宿主一行代码"的验证样本。
 
 它演示三件事：

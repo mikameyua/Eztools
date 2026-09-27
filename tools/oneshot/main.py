@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """weight: script 档的参考实现 —— 每次调用起一个进程，用完即退。
 
 它存在的理由不只是"少一个样板"：script 档按设计方案 §5.1 **只提供基础 API**

@@ -1,4 +1,9 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
@@ -24,6 +29,7 @@ public sealed class CoreServer
     private readonly AuditLog _audit;
     private readonly string _version;
     private readonly CancellationTokenSource _stop = new();
+    private int _connections;
 
     public CoreServer(string installRoot, bool echo = false)
     {
@@ -56,9 +62,11 @@ public sealed class CoreServer
 
         CoreConsole.Say($"ezt-core {_version} 启动：pipe={pipeName} elevated={Elevated} pid={Pid}");
         CoreConsole.Say($"  安装根：{_installRoot}");
+        Trace("启动：进入 RunAsync");
 
         CoreEndpoint.Write(_installRoot, new CoreEndpoint.CoreInfo(
             pipeName, Pid, Elevated, DateTimeOffset.Now, _version));
+        Trace("启动：端点已写入 core.json");
 
         try
         {
@@ -133,9 +141,11 @@ public sealed class CoreServer
             try
             {
                 pipe = CreatePipe(pipeName);
+                Trace($"启动：管道已创建（elevated={Elevated}），等待连接");
             }
             catch (Exception ex)
             {
+                Trace("管道创建失败：" + ex.GetType().Name + ": " + ex.Message);
                 CoreConsole.Error($"ezt-core: 创建管道失败：{ex.Message}");
                 throw;
             }
@@ -143,6 +153,7 @@ public sealed class CoreServer
             try
             {
                 await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                Trace($"管道连接到达（第 {Interlocked.Increment(ref _connections)} 个）");
             }
             catch (OperationCanceledException)
             {
@@ -388,15 +399,47 @@ public sealed class CoreServer
 
     // ── 管道创建（闸 1：仅当前用户）──
     //
-    // 用 PipeOptions.CurrentUserOnly（.NET 5+ 内建）：内核在连接时校验客户端令牌
-    // 是同一用户，别的用户/匿名一律 ERROR_ACCESS_DENIED。
-    // 最初手写 PipeSecurity + NamedPipeServerStreamAcl，实测在跨父进程场景下
-    // CreateNamedPipe 间歇性 Access Denied（自绘 SD 的坑）；CurrentUserOnly 一条搞定。
+    // 两条路径，按是否提权分流（2026-09-24 实测坑，见设计方案 §踩坑）：
+    //
+    // · 非提权 → PipeOptions.CurrentUserOnly（.NET 5+ 内建）：内核在连接时校验客户端
+    //   令牌是同一用户，别的用户/匿名一律 ERROR_ACCESS_DENIED。
+    //
+    // · 提权 → **禁止 CurrentUserOnly**：实测（W3-a-3 验收①手工探针）提权进程创建
+    //   CurrentUserOnly 管道会**原生层静默死亡**——端点已写入、无托管异常、无事件日志、
+    //   trace 停在端点写入后，管道从未出现在 \\.\pipe\ 命名空间；非提权同码完全正常。
+    //   提权路径改用**显式 SD**（官方 NamedPipeServerStreamAcl API 构造）：
+    //   DACL = 当前用户 FullControl —— 与 CurrentUserOnly 的校验面等价。
+    //   （早期"手绘 SD 间歇性 Access Denied"的坑由官方 API + 固定字段绕开：
+    //   Owner/Group/DACL 三段齐全，不再留空由内核补默认。）
+    //   纵深不受影响：闸 2（CoreSecurity.ValidateCaller）在每条连接上仍核对
+    //   对端令牌 SID 与完整性级别，管道 ACL 被放宽时它仍然兜底。
 
-    private static NamedPipeServerStream CreatePipe(string name) =>
-        new(name, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-            inBufferSize: 4096, outBufferSize: 4096);
+    private const int MaxInstances = 16;
+    private const int DefaultBufferSize = 4096;
+
+    private NamedPipeServerStream CreatePipe(string name)
+    {
+        if (!Elevated)
+        {
+            return new(name, PipeDirection.InOut, MaxInstances, PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+                inBufferSize: DefaultBufferSize, outBufferSize: DefaultBufferSize);
+        }
+
+        var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User ?? throw new InvalidOperationException(
+            "提权 Core 无法解析当前用户 SID（token 异常），拒绝创建无 ACL 的特权管道");
+
+        var acl = new PipeSecurity();
+        acl.SetOwner(user);
+        acl.SetGroup(user);
+        acl.AddAccessRule(new PipeAccessRule(
+            user, PipeAccessRights.FullControl, AccessControlType.Allow));
+
+        return NamedPipeServerStreamAcl.Create(
+            name, PipeDirection.InOut, MaxInstances, PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous, DefaultBufferSize, DefaultBufferSize, acl);
+    }
 
     private static async Task<bool> ProbeAliveAsync(string pipeName)
     {

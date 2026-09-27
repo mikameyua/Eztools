@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "计算文件的哈希值，用于校验下载文件是否损坏或被篡改",
   "author": "菲比",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

@@ -4,6 +4,7 @@
   "version": "0.2.0",
   "description": "探测工具进程的真实运行环境（隔离是否生效、编码是否可控），并提供崩溃/挂起自检钩子供 ezt selftest 使用",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

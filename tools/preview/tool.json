@@ -2,7 +2,7 @@
   "id": "preview",
   "name": "速览",
   "version": "0.1.0",
-  "description": "速览资源管理器选中的文件：元信息 + 纯文本内容预览",
+  "description": "速览资源管理器选中的文件：元信息 + 内容预览（文本按 UTF-8/UTF-16/UTF-32 读，PDF 提取文字层）",
   "author": "Eztools",
   "license": "GPL-3.0-or-later",
   "runtime": "python",
@@ -10,8 +10,10 @@
   "entry": "main.py",
   "weight": "full",
   "lifecycle": "transient",
-  "needs": ["files.userSelected", "ui.panel"],
-
+  "needs": [
+    "files.userSelected",
+    "ui.panel"
+  ],
   "contributes": {
     "commands": [
       {
@@ -41,22 +43,30 @@
         "width": 720,
         "height": 560,
         "refreshMs": 0,
-        "commands": ["preview.reload", "preview.openExternal"]
+        "commands": [
+          "preview.reload",
+          "preview.openExternal"
+        ]
       }
     ],
     "menus": [
-      { "location": "tray", "command": "preview.show", "group": "tool", "input": "shellSelection" }
+      {
+        "location": "tray",
+        "command": "preview.show",
+        "group": "tool",
+        "input": "shellSelection"
+      }
     ],
     "hotkeys": [
       {
         "command": "preview.show",
         "default": "Ctrl+Alt+P",
         "title": "速览选中的文件",
-        "input": "shellSelection"
+        "input": "shellSelection",
+        "opensPanel": "main"
       }
     ]
   },
-
   "config": {
     "type": "object",
     "properties": {

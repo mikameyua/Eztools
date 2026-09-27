@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
@@ -51,12 +54,20 @@ public sealed record ToolNotificationEvent(string ToolId, string ToolName, strin
 /// <param name="Panel">清单里声明的面板（含尺寸等渲染参数）。</param>
 /// <param name="Data">工具返回的原始载荷（可能为 null —— 工具返回了 null）。</param>
 /// <param name="Elapsed">耗时（展示在面板状态栏）。</param>
+/// <param name="DeclaredCommandIds">
+/// 该工具**已声明**的命令 id（清单 <c>contributes.commands</c>）。
+/// 渲染层需要它做节点级引用校验 —— <c>input.submitCommandId</c> 引用的命令必须存在
+/// （协议 §3.7.6，诊断码 <c>contributes.panel-unknown-command</c>）。
+/// <b>为什么由宿主带出来而不是让渲染层自己去注册表查</b>：CLI 渲染层只拿到这个 record，
+/// 它不该再依赖注册表；一次性随结果带出，也保证"校验用的清单"与"这次拉取的工具"是同一个。
+/// </param>
 public sealed record PanelDataResult(
     string ToolId,
     string PanelId,
     ToolPanel Panel,
     JsonNode? Data,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    IReadOnlyList<string> DeclaredCommandIds);
 
 /// <summary>
 /// 工具进程管理（P0 的第三件核心交付）。
@@ -67,6 +78,9 @@ public sealed record PanelDataResult(
 /// <item><b>崩溃熔断</b>：默认 10 分钟 3 次；<c>resident</c> 收紧为 5 分钟 2 次。触发后自动禁用该工具并记录原因，
 ///   而不是让用户每次调用都撞一次崩溃。</item>
 /// <item><b>进程回收</b>：取消/超时/崩溃后不留僵尸（kill 整个进程树）。</item>
+/// <item><b>进程组（N2，设计方案 §5.1）</b>：<c>full</c> 档自成一组（<c>full:&lt;toolId&gt;</c>），其余共用
+///   <c>hosted</c> 组 —— 崩溃/超时/回收只作用于所属会话、按组核算（<see cref="GetProcessGroups"/>）。
+///   组口径定义见 <see cref="ProcessGroups"/>；治理路径"只动自己的会话"是该契约的一部分。</item>
 /// </list>
 /// </summary>
 public sealed class ToolHostManager : IAsyncDisposable
@@ -212,10 +226,18 @@ public sealed class ToolHostManager : IAsyncDisposable
     /// <param name="toolId">目标工具。</param>
     /// <param name="panelId">面板 id（对应清单 <c>contributes.panels[].id</c>）。</param>
     /// <param name="reason">拉取原因：<c>open</c> / <c>refresh</c> / <c>host-event</c>。</param>
+    /// <param name="inputs">
+    /// 本面板上各 <c>input</c> 节点的当前值快照（协议 §3.7.2）。
+    /// 传 <c>null</c>（默认）表示"没有 UI 来源"—— 请求里仍会出现**空对象** <c>inputs:{}</c>，
+    /// 这是 20.10 的断言点：形态恒定，工具侧解析只有一种写法。
+    /// 第 5 步 WPF 会传入真实值；第 4 步的节流器决定"什么时候传"。
+    /// </param>
+    /// <param name="ct">取消令牌。</param>
     public async Task<PanelDataResult> PanelDataAsync(
         string toolId,
         string panelId,
         string reason = "open",
+        JsonObject? inputs = null,
         CancellationToken ct = default)
     {
         if (!_registry.TryGetTool(toolId, out var tool))
@@ -248,11 +270,9 @@ public sealed class ToolHostManager : IAsyncDisposable
                     : $"工具 {toolId} 没有声明面板 '{panelId}'。已声明的面板：{string.Join(" / ", known)}");
         }
 
-        var args = new JsonObject
-        {
-            ["panelId"] = panel.Id,
-            ["context"] = new JsonObject { ["reason"] = reason },
-        };
+        // 请求参数走 PanelDataArgs.Build —— **单一来源**保证 inputs 总是存在且是空对象
+        // （协议 §3.7.7 / 20.10）。传 null 表示"此刻还没有 UI 来源"，字段形态不变。
+        var args = PanelDataArgs.Build(panel.Id, reason, inputs);
 
         // 超时：沿用 full 档默认（120s），除非该工具进程层另配。
         var call = await InvokeAsync(
@@ -264,16 +284,28 @@ public sealed class ToolHostManager : IAsyncDisposable
             PanelId: panel.Id,
             Panel: panel,
             Data: call.Result,
-            Elapsed: call.Elapsed);
+            Elapsed: call.Elapsed,
+            DeclaredCommandIds: tool.Manifest.Contributes.Commands
+                .Select(c => c.Id)
+                .ToArray());
     }
 
     /// <summary>
     /// 面板数据 handler 的固定名（协议 §8.1：一个 handler 用 <c>args.panelId</c> 分派，
     /// 不是每个面板一个 handler）。
     ///
-    /// 走 <c>tool.invoke</c> 的 <c>handler</c> 形态（而不是新加一个协议方法的方向）——
-    /// 这样 SDK 侧不需要为"面板拉取"再加一套派发，<c>_dispatch</c> 里的 <c>tool.panel.data</c>
-    /// 分支处理的正是宿主发来的这个 handler 调用。
+    /// <b>实际走的是 <c>tool.invoke</c></b>（<c>handler</c> 形态），由 <c>InvokeHandlerAsync</c>
+    /// 发出 —— <b>不是</b> <c>tool.panel.data</c> 这个协议方法。
+    /// 参数也因此直接是 <c>args</c> 的内容（<c>{panelId, context, inputs}</c>），
+    /// 工具侧注册的 <c>panel_data</c> handler 原样收到它。
+    ///
+    /// <b>⚠️ 2026-09-23 更正</b>：本注释原写"SDK 的 <c>_dispatch</c> 里 <c>tool.panel.data</c>
+    /// 分支处理的正是宿主发来的这个 handler 调用" —— <b>那句是错的</b>。
+    /// 实测（把部署的 SDK 的 <c>_panel_data</c> 改成抛异常，面板照样正常）证明
+    /// <c>_panel_data</c> **从未被走到**：宿主发的是 <c>tool.invoke</c>，
+    /// 所以 SDK 走的是 <c>_invoke</c> → <c>fn(args)</c> 这条路。
+    /// 留着 <c>_panel_data</c> 当作"若将来改成协议方法"的兼容分支，但**不要**把契约
+    /// （如 <c>inputs</c>）只写在那里 —— 写了也不生效。
     /// </summary>
     public const string PanelDataHandler = "panel_data";
 
@@ -454,8 +486,13 @@ public sealed class ToolHostManager : IAsyncDisposable
         tool.LoadState = ToolLoadState.Running;
         tool.ProcessId = process.ProcessId;
         tool.StartedAt = process.StartedAt;
-        _log.Info($"已启动工具 {tool.Id}（pid={process.ProcessId}，lifecycle={tool.Manifest.Lifecycle.ToWire()}）", "lifecycle");
-        Publish(HostEventKind.ToolStarted, tool.Id, $"pid={process.ProcessId}");
+        // N2（设计方案 §5.1）：组 id 进启动日志 —— "这个进程归哪一组"在日志里可查，
+        // 排查"谁把谁连累挂了"时第一眼就能看出 full 组与 hosted 组的边界。
+        var groupId = ProcessGroups.GroupIdOf(tool.Manifest);
+        _log.Info(
+            $"已启动工具 {tool.Id}（pid={process.ProcessId}，lifecycle={tool.Manifest.Lifecycle.ToWire()}，group={groupId}）",
+            "lifecycle");
+        Publish(HostEventKind.ToolStarted, tool.Id, $"pid={process.ProcessId} group={groupId}");
 
         return process;
     }
@@ -559,6 +596,8 @@ public sealed class ToolHostManager : IAsyncDisposable
 
     private async Task HandleCrashAsync(RegisteredTool tool, ToolCrashedException ex)
     {
+        // N2 隔离契约（§5.1 / ProcessGroups）：只清**本工具**的会话。
+        // 任何"顺手清理其他进程/全组重启"的改动都违反 full 组与 hosted 组的隔离边界。
         RemoveSession(tool.Id);
         tool.CrashCount++;
 
@@ -639,6 +678,7 @@ public sealed class ToolHostManager : IAsyncDisposable
 
     private Task HandleTimeoutAsync(RegisteredTool tool)
     {
+        // N2 隔离契约：超时回收同样只作用于**本工具**的会话（§5.1 / ProcessGroups）。
         RemoveSession(tool.Id);
         if (tool.LoadState == ToolLoadState.Running)
         {
@@ -691,6 +731,30 @@ public sealed class ToolHostManager : IAsyncDisposable
                         t.CrashCount);
                 })
                 .ToList();
+        }
+    }
+
+    /// <summary>
+    /// 按组核算全部注册工具的进程（N2，设计方案 §5.1「资源核算按组分别统计」）。
+    ///
+    /// 用途：预算断言可以对 <c>hosted</c> 与 <c>full:*</c> **分别**进行 ——
+    /// 例如"托盘 + lite 工具 ≤ 100 MB"与"索引进程 ≤ 60 MB"是两笔独立的账，
+    /// 不再有"67.8 + 40 MB 说不清是谁"的问题。采集在锁内完成，返回不可变快照。
+    /// </summary>
+    public IReadOnlyList<ProcessGroups.GroupSummary> GetProcessGroups()
+    {
+        lock (_sessions)
+        {
+            return ProcessGroups.Summarize(_registry.Tools.Select(t =>
+            {
+                _sessions.TryGetValue(t.Id, out var session);
+                var running = session is not null && !session.Process.HasExited;
+                return new ProcessGroups.GroupEntry(
+                    t.Id,
+                    ProcessGroups.GroupIdOf(t.Manifest),
+                    running,
+                    running ? session!.Process.ProcessId : null);
+            }));
         }
     }
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """工具模板：复制这个目录，改 tool.json 与下面的 handler 即可。
 
 三件事不需要你做：

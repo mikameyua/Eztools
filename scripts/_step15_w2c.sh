@@ -19,7 +19,7 @@
 #    3.x / 6.x 的发现数量断言连带失败，掩盖真正的失败原因（_step14 同样的策略）。
 # ============================================================================
 
-step "15/15  P4 Wave 2c：面板协议（panels 声明 / tool.panel.data / weight: full 闸门）"
+step "15/18  P4 Wave 2c：面板协议（panels 声明 / tool.panel.data / weight: full 闸门）"
 
 if [ -z "${PY:-}" ]; then
   PY="$(command -v python || command -v python3 || true)"
@@ -77,6 +77,34 @@ write("noid", {
     "contributes": {"panels": [{"title": "没有 id 的面板"}]},
 })
 
+# 15.16 夹具：hotkeys[].opensPanel 指向不存在的面板 → 必须 Warning（热键本身仍可用）。
+# **这个夹具同时是"校验时机"的回归守卫**：opensPanel 的交叉校验必须跑在 panels 解析**之后**，
+# 若有人把它挪回热键循环里（那里 panels 还空着），本夹具会**反过来**报"合法声明被判非法"，
+# 而正向夹具（okopenspanel）会红 —— 两边一起把时机钉死。
+write("badopenspanel", {
+    "id": "badopenspanel", "name": "坏面板引用", "version": "1.0.0", "runtime": "python",
+    "entry": "main.py", "weight": "full", "needs": ["ui.panel"],
+    "contributes": {
+        "commands": [{"id": "badopenspanel.go", "title": "go", "handler": "go"}],
+        "panels": [{"id": "real", "title": "真面板"}],
+        "hotkeys": [{"command": "badopenspanel.go", "default": "Ctrl+Alt+F9",
+                     "opensPanel": "not-exist"}],
+    },
+})
+
+# 正向夹具：opensPanel 指向**本工具真的声明了**的面板 → 不该有任何 opensPanel 相关诊断。
+# 与 badopenspanel 成对：只有正向能过才说明"报错是因为名字错，不是因为功能本身不可用"。
+write("okopenspanel", {
+    "id": "okopenspanel", "name": "对的面板引用", "version": "1.0.0", "runtime": "python",
+    "entry": "main.py", "weight": "full", "needs": ["ui.panel"],
+    "contributes": {
+        "commands": [{"id": "okopenspanel.go", "title": "go", "handler": "go"}],
+        "panels": [{"id": "real", "title": "真面板"}],
+        "hotkeys": [{"command": "okopenspanel.go", "default": "Ctrl+Alt+F10",
+                     "opensPanel": "real"}],
+    },
+})
+
 # 对照组：refreshMs: 1500 合法 → 必须原样保留（没有它，15.11 只能证明"某个值被改了"）
 write("okref", {
     "id": "okref", "name": "合法刷新", "version": "1.0.0", "runtime": "python",
@@ -107,36 +135,104 @@ panel_json() {  # panel_json <输出文件> <参数...>
 panel_json "$W2C/list.json"
 check "ezt panel 列出面板（退出码 0）" 0 $?
 
+# 15.1b 需要"哪些工具被注册"这个信息，而 `ezt panel` 的输出里**没有** tools[]
+#（只有 count/panels）。所以这里单独跑一次 doctor 落盘 —— 判据引用一个不存在的
+# 字段是"断言恒真/恒假"的经典成因（本轮实测踩到过），不能靠想象。
+TOOLS_JSON="$W2C/list.json"
+"$EZ" doctor --json --quiet --tools-dir "$TOOLS_ROOT" \
+  --install-root "$EZTOOLS_INSTALL_ROOT" --config-root "$EZTOOLS_CONFIG_ROOT" \
+  > "$W2C/list-doctor.json" 2>&1
+
 "$PY" - "$W2C/list.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 panels = d.get("panels") or []
 qualed = {p.get("qualified") for p in panels}
-want = {"paneltool.main", "paneltool.empty", "paneltool.weird", "paneltool.broken"}
+# 正例（paneltool 的 6 个面板）必须都在
+#   注：`input` 是 V1.3 增量（协议 §3.7）—— 这里必须列出，否则"面板被悄悄摘掉"没有信号。
+want = {"paneltool.main", "paneltool.empty", "paneltool.weird", "paneltool.broken",
+        "paneltool.image", "paneltool.input"}
 missing = want - qualed
 print(f"  [信息] 面板 {d.get('count')} 个: {sorted(qualed)}")
 if missing:
     print(f"  [FAIL] 缺少面板: {sorted(missing)}")
     sys.exit(1)
+# 反向：列出**完整期望集**而不是"⊇ 正例"。
+# 原判据是子集，于是列表里混进 badopenspanel.real / badsize.p1 时照样绿 ——
+# 而断言描述写的是"列出 4 个面板"，描述与事实不符（实测列表是 9 个）。
+# 这里把 TOOLS_ROOT 下**所有合法声明**都列出来；多一个少一个都算失败。
+#   注：badlite（weight lite）与 noid（缺 id）是**故意非法**的，它们的 panels 不该出现 —— 
+#   这正是 15.1b 守的那条；本断言只要求"合法的那批不多不少"。
+#   preview.main 来自仓库 tools/preview（内置源同样被扫到，是合法声明）。
+expected = want | {"badopenspanel.real", "badsize.p1", "okopenspanel.real",
+                   "okref.p1", "preview.main"}
+extra = qualed - expected
+if extra:
+    print(f"  [FAIL] 出现了不该在列表里的面板（合法批之外）: {sorted(extra)}")
+    sys.exit(1)
+gone = expected - qualed
+if gone:
+    print(f"  [FAIL] 合法声明却未出现在列表里: {sorted(gone)}")
+    sys.exit(1)
 sys.exit(0)
 PY
 if [ $? -eq 0 ]; then
-  pass "ezt panel 列出 4 个面板且含具体 panelId（不是空列表）"
+  pass "ezt panel 列出的面板集合与全部合法声明**逐一对齐**（不多不少，含具体 panelId）"
 else
   fail "面板清单不符：$(tr -d '\r\n' < "$W2C/list.json" | head -c 240)"
 fi
 
-# 15.1b 负向夹具的 panels 不该出现在列表里（badlite 被 Error 拒；noid 无 id 被拒）
-#        —— 没有这条，"列出面板"可能把非法声明也一起列出来
-"$PY" - "$W2C/list.json" <<'PY'
+# 15.1b 非法声明被**整份清单拒绝**，且拒绝范围是局部的（不连坐其它工具）。
+#
+#        ⚠️ 这条断言前后改过两次，两次都是因为"判据描述的不是机制"：
+#        ① 原判据"列表里不得出现 badlite./noid. 前缀的面板" —— 突变验证
+#          （白名单改成永不命中的值）后仍然 174/0 全绿，证明它是空的：
+#          `ezt panel` 的列表按定义只含**已注册**面板，非法那些根本进不来，
+#          这条只是把 15.1 的话换了个说法，永远不会独立变红。
+#        ② 第二版猜"noid 工具还留着、只是没了面板" —— 实测**猜错了**：
+#          带 Error 诊断的清单是**整份被拒**的（工具也不注册），于是断言变红。
+#          这反而问出了真实机制，也说明"先跑一次再写断言"比"照着代码想象"可靠。
+#        现在断言的是实测出来的机制：Error 清单整份出局、好工具一个不少。
+"$PY" - "$TOOLS_JSON" "$W2C/list-doctor.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 qualed = {p.get("qualified") for p in (d.get("panels") or [])}
-bad = [q for q in qualed if q.startswith("badlite.") or q.startswith("noid.")]
-print(f"  [信息] 全部面板标识: {sorted(qualed)}")
-sys.exit(1 if bad else 0)
+
+dd = json.load(open(sys.argv[2], encoding="utf-8"))
+tool_ids = {t.get("id") for t in (dd.get("tools") or [])}
+errs = [x for x in (dd.get("diagnostics") or []) if x.get("severity") == "Error"]
+
+print(f"  [信息] 面板 {len(qualed)} 个 · 工具 {len(tool_ids)} 个 · Error {len(errs)} 条")
+# ★ 有效性前提：必须真扫到工具，否则下面所有判据都会退化（缺席的方向恒真）
+if not tool_ids:
+    print("  [FAIL] doctor 没扫到任何工具 —— 本断言的判据失效（有效性前提不成立）")
+    sys.exit(1)
+
+# ① 带 Error 的两份清单（badlite / noid）**整份出局**：工具与面板都不在
+for bad in ("badlite", "noid"):
+    if bad in tool_ids:
+        print(f"  [FAIL] {bad} 带 Error 诊断却仍被注册为工具 —— 坏清单必须整份出局")
+        sys.exit(1)
+leaked = sorted(q for q in qualed if q.startswith("badlite.") or q.startswith("noid."))
+if leaked:
+    print(f"  [FAIL] 非法声明的面板混入了列表: {leaked}")
+    sys.exit(1)
+
+# ② 拒绝必须**不连坐**：好工具与它们的面板一个不少。
+#    这条才是本断言独有的价值 —— 若实现改成"发现坏清单就清空注册表"，
+#    或把 Error 提升成致命错误提前退出，15.1 与 15.8 都不会红，只有这条会。
+if "paneltool" not in tool_ids or "preview" not in tool_ids:
+    print(f"  [FAIL] 好工具被连带拒了 —— 一个坏清单影响了其它工具：{sorted(tool_ids)}")
+    sys.exit(1)
+if not {"paneltool.main", "paneltool.empty"} <= qualed:
+    print(f"  [FAIL] 好工具的面板被连带拒了：{sorted(qualed)}")
+    sys.exit(1)
+if not errs:
+    print("  [FAIL] 一份带 Error 的清单都没有 —— 夹具没生效，本断言在空跑")
+    sys.exit(1)
+sys.exit(0)
 PY
-check "非法声明（weight lite / 缺 id）的面板未进入列表" 0 $?
+check "非法清单整份出局（工具+面板都不注册），且好工具与好面板一个不少（不连坐）" 0 $?
 
 # ── 15.2 ★ 拉取面板数据：nodes 长度必须 > 0 ─────────────────────────────────
 panel_json "$W2C/main.json" paneltool main
@@ -280,7 +376,7 @@ d = json.load(open(sys.argv[1], encoding="utf-8"))
 nodes = ((d.get("data") or {}).get("nodes")) or []
 types = [n.get("type") for n in nodes]
 # 工具原样返回 3 个节点（含 1 个未知）—— 宿主**不在 CLI 层过滤**，
-# 因为它必须让排查者看见"工具发了个我不认识的节点"（协议 §3.4 / §11.6）。
+# 因为它必须让排查者看见"工具发了个我不认识的节点"（协议 §3.4 / §3.5）。
 ok = (d.get("ok") is True
       and len(nodes) == 3
       and "__future_widget__" in types)
@@ -313,6 +409,65 @@ if [ $? -eq 0 ]; then
   pass "panels[].id 缺失 → Error「contributes.panel-missing-id」（结构性缺陷，非 Warning）"
 else
   fail "缺 id 未报 Error：$(tr -d '\r\n' < "$W2C/noid.json" | head -c 300)"
+fi
+
+# ── 15.8b ★★ hotkeys[].opensPanel 的交叉校验（含**时机**回归守卫）──────────
+#   两条成对断言，缺一条就会漏掉一半真相：
+#     · badopenspanel → 引用了不存在的面板 ⇒ 必须 Warning（且热键**仍保留**，不能连键一起丢）
+#     · okopenspanel  → 引用了真实存在的面板 ⇒ **不得**有任何 opensPanel 诊断
+#   后者是"校验时机"的守卫：若有人把校验挪回热键循环（那时 panels 还空着），
+#   正向夹具会立刻变红 —— 这正是本次实现时差点踩的坑（hotkeys 比 panels 早解析 105 行）。
+"$EZ" doctor --json --quiet --tools-dir "$W2C/tools/badopenspanel" \
+  --install-root "$EZTOOLS_INSTALL_ROOT" --config-root "$EZTOOLS_CONFIG_ROOT" \
+  > "$W2C/badopenspanel.json" 2>&1
+"$PY" - "$W2C/badopenspanel.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+diags = d.get("diagnostics") or []
+hit = [x for x in diags if x.get("code") == "contributes.hotkey-unknown-panel"]
+print(f"  [信息] badopenspanel 诊断: {[(x.get('severity'), x.get('code')) for x in diags]}")
+if not hit:
+    print("  [FAIL] 未出现 contributes.hotkey-unknown-panel —— 指向不存在面板的引用必须被指出")
+    sys.exit(1)
+if any(x.get("severity") != "Warning" for x in hit):
+    print(f"  [FAIL] 严重级别应为 Warning（热键仍可用，只是少个副作用）：{hit}")
+    sys.exit(1)
+sys.exit(0)
+PY
+if [ $? -eq 0 ]; then
+  pass "opensPanel 指向不存在的面板 → Warning「contributes.hotkey-unknown-panel」（热键本身仍生效）"
+else
+  fail "非法 opensPanel 未正确诊断：$(tr -d '\r\n' < "$W2C/badopenspanel.json" | head -c 300)"
+fi
+
+"$EZ" doctor --json --quiet --tools-dir "$W2C/tools/okopenspanel" \
+  --install-root "$EZTOOLS_INSTALL_ROOT" --config-root "$EZTOOLS_CONFIG_ROOT" \
+  > "$W2C/okopenspanel.json" 2>&1
+"$PY" - "$W2C/okopenspanel.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+diags = d.get("diagnostics") or []
+bad = [x for x in diags if x.get("code") == "contributes.hotkey-unknown-panel"]
+errs = [x for x in diags if x.get("severity") == "Error"]
+print(f"  [信息] okopenspanel 诊断: {[(x.get('severity'), x.get('code')) for x in diags]}")
+# 正向断言的**有效性前提**：这个夹具必须真的被扫到了。
+# 只断言"没有坏诊断"是不够的 —— 扫不到任何工具时**同样**没有诊断，那条断言会恒真
+#（本轮实测踩到：--tools-dir 指到工具目录而非其父目录，工具数为 0，正向照样 PASS）。
+if not (d.get("tools") or []):
+    print("  [FAIL] okopenspanel 夹具根本没被扫到（工具数为 0）—— 正向断言恒真，无效")
+    sys.exit(1)
+if bad:
+    print(f"  [FAIL] 合法引用被判非法 —— 交叉校验很可能跑在 panels 解析之前：{bad}")
+    sys.exit(1)
+if errs:
+    print(f"  [FAIL] 合法清单不该有 Error：{errs}")
+    sys.exit(1)
+sys.exit(0)
+PY
+if [ $? -eq 0 ]; then
+  pass "对照：opensPanel 指向真实面板无任何诊断（校验时机正确，不是一律报错）"
+else
+  fail "合法 opensPanel 被误判：$(tr -d '\r\n' < "$W2C/okopenspanel.json" | head -c 300)"
 fi
 
 # ── 15.9 ★ width/height 越界 → **钳制到边界** 且出 Warning ──────────────────

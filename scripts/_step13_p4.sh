@@ -14,7 +14,7 @@
 #  `code`，不是退出码。只看退出码会让这些负向用例变成恒真断言。
 # ============================================================================
 
-step "13/13  P4 工具间协作：host.invokeTool 通路 · 环检测 · weight 档位闸门"
+step "13/18  P4 工具间协作：host.invokeTool 通路 · 环检测 · weight 档位闸门"
 
 if [ -z "${PY:-}" ]; then
   PY="$(command -v python || command -v python3 || true)"

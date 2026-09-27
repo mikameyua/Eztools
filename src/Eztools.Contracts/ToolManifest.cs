@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 
 namespace Eztools.Contracts;
@@ -49,6 +52,19 @@ public sealed class ToolHotkey
     /// （如 <c>"input": "shellSelection"</c>）。
     /// </summary>
     public MenuInput Input { get; init; } = MenuInput.Clipboard;
+
+    /// <summary>
+    /// 触发并**成功**后自动带到前台的面板 id（<c>hotkeys[].opensPanel</c>，缺省 null = 不打开）。
+    ///
+    /// **为什么放在清单而不是加一个 <c>host.panel.open</c> 协议方法**：后者要让工具能操纵宿主 UI，
+    /// 得动 <c>EnsureApiAllowed</c> 白名单 + 档位表 + 协议方法表三处，且打开的是**工具自己声明的**
+    /// 面板——这件事清单里本来就写得下。约定"命令成功后打开"而不是"触发即打开"，是因为
+    /// 拿不到上下文时要让用户先看到那句解释（如"请先选中文件"），而不是弹一个空面板。
+    ///
+    /// 校验（加载期）：引用的面板必须属于**同一个工具**，且该工具 <c>weight: full</c>；
+    /// 否则发 <c>contributes.hotkey-unknown-panel</c>（Warn）并忽略本字段。
+    /// </summary>
+    public string? OpensPanel { get; init; }
 
     /// <summary>
     /// 规范化后的组合键；null = 原始串无法解析（已有 HotkeyInvalid 诊断，此处保留原样不崩溃）。

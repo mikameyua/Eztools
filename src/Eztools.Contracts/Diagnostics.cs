@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 namespace Eztools.Contracts;
 
 /// <summary>诊断级别。Error 会导致清单被拒绝注册，Warning 只记录。</summary>
@@ -58,6 +61,16 @@ public static class DiagnosticCodes
     public const string UnknownLatency = "field.unknown-latency";
     public const string LatencyOnNonResident = "field.latency-without-resident";
 
+    /// <summary>
+    /// <b>Error 级</b>：声明 <c>lifecycle: resident</c> 但未声明 <c>"recover": true</c>。
+    /// §8.2 对 resident 的强制要求（宿主崩溃重启后调用 <c>tool.recover</c> 恢复现场）；
+    /// 失败关闭 —— 带 Error 的清单整份出局（工具不注册），不允许"看似常驻、实则无恢复"的工具存在。
+    /// W3 P0-3 落地（2026-09-24）。
+    /// </summary>
+    public const string ResidentRequiresRecover = "field.resident-requires-recover";
+    public const string RecoverWithoutResident = "field.recover-without-resident";
+    public const string RecoverNotBoolean = "field.recover-not-boolean";
+
     // ── 贡献点 ──
     public const string CommandMissingHandler = "contributes.command-missing-handler";
     public const string CommandDuplicate = "contributes.command-duplicate";
@@ -83,6 +96,18 @@ public static class DiagnosticCodes
     /// <summary>面板引用了本工具未声明的命令（按钮点了会报未知命令 —— 最差的失败模式）。</summary>
     public const string PanelUnknownCommand = "contributes.panel-unknown-command";
 
+    /// <summary>
+    /// <c>input</c> 节点缺少必填的 <c>key</c>（协议 §3.7.6：该节点被跳过）。
+    /// **载荷级**而非清单级 —— 节点是工具运行时返回的，清单解析期看不到它（见 §12.2 第 1 步）。
+    /// </summary>
+    public const string PanelInputMissingKey = "panel.input-missing-key";
+
+    /// <summary>
+    /// 同一面板内 <c>input</c> 的 <c>key</c> 重复（协议 §3.7.2：后者被忽略）。
+    /// 口径同 <see cref="PanelDuplicate"/> —— 先到先得。
+    /// </summary>
+    public const string PanelInputDuplicateKey = "panel.input-duplicate-key";
+
     /// <summary>width/height 越界（已钳制到合法区间）。</summary>
     public const string PanelSizeOutOfRange = "contributes.panel-size-out-of-range";
 
@@ -91,6 +116,13 @@ public static class DiagnosticCodes
 
     /// <summary>声明了 panels 但 weight 不是 full —— **Error**：能力组合矛盾（见协议 §6.1）。</summary>
     public const string PanelsRequireFull = "contributes.panels-require-full";
+
+    /// <summary>
+    /// <c>hotkeys[].opensPanel</c> 引用了本工具未声明的面板（该字段已忽略，热键本身仍可用）。
+    /// **Warn 而非 Error**：热键触发本身是好的，只是"顺手开面板"这一步落空 ——
+    /// 与 <see cref="PanelUnknownCommand"/> 区别在于后者按钮点了会报错，本项只是少了个副作用。
+    /// </summary>
+    public const string HotkeyUnknownPanel = "contributes.hotkey-unknown-panel";
 
     // ── 资源 ──
     public const string UnknownNeed = "needs.unknown-value";

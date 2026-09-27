@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """工具基类与主循环。
 
 设计取舍说明（为什么 SDK 要读 ``tool.json``）：
@@ -81,6 +84,24 @@ class Tool:
 
         def decorator(fn: Handler) -> Handler:
             self._handlers[command_id] = fn
+            return fn
+
+        return decorator
+
+    def on_recover(self) -> Callable[[Handler], Handler]:
+        """注册 ``tool.recover`` 恢复钩子（``__on_recover__`` 的公开注册面）。
+
+        **lifecycle=resident 的工具必须注册**（清单须同时声明 ``"recover": true``，
+        否则清单解析出 Error、工具不注册 —— 设计方案 §8.2 / W3 P0-3）。
+        宿主在崩溃自动重启后调用它，``args["lastState"]`` 携带上次
+        ``tool.stop`` 前宿主留存的快照（当前版本宿主发空对象，字段为将来扩展保留）。
+
+        非 resident 工具注册了也会被忽略（清单解析出 ``field.recover-without-resident``
+        警告；运行时宿主不会对非 resident 发 ``tool.recover``）。
+        """
+
+        def decorator(fn: Handler) -> Handler:
+            self._handlers["__on_recover__"] = fn
             return fn
 
         return decorator
@@ -327,6 +348,18 @@ class Tool:
         raise _p.RpcError(f"工具未实现方法 {method}", _p.METHOD_NOT_FOUND)
 
     def _invoke(self, params: Dict[str, Any]) -> Any:
+        """处理 ``tool.invoke``。
+
+        **⚠️ 面板拉取也走这条路**（宿主发 ``handler: "panel_data"``）——
+        所以工具面板 handler 收到的 ``args`` 就是宿主拼的
+        ``{"panelId", "context", "inputs"}``，其中 ``inputs`` 是 **V1.3 的输入快照**
+        （协议 §3.7.2）：本面板上各 ``input`` 节点当前值，按 ``key`` 索引。
+        三条契约（同上，工具作者必读）：
+
+        1. **未出现 = 空**：``args.get("inputs", {}).get("q", "")`` —— 别断言键一定在。
+        2. **快照，不是事件流**：宿主有节流（§3.7.3），中间值会被合并，**收不到每一次按键**。
+        3. **无状态纯函数**：``inputs → nodes``，别用"上次值 + 增量"（§3.7.5）。
+        """
         handler_name = params.get("handler")
         command_id = params.get("commandId")
 
@@ -363,6 +396,25 @@ class Tool:
         handler 名固定为 ``panel_data``（一个 handler 用 ``args.panelId`` 分派），
         不是每个面板一个 handler —— 见 docs/P4-Wave2c-面板协议.md §8.1。
 
+        **⚠️ 2026-09-23 更正：本方法在现行宿主下【从未被走到】。**
+        宿主拉面板走的是 **``tool.invoke``** 的 ``handler`` 形态
+        （``ToolHostManager.PanelDataHandler`` + ``InvokeHandlerAsync``），
+        不是 ``tool.panel.data`` 协议方法 —— 所以真正执行的是 :meth:`_invoke` → ``fn(args)``。
+        本方法保留为"若将来真改成协议方法"的兼容分支。
+
+        **据此的纪律**：与面板有关的行为契约（如 ``inputs`` 的形状）**不要只写在这里** ——
+        写了也不生效。工具侧读 ``inputs`` 的正确来源是 handler 的 ``args``
+        （由 :meth:`_invoke` 透传），见 ``tools/paneltool/main.py`` 的 ``panel_data``。
+
+        三条要写进工具作者脑子里的事（与 §3.7.2 对应）：
+
+        1. **未出现 = 空**。某个 key 没在 ``inputs`` 里就是空串 ——
+           ``args.get("inputs", {}).get("q", "")``。不要断言"一定有那个 key"。
+        2. **快照，不是事件流**。宿主有节流（§3.7.3），快速输入时会**合并掉中间值**，
+           工具**收不到每一次按键**。依赖"每个字符都会来一次"的实现会在快速输入下漏字。
+        3. **无状态纯函数**。用本次请求里带的值算，**不要**用"上次收到的值 + 增量" ——
+           那正是 §3.7.5 明确禁止的写法。
+
         **未注册 handler 时返回空面板而不是报错**：与 ``tool.recover`` 的"明确告知未实现"
         不同 —— 空面板是**合法状态**（工具确实没东西可显示），报错会让宿主显示一个
         吓人的错误面板，而实际语义只是"暂无内容"。
@@ -375,6 +427,7 @@ class Tool:
             {
                 "panelId": params.get("panelId"),
                 "context": params.get("context") or {},
+                "inputs": params.get("inputs") or {},
             }
         )
         if isinstance(result, dict):

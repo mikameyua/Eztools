@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -204,7 +207,23 @@ internal sealed class RuntimeMarker
         }
     }
 
-    public void Write(string runtimeRoot)
+    /// <summary>
+    /// 写入标记，**带瞬时占用重试**。返回实际尝试次数（&gt;1 ⇒ 期间遇到过占用）。
+    ///
+    /// 为什么必须重试（实测，2026-09-22，复现 5/5 次）：
+    /// 全新解压运行时之后，**SDK 植入结束时**的这次写入会报
+    /// <c>Access to the path '…\.ezt-runtime.json' is denied.</c>
+    /// 而反证成立：① 该文件**同一次运行中刚被本进程成功创建过**（首写成功、二写失败）；
+    /// ② 事后用 bash 追加同一文件正常、无只读属性；③ 换仓库外路径同样复现。
+    /// ⇒ 指向"第三方（杀软 / 索引器）在刚解压的上千个文件上做实时扫描，期间短暂持有句柄"。
+    /// 这类占用**短暂且与调用方无关**，重试是 Windows 上的标准应对；
+    /// 不重试的后果是"首次部署必定失败"（表现还极具误导性：日志说部署完成，30 秒后才报错）。
+    ///
+    /// 🔴 只对**瞬时**类异常重试（<see cref="IOException"/> /
+    /// <see cref="UnauthorizedAccessException"/>）；其余异常直接抛，不做无谓等待。
+    /// 重试耗尽后抛**最后一次**异常，绝不吞错 —— 否则真实故障会被伪装成"重试过但不行"。
+    /// </summary>
+    public int Write(string runtimeRoot)
     {
         var node = new JsonObject
         {
@@ -219,9 +238,28 @@ internal sealed class RuntimeMarker
             ["fileCount"] = FileCount,
         };
 
-        File.WriteAllText(
-            Path.Combine(runtimeRoot, FileName),
-            node.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
-            new System.Text.UTF8Encoding(false));
+        var json = node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        var path = Path.Combine(runtimeRoot, FileName);
+
+        // 退避序列合计上限约 3.1 s（5 次重试）。
+        // 取值依据 = **实测**：修好后首次部署只用了 1 次重试（约 100 ms）就成功。
+        // 这里留约 30 倍余量以覆盖更繁忙的机器（杀软扫描负载不同），
+        // 同时把"万一真的一直占用"的最坏等待压在 3 s 级 ——
+        // 不再给到 10 s：那是**没有数据时的**保守猜测，现在有数据了就该收窄。
+        int[] delaysMs = { 100, 200, 400, 800, 1600 };
+
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.WriteAllText(path, json, new System.Text.UTF8Encoding(false));
+                return attempt;
+            }
+            catch (Exception ex) when (
+                attempt <= delaysMs.Length && (ex is IOException or UnauthorizedAccessException))
+            {
+                Thread.Sleep(delaysMs[attempt - 1]);
+            }
+        }
     }
 }

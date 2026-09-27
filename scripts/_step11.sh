@@ -4,10 +4,11 @@
 #   B. CLI 仲裁归属：--json 恰有 1 wins / 1 blocked-by（按 hk-a/hk-b 过滤——--tools-dir 是追加语义）
 #   C. 改键往返：双 set 制造冲突 → 归属按 Id 序 → 双 unset 回默认（跑在真实安装根，注意还原）
 #
-# 🔴 内嵌 python 一律用**单引号 heredoc**（`$PY <<'EOF'`），不要用 `$PY -c "..."`：
+# 🔴 内嵌 python 一律用**单引号 heredoc**（$PY 加 <<'EOF'），不要用 $PY -c 加双引号串：
 #    python 代码里的 f-string 双引号会终止 bash 的双引号串，把代码炸成 shell 语法错误。
+#    （此处刻意不写反引号：注释里的反引号仍会被 bash 做命令替换。）
 
-step "11/11  热键仲裁：静态冲突 / CLI 归属 / 改键往返"
+step "11/18  热键仲裁：静态冲突 / CLI 归属 / 改键往返"
 
 HK="$WORK/devtools-hk"
 mkdir -p "$HK/hk-a" "$HK/hk-b"

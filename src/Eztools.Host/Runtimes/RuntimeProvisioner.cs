@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -349,7 +352,7 @@ public sealed class RuntimeProvisioner
             MoveDirectory(extractRoot, target);
             step($"落位到 {target}");
 
-            new RuntimeMarker
+            var installMarkerAttempts = new RuntimeMarker
             {
                 Runtime = payload.Runtime,
                 Version = payload.Version,
@@ -359,6 +362,15 @@ public sealed class RuntimeProvisioner
                 InstalledAt = DateTimeOffset.Now.ToString("O"),
                 FileCount = fileCount,
             }.Write(target);
+
+            // 重试过就说出来：静默重试会让"这台机器上文件被占用"这件事永远不可见，
+            // 而它正是"首次部署失败"的成因（见 RuntimeMarker.Write 的注释）。
+            if (installMarkerAttempts > 1)
+            {
+                _log.Warn(
+                    $"安装标记写入遇到占用，重试 {installMarkerAttempts - 1} 次后成功（共 {installMarkerAttempts} 次尝试）",
+                    "runtime");
+            }
 
             _log.Info(
                 $"运行时部署完成: {payload.Runtime} {payload.Version} " +
@@ -435,7 +447,15 @@ public sealed class RuntimeProvisioner
         };
         refreshed.SdkVersion = fingerprint;
         refreshed.InstalledAt ??= DateTimeOffset.Now.ToString("O");
-        refreshed.Write(installation.Root);
+        // ★ 这一次写入是"首次部署必然失败"实际发生的位置（实测）：它在 SDK 植入结束时执行，
+        //   而那时刚解压的上千个文件很可能正被第三方扫描。详见 RuntimeMarker.Write 的注释。
+        var sdkMarkerAttempts = refreshed.Write(installation.Root);
+        if (sdkMarkerAttempts > 1)
+        {
+            _log.Warn(
+                $"安装标记写入遇到占用，重试 {sdkMarkerAttempts - 1} 次后成功（共 {sdkMarkerAttempts} 次尝试）",
+                "runtime");
+        }
 
         step($"SDK 已植入 {destination}（{fingerprint}）");
         _log.Info($"Python SDK 植入完成: {destination}（{fingerprint}）", "runtime");

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "task 生命周期验收工具：常驻宿主启动时由宿主执行一次 startup 命令（写标记文件），验证启动钩子",
   "author": "Eztools",
+  "license": "GPL-3.0-or-later",
   "runtime": "python",
   "runtimeVersion": ">=3.11",
   "entry": "main.py",

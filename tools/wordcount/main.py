@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eztools contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """文本统计工具：演示"带配置 schema 的工具"长什么样。
 
 它同时覆盖了四类贡献点（commands / actions / hotkeys / menus）与三项配置，

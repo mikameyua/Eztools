@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Eztools contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
 using Eztools.Host;
@@ -37,12 +40,16 @@ internal static class HotkeysCommand
         return 64;
     }
 
-    /// <summary>收集全部生效热键并仲裁。返回（claims, result, 来源标注）。</summary>
-    private static (List<HotkeyClaim> Claims, HotkeyArbitrationResult Result, Dictionary<string, string> Sources)
+    /// <summary>收集全部生效热键并仲裁。返回（claims, result, 来源标注, 面板归属）。</summary>
+    private static (List<HotkeyClaim> Claims,
+                    HotkeyArbitrationResult Result,
+                    Dictionary<string, string> Sources,
+                    Dictionary<string, string> OpensPanels)
         Collect(EztoolsHost host)
     {
         var claims = new List<HotkeyClaim>();
         var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var opensPanels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (tool, hotkey, effective) in host.Registry.Hotkeys(host.StateStore))
         {
@@ -55,14 +62,21 @@ internal static class HotkeysCommand
 
             claims.Add(new HotkeyClaim(tool.Id, hotkey.Command, combo, claims.Count));
             sources[hotkey.Command] = effective == hotkey.Default ? "默认" : $"覆盖（原 {hotkey.Default}）";
+
+            // opensPanel 是"命令成功后的附加动作"，属于**声明面**而非仲裁面 ——
+            // 仲裁只裁决"键归谁"（HotkeyClaim 也没有它的位置），所以这里单独带出来给 ezt hotkeys 显示。
+            if (hotkey.OpensPanel is { Length: > 0 } panelId)
+            {
+                opensPanels[hotkey.Command] = panelId;
+            }
         }
 
-        return (claims, HotkeyArbitration.Arbitrate(claims), sources);
+        return (claims, HotkeyArbitration.Arbitrate(claims), sources, opensPanels);
     }
 
     private static int List(EztoolsHost host, CliArgs cli)
     {
-        var (claims, result, sources) = Collect(host);
+        var (claims, result, sources, opensPanels) = Collect(host);
 
         if (cli.GetBool("json"))
         {
@@ -74,14 +88,23 @@ internal static class HotkeysCommand
                 var blockedBy = result.Winners.TryGetValue(rid, out var holder) && !isWinner
                     ? holder.ToolId
                     : null;
-                node.Add(new JsonObject
+                var entry = new JsonObject
                 {
                     ["combo"] = claim.Combo.Normalized,
                     ["tool"] = claim.ToolId,
                     ["command"] = claim.Command,
                     ["source"] = sources.GetValueOrDefault(claim.Command, "默认"),
                     ["status"] = isWinner ? "wins" : $"blocked-by:{blockedBy}",
-                });
+                };
+
+                // 仅声明了才加这个键（`["k"] = null` 会序列化成 `"k": null` 而非省略）——
+                // 断言用"键是否存在"判断"这条热键会不会开面板"，null 占位会让它永远为真。
+                if (opensPanels.TryGetValue(claim.Command, out var opensPanel))
+                {
+                    entry["opensPanel"] = opensPanel;
+                }
+
+                node.Add(entry);
             }
 
             ConsoleUi.PrintJson(new JsonObject
@@ -149,7 +172,7 @@ internal static class HotkeysCommand
         host.StateStore.SetHotkeyOverride(toolId, command, combo.Normalized);
         ConsoleUi.Ok($"已覆盖 {command} → {combo.Normalized}（{toolId}）");
 
-        var (_, result, _) = Collect(host);
+        var (_, result, _, _) = Collect(host);
         if (result.Losers.Count > 0)
         {
             foreach (var (loser, heldBy) in result.Losers)
