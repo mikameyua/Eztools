@@ -178,6 +178,14 @@ internal sealed class DesktopOptions
     public bool ProbeClipMonitor { get; private init; }
 
     /// <summary>
+    /// 图片 OCR 提字探针（--probe-clip-ocr，W5-d FR-15 验收面）：
+    /// 渲染已知文字样图入库 → 面板唤出 → **真实菜单点击链** → 断言剪贴板拿到该文字；
+    /// 同时反向断言"非图片条目的菜单项不可用"。语言包缺失时如实落盘并跳过（不伪装成功）。
+    /// 副作用：Summon 抢焦点 1~2 秒 + 改写一次系统剪贴板。
+    /// </summary>
+    public bool ProbeClipOcr { get; private init; }
+
+    /// <summary>
     /// 剪贴板热键真按键探针（--probe-clip-hotkey，W5-c 真机项自动化，--probe-ocr-hotkey 同款）：
     /// keybd_event 注入真实 Ctrl+Alt+V → WM_HOTKEY → 面板唤出 → Esc 真键收窗。
     /// ⚠️ 副作用：真实按键、面板抢焦点 1~2 秒 —— 只能跑在无人交互的会话。
@@ -232,6 +240,7 @@ internal sealed class DesktopOptions
         var probeOcrHotkey = false;
         var probeClipPanel = false;
         var probeClipMonitor = false;
+        var probeClipOcr = false;
         var probeClipHotkey = false;
         var probeWinformsTyping = false;
         var waitReadyMs = 0;
@@ -290,6 +299,9 @@ internal sealed class DesktopOptions
                     break;
                 case "--probe-clip-monitor":
                     probeClipMonitor = true;
+                    break;
+                case "--probe-clip-ocr":
+                    probeClipOcr = true;
                     break;
                 case "--probe-clip-hotkey":
                     probeClipHotkey = true;
@@ -362,6 +374,7 @@ internal sealed class DesktopOptions
             ProbeOcrHotkey = probeOcrHotkey,
             ProbeClipPanel = probeClipPanel,
             ProbeClipMonitor = probeClipMonitor,
+            ProbeClipOcr = probeClipOcr,
             ProbeClipHotkey = probeClipHotkey,
             ProbeWinFormsTyping = probeWinformsTyping,
             WaitReadyMs = waitReadyMs,

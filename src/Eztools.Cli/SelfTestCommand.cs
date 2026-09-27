@@ -4296,6 +4296,35 @@ internal static class SelfTestCommand
                 d1 == PrivacyDecision.Blocked && d2 == PrivacyDecision.Blocked
                     && d3 == PrivacyDecision.Allow && d4 == PrivacyDecision.Paused,
                 "Blocked/Allow/Paused 三态可区分");
+
+            // 15) 孤儿图片对账（R8 启动侧防线，W5-d）——**必须正反双向**：
+            //     正向"无主 PNG 被清掉"很容易假绿（比如实现改成"全删"也通过），
+            //     所以配一条反向"仍被引用的 PNG 不许删" —— 否则对账就成了删数据。
+            var sweepKept = store1.Upsert(new ClipEntry
+            {
+                Kind = ClipKind.Image,
+                Content = null,
+                Preview = "对账保留条目",
+                ImagePath = "keep-me.png",
+                ImageBytes = 3,
+                Hash = CaptureService.ComputeHash("sweep:keep"),
+            });
+            var keepPath = Path.Combine(imagesDir, "keep-me.png");
+            var orphanPath = Path.Combine(imagesDir, "orphan-no-ref.png");
+            File.WriteAllBytes(keepPath, new byte[] { 1, 2, 3 });
+            File.WriteAllBytes(orphanPath, new byte[] { 9, 9, 9 });
+
+            var swept = store1.SweepOrphanImages();
+            Report(
+                "孤儿图片对账：无主 PNG 被清理（正向）",
+                !File.Exists(orphanPath) && swept >= 1,
+                $"swept={swept}, orphanExists={File.Exists(orphanPath)}");
+            Report(
+                "孤儿图片对账：仍被引用的 PNG 不被误删（反向）",
+                File.Exists(keepPath),
+                $"keepExists={File.Exists(keepPath)}");
+
+            store1.Delete(sweepKept.Entry.Id);
         }
         finally
         {

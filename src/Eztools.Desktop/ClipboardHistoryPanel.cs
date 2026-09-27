@@ -14,6 +14,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Eztools.ClipboardLib;
+using Eztools.Ocr;
 using InputCmd = Eztools.Desktop.NativeInputBox.InputCommand;
 
 namespace Eztools.Desktop;
@@ -59,30 +60,37 @@ public sealed class ClipboardHistoryPanel : Window
 
     private readonly HistoryStore _store;
     private readonly Action<string>? _notify;   // 直贴降级/错误提示走托盘气泡（面板隐藏后没有别的嘴）
+    private readonly string? _ocrLanguage;      // OCR 提字用的语言标签（W5-d FR-15；null = 引擎自动选）
 
     private readonly NativeInputBox _input;
     private readonly ListBox _results;
     private readonly ComboBox _kindFilter;
     private readonly TextBlock _status;
     private readonly TextBlock _statusRight;
+    private readonly MenuItem _ocrMenuItem;
 
     private bool _realClose;            // 仅托盘退出/探针收尾置位（X=隐藏）
     private bool _summoning;            // 唤出期屏蔽瞬态 Deactivated
     private bool _suppressReload;       // 程序化设文本不得反过来触发过滤（21.6 同族）
+    private bool _ocrBusy;              // OCR 进行中（防连点重复识别）
     private nint _lastForeground;       // 唤出前的前台窗口（直贴还原目标；0 = 未知）
     private List<ClipEntry> _current = new();
 
-    public ClipboardHistoryPanel(HistoryStore store, Action<string>? notify = null)
+    public ClipboardHistoryPanel(HistoryStore store, Action<string>? notify = null, string? ocrLanguage = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _notify = notify;
+        _ocrLanguage = string.IsNullOrWhiteSpace(ocrLanguage) ? null : ocrLanguage.Trim();
 
         Title = "Eztools 剪贴板历史";
         Width = 680;
         Height = 520;
         MinWidth = 440;
         MinHeight = 280;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        // ★ 位置 = 跟随光标（W5-d「视线不跳」）：不做 CenterScreen 自动居中 ——
+        //   居中会让用户的视线从光标跳走；改为每次唤出按光标所在显示器定位（见 PositionNearCursor）。
+        //   Manual 是必须的：非 Manual 时每次 Show() 都会按策略重新定位，覆盖我们的 SetWindowPos。
+        WindowStartupLocation = WindowStartupLocation.Manual;
         Topmost = true;                    // 热键召唤的窗必须在最前
         ShowInTaskbar = false;             // 临时浮层不占任务栏
         UseLayoutRounding = true;
@@ -141,6 +149,31 @@ public sealed class ClipboardHistoryPanel : Window
         _results.SetValue(VirtualizingPanel.IsVirtualizingProperty, true);
         _results.SetValue(VirtualizingPanel.VirtualizationModeProperty, VirtualizationMode.Recycling);
         _results.SetValue(ScrollViewer.CanContentScrollProperty, true);
+
+        // ── 右键菜单（W5-d · FR-15：图片条目 OCR 提字）──────────────────────────
+        // 非图片条目**置灰**而不是隐藏菜单项：隐藏会让用户以为"这功能不存在"，
+        // 置灰表达的是"有这功能，但这条用不上"（两者对用户的信息量完全不同）。
+        _ocrMenuItem = new MenuItem { Header = "提取文字（OCR）" };
+        _ocrMenuItem.Click += (_, _) => ExtractTextFromSelectedImage();
+
+        var menu = new ContextMenu();
+        menu.Items.Add(_ocrMenuItem);
+        menu.Opened += (_, _) =>
+        {
+            _ocrMenuItem.IsEnabled = OcrMenuEnabled;
+            _ocrMenuItem.ToolTip = OcrMenuEnabled ? null : "只有图片条目可以提取文字";
+        };
+        _results.ContextMenu = menu;
+
+        // 右键先选中：ListBox 默认不因右键改变选中项 —— 不处理就会"右键 A、操作了上次选的 B"。
+        // 命中目标通常是模板里的 TextBlock/Run（不是 ListBoxItem 本身），所以要向上找祖先。
+        _results.PreviewMouseRightButtonDown += (_, e) =>
+        {
+            if (FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject) is { } item)
+            {
+                item.IsSelected = true;
+            }
+        };
 
         // ── 状态行 ─────────────────────────────────────────────────────────────
         _status = new TextBlock
@@ -225,6 +258,7 @@ public sealed class ClipboardHistoryPanel : Window
             }
 
             ForceForeground();
+            PositionNearCursor();   // ★ 每次唤出都按光标定位（W5-d「视线不跳」）
             Reload();
             _input.FocusInput();
             _input.SelectAll();
@@ -491,6 +525,120 @@ public sealed class ClipboardHistoryPanel : Window
         _status.Text = err is null ? $"已复制：{_truncate(entry.Preview)}" : $"复制失败：{err}";
     }
 
+    // ────────────────────────────────────────────── OCR 提字（W5-d · FR-15）
+
+    /// <summary>
+    /// OCR 菜单项此刻是否应可用（**单一实现点**：菜单 <c>Opened</c> 处理器与探针断言都读它）。
+    /// 判据 = 当前选中项是图片 且 没有正在进行的识别。
+    /// </summary>
+    private bool OcrMenuEnabled => SelectedEntry()?.Kind == ClipKind.Image && !_ocrBusy;
+
+    /// <summary>
+    /// 图片条目的"提取文字"：复用 W4 引擎把图里的文字提出来放进系统剪贴板。
+    ///
+    /// <para><b>R1 纪律照搬</b>（这是本节唯一不能打折的地方）：语言包缺失 / 引擎建不起来时
+    /// <b>必须显式引导，禁止静默</b>。出口给两个：状态行（用户还看得见面板）+ 托盘气泡
+    /// （用户可能已经按 Esc 收窗，那时状态行没人看得到 —— 面板隐藏后气泡是唯一的嘴）。</para>
+    ///
+    /// <para>线程姿势与 W4 遮罩窗一致：UI 线程上 <c>await RecognizeAsync</c>（引擎自带
+    /// 预处理与缩放，WinRT OCR 是异步的，不阻塞消息泵）。</para>
+    /// </summary>
+    private async void ExtractTextFromSelectedImage()
+    {
+        if (_ocrBusy || SelectedEntry() is not { Kind: ClipKind.Image } entry)
+        {
+            return;
+        }
+
+        _ocrBusy = true;
+        _status.Text = "正在识别文字…";
+        try
+        {
+            if (!OcrLanguages.IsAvailable)
+            {
+                // R1：语言包缺失 ⇒ 显式引导。绝不谎报"图片里没有文字"（那是把"我没能力"
+                // 说成"你没内容"，S9 家族）。
+                _status.Text = "OCR 语言包缺失 —— 需要装 Windows OCR 语言包（见气泡 / `ezt ocr langs`）";
+                _notify?.Invoke($"剪贴板历史：本机没有可用的 OCR 语言包，无法提取文字。\n{OcrLanguages.InstallHint}");
+                return;
+            }
+
+            var full = ResolveImagePath(entry);
+            if (full is null)
+            {
+                _status.Text = "图片文件缺失，无法提取文字";
+                return;
+            }
+
+            var engine = WindowsOcrEngine.TryCreate(_ocrLanguage);
+            if (engine is null)
+            {
+                _status.Text = $"OCR 引擎创建失败（语言 {_ocrLanguage ?? "自动"} 在本机不可用）";
+                _notify?.Invoke("剪贴板历史：OCR 引擎创建失败 —— 先 `ezt ocr langs` 看可用语言包");
+                return;
+            }
+
+            using var bmp = new Drawing.Bitmap(full);
+            var result = await engine.RecognizeAsync(bmp).ConfigureAwait(true);
+            if (string.IsNullOrWhiteSpace(result.Text))
+            {
+                _status.Text = "未识别出文字（这张图里可能确实没有文本）";
+                return;
+            }
+
+            System.Windows.Clipboard.SetText(result.Text);
+            _status.Text = $"已提取文字并复制到剪贴板（{result.Text.Length} 字 · 语言 {engine.LanguageTag}）";
+        }
+        catch (Exception ex)
+        {
+            // 图片损坏 / 剪贴板被别的进程占住 / 引擎异常 —— 全部明示，不静默
+            _status.Text = $"提取文字失败：{ex.Message}";
+        }
+        finally
+        {
+            _ocrBusy = false;
+        }
+    }
+
+    /// <summary>条目图片在磁盘上的绝对路径；文件不存在返回 null。</summary>
+    private string? ResolveImagePath(ClipEntry entry)
+    {
+        if (string.IsNullOrEmpty(entry.ImagePath) || _store.ImagesDirectory is null)
+        {
+            return null;
+        }
+
+        var full = Path.Combine(_store.ImagesDirectory, entry.ImagePath);
+        return File.Exists(full) ? full : null;
+    }
+
+    /// <summary>
+    /// 沿可视/逻辑树向上找祖先。两个树都要走：右键命中的可能是模板里的
+    /// <c>Run</c>（逻辑节点，<see cref="VisualTreeHelper"/> 对它直接抛异常），
+    /// 而中间的容器是可视节点 —— 只用其中一个都会在某一层断掉。
+    /// </summary>
+    private static T? FindAncestor<T>(DependencyObject? node) where T : DependencyObject
+    {
+        while (node is not null)
+        {
+            if (node is T match)
+            {
+                return match;
+            }
+
+            try
+            {
+                node = node is Visual ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node);
+            }
+            catch (InvalidOperationException)
+            {
+                return null;   // 非可视也非逻辑节点（极少数）——放弃，返回 null 由调用方降级
+            }
+        }
+
+        return null;
+    }
+
     // ────────────────────────────────────────────── 键位（命令键由原生输入框上报）
 
     /// <summary>
@@ -593,6 +741,56 @@ public sealed class ClipboardHistoryPanel : Window
     }
 
     /// <summary>
+    /// 把窗口摆到光标附近（W5-d「视线不跳」）。
+    ///
+    /// <para><b>为什么用 SetWindowPos 物理像素，而不是设 WPF 的 Left/Top</b>：WPF 的 Left/Top 是
+    /// <b>DIP</b>，而"光标在哪台显示器、那台显示器缩放多少"必须先知道位置才能算 —— 鸡生蛋问题。
+    /// 走 Win32 这条路径直接用物理像素，跨显示器/混合 DPI 都不需要换算（W4-b 遮罩窗同一教训：
+    /// <b>物理像素定位，不做 DIP 估算</b>）。</para>
+    ///
+    /// <para>越界策略：默认摆在光标右下 12px；右侧/下侧放不下就翻到光标另一侧；仍越界则夹进工作区。
+    /// 用 <c>Screen.FromPoint</c> 取<b>光标所在那台</b>显示器的工作区 —— 副屏坐标原点不是 (0,0)，
+    /// 那是 W4-b 实测踩过的坑。</para>
+    /// </summary>
+    private void PositionNearCursor()
+    {
+        if (!GetCursorPos(out var pt))
+        {
+            return;   // 拿不到光标就保持上次位置，不猜
+        }
+
+        var screen = WinForms.Screen.FromPoint(new Drawing.Point(pt.X, pt.Y));
+        var wa = screen.WorkingArea;
+
+        var hwnd = new WindowInteropHelper(this).EnsureHandle();
+        if (!GetWindowRect(hwnd, out var wr))
+        {
+            return;
+        }
+
+        const int gap = 12;
+        var w = wr.Right - wr.Left;
+        var h = wr.Bottom - wr.Top;
+
+        var x = pt.X + gap;
+        var y = pt.Y + gap;
+        if (x + w > wa.Right)
+        {
+            x = pt.X - w - gap;      // 右侧放不下 ⇒ 翻到光标左侧
+        }
+
+        if (y + h > wa.Bottom)
+        {
+            y = pt.Y - h - gap;      // 下侧放不下 ⇒ 翻到光标上方
+        }
+
+        x = Math.Clamp(x, wa.Left, Math.Max(wa.Left, wa.Right - w));
+        y = Math.Clamp(y, wa.Top, Math.Max(wa.Top, wa.Bottom - h));
+
+        _ = SetWindowPos(hwnd, nint.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    /// <summary>
     /// 恢复输入框的**默认 IME 上下文关联**（与 SearchWindow 同款修复）。
     /// ★ 目标是**原生 EDIT 的 hwnd** —— IME 上下文属于真正接键的那个窗口；
     /// 挂在 WPF 窗口上等于空转（WPF 是 TSF 窗口，ImmGetContext 恒 NULL）。
@@ -684,6 +882,37 @@ public sealed class ClipboardHistoryPanel : Window
     /// </summary>
     internal bool ProbeQueryFocused => _input.IsInputFocused;
 
+    /// <summary>
+    /// 探针：OCR 菜单项此刻**应**是否可用。读的是 <see cref="OcrMenuEnabled"/> ——
+    /// 与菜单 <c>Opened</c> 处理器**同一个实现点**，不是复写一遍判据
+    ///（复写就会出现"测试通过但菜单行为不同步"的假绿）。
+    /// </summary>
+    internal bool ProbeOcrMenuEnabled => OcrMenuEnabled;
+
+    /// <summary>探针：选中第 n 条（造"当前选中项是图片 / 不是图片"两种上下文）。</summary>
+    internal void ProbeSelectIndex(int index)
+    {
+        if (index >= 0 && index < _results.Items.Count)
+        {
+            _results.SelectedIndex = index;
+        }
+    }
+
+    /// <summary>
+    /// 探针：第 n 条的类型（越界 = null）。有了它，探针不必假设"列表按什么顺序排"——
+    /// 靠序号的断言在排序规则变动时会静默错位（测的就不是它以为的那条了）。
+    /// </summary>
+    internal ClipKind? ProbeKindAt(int index) =>
+        index >= 0 && index < _current.Count ? _current[index].Kind : null;
+
+    /// <summary>
+    /// 探针：走**真实菜单点击链**触发 OCR 提字。
+    /// 刻意不直调 <see cref="ExtractTextFromSelectedImage"/> —— 那会绕过"菜单项此刻该不该可用"
+    /// 这一环，而那一环恰恰最容易静默失效（恒可用/恒不可用都测不出来）。
+    /// </summary>
+    internal void ProbeClickExtractText() =>
+        _ocrMenuItem.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+
     internal bool ProbeIsForeground =>
         GetForegroundWindow() == new WindowInteropHelper(this).Handle;
 
@@ -750,6 +979,40 @@ public sealed class ClipboardHistoryPanel : Window
     [DllImport("imm32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ImmAssociateContextEx(nint hWnd, nint hIMC, uint dwFlags);
+
+    // ── 跟随光标定位（W5-d）─────────────────────────────────────────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out POINT point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
 
     // ────────────────────────────────────────────── 条目视图
 

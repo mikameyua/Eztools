@@ -247,6 +247,64 @@ public sealed class HistoryStore : IDisposable
     }
 
     /// <summary>单条删除（FR-9）。返回是否真删了（id 不存在 = false）。</summary>
+    /// <summary>
+    /// 孤儿图片对账（R8 的**启动侧**防线，W5-d）：删掉 <c>images/</c> 里没有任何条目引用的 PNG。
+    ///
+    /// <para><b>为什么必须有它</b>：写入侧防线（删条目时同步 <see cref="DeleteImageFile"/>）只覆盖
+    /// "经本程序删除"的路径。进程被强杀、裁剪/清理只完成一半、用户手工动过 db、旧版本遗留文件 ——
+    /// 都会在 <c>images/</c> 里积出**无主 PNG**：任何查询都引用不到它们，只吃磁盘。启动时对一次账，
+    /// 代价 = 列一次目录 + 一次 SELECT。</para>
+    ///
+    /// <para><b>只删"确切无主"的</b>：文件名不在 DB 的 <c>image_path</c> 集合里即判孤儿。
+    /// 反向情形（DB 有引用但文件没了）**不在这里处理** —— 那是"缩略图缺失"，渲染层已有
+    /// "文件坏/被删 ⇒ 不显示缩略图"的降级；对账不该反过来去删 DB 记录（那才是真的丢数据）。</para>
+    /// </summary>
+    /// <returns>实际删掉的文件数。</returns>
+    public int SweepOrphanImages()
+    {
+        if (_imagesDir is null || !Directory.Exists(_imagesDir))
+        {
+            return 0;
+        }
+
+        List<string> referenced;
+        lock (_gate)
+        {
+            referenced = Query(
+                    "SELECT image_path FROM clips WHERE image_path IS NOT NULL",
+                    read => read.IsDBNull(0) ? null : read.GetString(0))
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Select(p => p!)
+                .ToList();
+        }
+
+        var alive = referenced.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var removed = 0;
+        foreach (var full in Directory.EnumerateFiles(_imagesDir, "*.png"))
+        {
+            if (alive.Contains(Path.GetFileName(full)))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Delete(full);
+                removed++;
+            }
+            catch (IOException)
+            {
+                // 文件被占用（另一实例正拿它做缩略图）——下次启动再对账。不重试、不抛。
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // 权限问题同上：对账是"清理优化"，绝不能因为它让启动失败。
+            }
+        }
+
+        return removed;
+    }
+
     public bool Delete(long id)
     {
         lock (_gate)

@@ -6,27 +6,27 @@ using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
 using Eztools.ClipboardLib;
+using Eztools.Ocr;
 
 namespace Eztools.Desktop;
 
 /// <summary>
-/// 剪贴板面板探针（--probe-clip-panel，W5-b 验收面）。
+/// 剪贴板面板探针（--probe-clip-panel / --probe-clip-ocr）。
 ///
 /// <b>Phase A（生命周期，确定性）</b>：临时库预置条目 → Toggle 循环 ×4（采样
 /// visible/active/queryFocused 三时点）→ Close 模拟点 X → 再唤出（"X=隐藏"契约）→
 /// 程序化搜索过滤。
 ///
-/// <b>Phase B（直贴契约，真键 Enter）</b>：Summon（真抢焦点，与真热键同代价）→
-/// 程序化提交搜索词 → keybd_event 注入真实 VK_RETURN →
+/// <b>Phase B（直贴契约）</b>：Summon（真抢焦点）→ 程序化提交搜索词 → 注入 Enter →
 /// <b>断言：面板已隐藏 + 剪贴板内容逐字等于条目内容</b>。
 ///
-/// <b>★ enterFired / vkAfter* 是诊断面不是断言面</b>（2026-09-26 实测）：探针上下文
-/// 没有 Win32 消息泵（<c>PumpFor</c> 只排 Dispatcher 队列），WM_KEYDOWN 永远不会被
-/// dispatch ⇒ WPF 键盘事件管线（HwndSource 钩子 / PreviewKeyDown）整个不跑，
-/// <c>vkAfterPost=-1</c>（PostMessage 直投也收不到）就是钩子从未挂上的铁证。
-/// 此时 Enter 直贴由 <b>GetAsyncKeyState 轮询兜底</b>完成 —— 这正是键盘链
-/// 双通路设计的直接实证（§2.26②：消息层会丢键，轮询与消息层幂等）。真实运行时
-/// （Application.Run 主泵 + 用户真按键）消息层正常，两路全活。
+/// <b>Phase C（OCR 提字，--probe-clip-ocr 选通，W5-d FR-15）</b>：渲染一张**已知文字**的
+/// 样图入库 → 走真实菜单点击链 → 断言剪贴板拿到该文字。语言包缺失时如实落盘并跳过。
+///
+/// <b>★ 注入姿势（2026-09-27 换实现后重定）</b>：真键 <c>keybd_event</c> 与用户路径同源，
+/// 但探针进程常抢不到系统前台（§2.26⑦）—— 所以直贴契约**先试真键、失败再 <c>PostMessage</c>
+/// 直投原生 EDIT 句柄**，并把生效的那条路写进 <c>resolvedBy</c>。两条路都进 EDIT 的窗口过程，
+/// 都真实穿过 <c>NativeInputBox</c> 的命令上报链（没有旁路）。
 ///
 /// ⚠️ <b>Ctrl+V 真注入被抑制</b>（<see cref="ClipboardHistoryPanel.ProbeSuppressInject"/>）：
 /// 真注入会把内容贴进运行探针的终端 —— 那是不可接受的副作用。"还原前台 + 注入"的
@@ -181,14 +181,169 @@ internal static class ClipboardPanelProbe
         }
     }
 
-    private static ClipEntry MakeTextEntry(string content) => new()
-    {
+    private static ClipEntry MakeTextEntry(string content) => new()    {
         Kind = ClipKind.Text,
         Content = content,
         Preview = content,
         Hash = CaptureService.ComputeHash(content),
         SourceApp = "clip-panel-probe.exe",
     };
+
+    // ── Phase C：OCR 提字（W5-d · FR-15）───────────────────────────────────
+
+    /// <summary>
+    /// 图片 OCR 提字探针（--probe-clip-ocr）：渲染「已知文字」样图入库 → 面板唤出 →
+    /// 分别选中文本条目（反向）与图片条目（正向）→ 走**真实菜单点击链** →
+    /// 断言系统剪贴板拿到了该文字。
+    ///
+    /// <para>判据与 <c>ezt ocr probe</c> <b>同口径</b>：样图文本 "EZTOOLS OCR 2026"，
+    /// 需认出「含 OCR + 含数字 + 长度 ≥ 8」—— OCR 存在识别误差，<b>逐字相等是伪判据</b>。</para>
+    ///
+    /// <para>语言包缺失时**如实落盘并跳过**（<c>skipped="no-language-pack"</c>），不伪装成功 ——
+    /// 与 verify-desktop 既有 OCR 段同口径。</para>
+    /// </summary>
+    public static JsonObject RunOcrProbe()
+    {
+        // 与 ezt ocr probe 的样图文本保持一致（同一条「引擎下限」判据）
+        const string sampleText = "EZTOOLS OCR 2026";
+
+        var json = new JsonObject { ["ok"] = false };
+        var dbDir = Path.Combine(Path.GetTempPath(), "ezt-clip-ocr-probe", Guid.NewGuid().ToString("N")[..12]);
+        var imagesDir = Path.Combine(dbDir, "images");
+        Directory.CreateDirectory(imagesDir);
+
+        var store = new HistoryStore(Path.Combine(dbDir, "clips.db"), imagesDir);
+        try
+        {
+            var tags = OcrLanguages.AvailableTags();
+            json["languagePacks"] = tags.Count;
+            if (tags.Count == 0)
+            {
+                json["skipped"] = "no-language-pack";
+                json["message"] = OcrLanguages.InstallHint;
+                return json;   // ok 保持 false；上层据 skipped 判"跳过"而不是"失败"
+            }
+
+            // 1) 图片条目：白底黑字样图（零外部依赖，文字已知）
+            using (var sample = SampleImage.RenderText(sampleText))
+            {
+                var samplePath = Path.Combine(imagesDir, "ocr-sample.png");
+                sample.Save(samplePath, Drawing.Imaging.ImageFormat.Png);
+                var bytes = new FileInfo(samplePath).Length;
+                store.Upsert(new ClipEntry
+                {
+                    Kind = ClipKind.Image,
+                    Content = null,
+                    Preview = "OCR 样图",
+                    ImagePath = "ocr-sample.png",
+                    ImageBytes = bytes,
+                    Hash = CaptureService.ComputeHash($"ocr-sample:{bytes}"),
+                });
+            }
+
+            // 2) 文本条目：反向判据用（非图片 ⇒ 菜单项必须不可用）
+            store.Upsert(MakeTextEntry("OCR 反向断言用文本条目"));
+
+            var panel = new ClipboardHistoryPanel(store) { ProbeSuppressInject = true };
+            try
+            {
+                panel.Summon();
+                PumpFor(300);
+
+                // 按类型找下标，不假设排序（排序规则变了也不会静默错位）
+                var imageIndex = -1;
+                var textIndex = -1;
+                for (var i = 0; i < panel.ProbeItemCount; i++)
+                {
+                    var kind = panel.ProbeKindAt(i);
+                    if (kind == ClipKind.Image && imageIndex < 0)
+                    {
+                        imageIndex = i;
+                    }
+                    else if (kind == ClipKind.Text && textIndex < 0)
+                    {
+                        textIndex = i;
+                    }
+                }
+
+                json["imageIndex"] = imageIndex;
+                json["textIndex"] = textIndex;
+
+                panel.ProbeSelectIndex(textIndex);
+                PumpFor(120);
+                json["menuEnabledForText"] = panel.ProbeOcrMenuEnabled;
+
+                panel.ProbeSelectIndex(imageIndex);
+                PumpFor(120);
+                json["menuEnabledForImage"] = panel.ProbeOcrMenuEnabled;
+
+                // 走真实菜单点击链（RoutedEvent，不经私有方法直调）
+                panel.ProbeClickExtractText();
+
+                // OCR 是异步的：泵到状态行给出终态（已提取 / 未识别 / 失败 / 语言包），最多 20s
+                var status = "";
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 20_000)
+                {
+                    PumpFor(250);
+                    status = panel.ProbeStatusText;
+                    if (status.Contains("已提取", StringComparison.Ordinal)
+                        || status.Contains("未识别", StringComparison.Ordinal)
+                        || status.Contains("失败", StringComparison.Ordinal)
+                        || status.Contains("语言包", StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+                }
+
+                json["elapsedMs"] = (int)sw.ElapsedMilliseconds;
+                json["statusText"] = status;
+
+                var text = "";
+                try
+                {
+                    text = System.Windows.Clipboard.GetText() ?? "";
+                }
+                catch (Exception ex)
+                {
+                    json["clipboardError"] = ex.Message;   // 被占用：recognized=false 显式红，不空过
+                }
+
+                json["clipboard"] = text;
+                var recognized = text.Contains("OCR", StringComparison.OrdinalIgnoreCase)
+                    && text.Any(char.IsDigit)
+                    && text.Length >= 8;
+                json["recognized"] = recognized;
+
+                // 三个判据缺一不可：非图片不可用（反向）/ 图片可用（正向）/ 真提出了字
+                json["ok"] = json["menuEnabledForText"]?.GetValue<bool>() == false
+                    && json["menuEnabledForImage"]?.GetValue<bool>() == true
+                    && recognized;
+            }
+            finally
+            {
+                panel.CloseForProbe();
+            }
+        }
+        catch (Exception ex)
+        {
+            json["error"] = ex.Message;
+        }
+        finally
+        {
+            store.Dispose();
+            try
+            {
+                Directory.Delete(dbDir, recursive: true);
+            }
+            catch (IOException)
+            {
+                // 临时目录清理失败不碍验收（系统 temp 兜底）
+            }
+        }
+
+        return json;
+    }
 
     // ── Phase A ──────────────────────────────────────────────────────────
 

@@ -76,6 +76,8 @@ internal sealed class TrayApplication : IDisposable
     private int? _clipHotkeyId;
     private int _clipCaptured;             // 本次会话捕获条数（selfcheck 展示）
     private bool _clipOversizeWarned;      // >20MB 一次性气泡（R5：不刷屏）
+    private bool _clipUipiWarned;          // UIPI 降级一次性气泡（W5-d：同上，不刷屏）
+    private bool _clipSwept;               // 孤儿图片对账已跑（W5-d：每会话一次）
     private int? _searchHotkeyId;
 
     // ── 屏幕取字（W4-c）：遮罩管理器与热键 id，同样懒创建 ──
@@ -325,6 +327,14 @@ internal sealed class TrayApplication : IDisposable
         if (_options.ProbeClipHotkey)
         {
             var code = RunProbeClipHotkey();
+            Dispose();
+            return code;
+        }
+
+        // 图片 OCR 提字探针（W5-d FR-15）：真实菜单点击链 → 剪贴板拿到已知样图文字。
+        if (_options.ProbeClipOcr)
+        {
+            var code = RunProbeClipOcr();
             Dispose();
             return code;
         }
@@ -626,6 +636,27 @@ internal sealed class TrayApplication : IDisposable
             if (monitor.Start())
             {
                 _clipMonitor = monitor;
+
+                // ★ 孤儿图片对账（R8 的启动侧防线，W5-d）：本次会话只在首次启动监听时跑一次。
+                //   写入侧防线只覆盖"经本程序删除"，强杀/半途中断/手工动库留下的无主 PNG
+                //   只有这里能收。对账是清理优化 —— 异常一律吞掉并记日志，绝不拖垮启动。
+                if (!_clipSwept)
+                {
+                    _clipSwept = true;
+                    try
+                    {
+                        var swept = EnsureClipStore().SweepOrphanImages();
+                        if (swept > 0)
+                        {
+                            _host?.Log.Info($"孤儿图片对账：清理 {swept} 个无主 PNG（images/ 与库不一致）", "clip");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _host?.Log.Warn($"孤儿图片对账失败（忽略）：{ex.Message}", "clip");
+                    }
+                }
+
                 _host?.Log.Info($"剪贴板监听已启动（消息驱动 · 上限 {_clipMaxItems} 条 · 黑名单 {_clipFilter.BlacklistSnapshot().Count} 个）", "clip");
             }
             else
@@ -668,6 +699,32 @@ internal sealed class TrayApplication : IDisposable
                 && _clipFilter.Evaluate(src) == PrivacyDecision.Blocked)
             {
                 _host?.Log.Info($"剪贴板黑名单命中，未保存（{src}）", "clip");
+                return;
+            }
+
+            // ★ UIPI 降级（FR-11③，W5-d 补齐桌面路径）：提权进程写剪贴板时，
+            //   非提权进程**收得到通知却读不到内容**（表现为：有 owner、三类内容全空）。
+            //   以前这里是"静默什么都不做"，用户会以为工具坏了 —— 改成记一条**占位条目**
+            //   （只记来源，绝不存内容）+ 一次性气泡（与 20MB 超限同款"一次性"语义，不刷屏）。
+            //   CLI 路径早有这条（ClipCommand），桌面路径之前漏了，属于能力不对等。
+            if (snapshot.OwnerElevated
+                && snapshot.OwnerProcess is { } elevatedOwner
+                && snapshot.Text is null
+                && snapshot.Image is null
+                && snapshot.Files.Count == 0)
+            {
+                EnsureClipStore().Upsert(CaptureService.FromPlaceholder(elevatedOwner), _clipMaxItems);
+                _clipCaptured++;
+                _clipPanel?.OnExternalChange();
+                if (!_clipUipiWarned)
+                {
+                    _clipUipiWarned = true;
+                    _icon.ShowBalloonTip(5000, "剪贴板历史",
+                        $"提权进程（{elevatedOwner}）复制的内容读不到（Windows 权限隔离），已记一条占位条目，不保存内容。",
+                        ToolTipIcon.Info);
+                }
+
+                _host?.Log.Info($"剪贴板 UIPI 降级：提权进程 {elevatedOwner} 的内容不可读，已记占位条目（FR-11③）", "clip");
                 return;
             }
 
@@ -900,7 +957,8 @@ internal sealed class TrayApplication : IDisposable
 
         _clipPanel = new ClipboardHistoryPanel(
             EnsureClipStore(),
-            msg => _icon.ShowBalloonTip(5000, "剪贴板历史", Shorten(msg, 240), ToolTipIcon.Info));
+            msg => _icon.ShowBalloonTip(5000, "剪贴板历史", Shorten(msg, 240), ToolTipIcon.Info),
+            _ocrLanguage);   // W5-d FR-15：图片 OCR 提字沿用 ocr.language 配置（与 W4 取词同一档）
 
         // 同款自愈：真关闭后置空引用，下次热键懒创建重建（§2.25①）
         _clipPanel.Closed += (_, _) => _clipPanel = null;
@@ -1390,8 +1448,41 @@ internal sealed class TrayApplication : IDisposable
     }
 
     /// <summary>
+    /// 图片 OCR 提字探针（--probe-clip-ocr，W5-d FR-15）。逻辑全在
+    /// <see cref="ClipboardPanelProbe.RunOcrProbe"/>，这里只负责落盘与日志。
+    /// <b>语言包缺失时退出码 0</b>（环境依赖分支：如实落盘 skipped 并跳过，不算失败）——
+    /// 与 verify-desktop 既有 OCR 段的"跳过而非红"口径一致。
+    /// </summary>
+    private int RunProbeClipOcr()
+    {
+        try
+        {
+            var snap = ClipboardPanelProbe.RunOcrProbe();
+            WriteOutFile(snap.ToJsonString());
+            var skipped = snap["skipped"]?.GetValue<string>();
+            if (skipped is not null)
+            {
+                _host?.Log.Info($"图片 OCR 提字探针跳过：{skipped}（非失败，环境依赖分支）", "clip");
+                return 0;
+            }
+
+            _host!.Log.Info(
+                $"图片 OCR 提字探针完成：ok={snap["ok"]} menuText={snap["menuEnabledForText"]} "
+                + $"menuImage={snap["menuEnabledForImage"]} recognized={snap["recognized"]}",
+                "clip");
+            return snap["ok"]?.GetValue<bool>() == true ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            WriteOutFile(new JsonObject { ["ok"] = false, ["error"] = ex.Message }.ToJsonString());
+            _host?.Log.Warn($"图片 OCR 提字探针失败：{ex}", "clip");
+            return 2;
+        }
+    }
+
+    /// <summary>
     /// 剪贴板面板探针（--probe-clip-panel，W5-b）。逻辑全在 <see cref="ClipboardPanelProbe"/>
-    /// （临时库预置 → 生命周期循环 → 真键 Enter 直贴契约），这里只负责落盘与日志。
+    /// （临时库预置 → 生命周期循环 → Enter 直贴契约），这里只负责落盘与日志。
     /// 副作用：Summon 真抢焦点 1~2 秒（与 --probe-search-summon 同代价）；Ctrl+V 真注入被抑制。
     /// </summary>
     private int RunProbeClipPanel()
@@ -1419,10 +1510,9 @@ internal sealed class TrayApplication : IDisposable
     /// --probe-ocr-hotkey 同款链路）：keybd_event 注入真实 Ctrl+Alt+V → WM_HOTKEY →
     /// ToggleClipPanel → 面板唤出（Summon 真抢焦点）→ 注入真实 Esc → 收窗。
     ///
-    /// 泵说明（§2.27）：WM_HOTKEY 投给 WinForms sink 用 DoEvents 够；Esc 收窗
-    /// 走面板的 <b>GetAsyncKeyState 轮询兜底</b>（DispatcherTimer 由本探针的
-    /// Dispatcher 泵驱动，轮询完全绕开消息层）—— 面板唤出后焦点在面板内，
-    /// IsKeyboardFocusWithin 成立，Esc 按下沿必被轮询抓到。
+    /// 泵说明（§2.27）：WM_HOTKEY 投给 WinForms sink 用 DoEvents 够；Esc 收窗由
+    /// **原生输入框自己的键盘事件**上报（2026-09-27 换实现后：键进 EDIT 的子窗口，
+    /// 由它的窗口过程转成命令事件，不再依赖 GetAsyncKeyState 轮询 —— 那条轮询已删除）。
     /// </summary>
     private int RunProbeClipHotkey()
     {

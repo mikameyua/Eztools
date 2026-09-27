@@ -901,6 +901,37 @@ def main() -> int:
        paste.get("lastForegroundNonZero") is True and paste.get("itemsAtInject") == 1,
        f"paste={ {k: paste.get(k) for k in ('lastForegroundNonZero', 'itemsAtInject')} }")
 
+    # ── 1c-7b. W5-d：图片 OCR 提字（FR-15）─────────────────────────────────
+    #     为什么必须单列：FR-15 的失败面**全是静默的** —— 菜单项恒不可用、识别不出却不报错、
+    #     语言包缺失却谎报"图里没有文字"。三条判据（非图片不可用 / 图片可用 / 真提出字）
+    #     缺任何一条就漏掉一类静默失效，所以三条一起上，并配一条反向。
+    #     语言包缺失属环境依赖分支 ⇒ 落 skipped 跳过，不算失败（与既有 OCR 段同口径）。
+    ocr_file = os.path.join(repo, "_scratch", "desktop-clip-ocr.json")
+    if os.path.exists(ocr_file):
+        os.remove(ocr_file)
+    r = run(["--probe-clip-ocr", "--no-prompt", "--out", ocr_file], timeout=120)
+    ck("图片 OCR 提字探针退出码 0（语言包缺失时按跳过处理）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    ocr = {}
+    if os.path.isfile(ocr_file):
+        try:
+            with open(ocr_file, encoding="utf-8") as f:
+                ocr = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"OCR 提字探针输出不可解析：{ex}")
+    if ocr.get("skipped"):
+        info(f"图片 OCR 提字：跳过（{ocr.get('skipped')}）—— 本机无 OCR 语言包，属环境依赖分支")
+    else:
+        ck("★ 图片 OCR 提字：非图片条目菜单项不可用（反向 —— 证明判据不是恒真）",
+           ocr.get("menuEnabledForText") is False,
+           f"menuEnabledForText={ocr.get('menuEnabledForText')}")
+        ck("★ 图片 OCR 提字：图片条目菜单项可用（正向）",
+           ocr.get("menuEnabledForImage") is True,
+           f"menuEnabledForImage={ocr.get('menuEnabledForImage')}")
+        ck("★★ 图片 OCR 提字：真实菜单点击 → 剪贴板拿到样图文字（含 OCR + 含数字 + ≥8 字）",
+           ocr.get("recognized") is True,
+           f"clipboard={ocr.get('clipboard')!r} status={ocr.get('statusText')!r}")
+
     # ── 1c-8. W5-c：剪贴板监听探针 ──────────────────────────────────────────
     #     "复制真的进历史"的唯一自动化面：真 AddClipboardFormatListener → 程序化写
     #     剪贴板 → 裸泵喂 WM_CLIPBOARDUPDATE → 断言事件触发 + 内容入库。
