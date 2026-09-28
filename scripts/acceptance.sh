@@ -315,45 +315,102 @@ if bad:
 PY
 if [ $? -eq 0 ]; then pass "清单结构与配置 schema 解析正确"; else fail "清单解析断言未通过"; fi
 
-# ── 3b. `contributes.actions` 的**解析契约** + 钉住"不可派发"这个当前限制 ─────────
-# 🔴 2026-09-28 断言语审补的零覆盖，同时纠正一个**文档与实现不符**：
-#   全仓范围内 `actions` 的消费面**只有"解析 + 列举"**（ManifestParser + `ezt list/info` 展示），
-#   **没有任何派发路径** —— `when` 从不被求值、action 从不被执行（`ezt invoke` 只认 commands，
-#   实测 `ezt invoke filehash.action.hashFile` 报"未找到命令"）。
-#   而设计文档 §4.5 贡献点表把它标成 `✅ P0`、用途写"文件、选中文本动作（右键 / 拖入）"
-#   ⇒ 读者会以为"选中文件右键就能用"。**故本条断言钉的是真实存在的那半边契约**，
-#   另加一条把"不可派发"这个限制钉成**显式契约**（防静默变更，并给将来实现者一个更新点）。
+# ── 3b. `contributes.actions` 契约（2026-09-29 起：**空实例 + 契约为准**）──────────
+# 📌 决策（设计方案 §4.5）：`actions` **不做派发**，入口归 **W7 Launcher**；两个工具原先
+#   声明的实例已清空，schema 与解析链保留为**契约预留**。理由（成本/风险不对称）：
+#   右键 = Shell 上下文菜单扩展 = 代码进 explorer.exe 进程，对"工具代码永不进 Core"的
+#   安全模型是新风险面；而 `menus` 的 `input: clipboard` 已提供更简单的答案
+#   （`filehash` 的托盘项用的正是那条 action 的 handler `hashMany`）。
+#
+# ⚠️ 本节因此拆成**三段**，缺一不可：
+#   ① 真实仓库：钉「当前 0 实例」—— 把决策留痕；将来恢复实例时**必须同步改这里**
+#      （反向断言，同规范 §5.4「不采纳也要钉住」的纪律）
+#   ② 夹具工具目录：钉**解析契约**（双向：完整声明被保留 + 残缺声明被拒绝）
+#      —— 只守真实仓库会退化成"空数组上没有元素可检"的**恒真断言**（本项目明令禁止：
+#         断言不能看着在守、其实永远不会红）。而"四字段非空"**同样不可用** —— 判据取自
+#         `ManifestParser.cs:461-479` 的真实行为：缺 `id`/`handler` ⇒ **整条跳过**（故输出里
+#         不可能出现空 id/handler ⇒ 恒真）、`title` 空则**回退为 id**（也恒真）、
+#         **`when` 根本不校验（可为 null）⇒「非空」是错判据**。故改用「与源文件逐字段相符」。
+#   ③ 派发未实现（钉住限制，给将来实现者一个更新点）
 ACT_SUM="$("$PY" -I -X utf8 -c "
 import json, sys
 tools = json.load(open(sys.argv[1], encoding='utf-8-sig'))
 no_key = sum(1 for t in tools if 'actions' not in t)
 not_list = sum(1 for t in tools if not isinstance(t.get('actions'), list))
 acts = [a for t in tools for a in (t.get('actions') or [])]
-FIELDS = ('id', 'title', 'when', 'handler')
-missing = sum(1 for a in acts for k in FIELDS if not a.get(k))
-first = acts[0].get('id', '') if acts else ''
-print(f'{no_key}|{not_list}|{len(acts)}|{missing}|{first}')
+print(f'{no_key}|{not_list}|{len(acts)}')
 " "$(winpath "$WORK/list.json")" 2>/dev/null | tr -d '\r\n')"
-IFS='|' read -r ACT_NOKEY ACT_NOTLIST ACT_COUNT ACT_MISS ACT_FIRST <<< "$ACT_SUM"
+IFS='|' read -r ACT_NOKEY ACT_NOTLIST ACT_COUNT <<< "$ACT_SUM"
 check "每个工具条目都带 actions 键（清单解析契约）" 0 "${ACT_NOKEY:-none}"
 check "actions 一律是数组（类型契约，不是 null / 字符串）" 0 "${ACT_NOTLIST:-none}"
-check "至少 1 个工具声明了 action（否则下面两条契约断言空跑）" 1 \
-  "$(if [ "${ACT_COUNT:-0}" -ge 1 ]; then echo 1; else echo 0; fi)"
-check "每个 action 四字段齐全且非空（id/title/when/handler）" 0 "${ACT_MISS:-none}"
-if [ -n "${ACT_FIRST:-}" ]; then
-  "$EZ" invoke "$ACT_FIRST" > "$WORK/invoke-action.log" 2>&1
-  ACT_RC=$?
-  ACT_HAS=$(grep -c '未找到命令' "$WORK/invoke-action.log")
-  ACT_OK=0
-  if [ "$ACT_RC" -ne 0 ]; then
-    if [ "$ACT_HAS" -ge 1 ]; then ACT_OK=1; fi
-  fi
-  # ★ 钉住**当前限制**（actions 派发未实现）。若将来实现了派发，本条会变红 ——
-  #   那是**故意设的更新点**：请一并更新本断言名与设计文档 §4.5 的 actions 状态列。
-  check "actions 目前不可被 invoke（派发未实现，实测给出'未找到命令'而非静默成功）" 1 "$ACT_OK"
-  if [ "$ACT_OK" -eq 0 ]; then
-    printf '        实测：rc=%s 输出=%s\n' "$ACT_RC" "$(head -c 160 "$WORK/invoke-action.log" | tr -d '\r\n')"
-  fi
+check "★ 仓库当前 0 条 action 实例（决策留痕：派发归 W7，见设计方案 §4.5）" 0 \
+  "${ACT_COUNT:-none}"
+
+# ② 夹具：**解析契约**的活体验证（把「若声明则四字段齐全」变成一条能红的断言）
+ACTFIX="$WORK/actfixture"
+mkdir -p "$ACTFIX/actprobe"
+printf 'print("probe")\n' > "$ACTFIX/actprobe/main.py"
+cat > "$ACTFIX/actprobe/tool.json" <<'ACTPROBE_JSON'
+{
+  "id": "actprobe",
+  "name": "动作契约探针",
+  "version": "0.0.1",
+  "description": "仅验证 contributes.actions 的解析契约，不参与运行时（验收夹具）",
+  "author": "acceptance",
+  "license": "GPL-3.0-or-later",
+  "runtime": "python",
+  "entry": "main.py",
+  "weight": "lite",
+  "lifecycle": "transient",
+  "needs": [],
+  "contributes": {
+    "commands": [],
+    "actions": [
+      { "id": "actprobe.action.full", "title": "完整探针", "when": "files.count>=1", "handler": "probe" },
+      { "id": "actprobe.action.broken", "title": "缺 handler 的声明", "when": "files.count>=1" }
+    ]
+  }
+}
+ACTPROBE_JSON
+"$EZ" list --json --quiet --tools-dir "$(winpath "$ACTFIX")" > "$WORK/actfix.json" 2>/dev/null
+FIX_SUM="$("$PY" -I -X utf8 -c "
+import json, sys
+tools = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+f = [t for t in tools if t.get('id') == 'actprobe']
+if len(f) != 1:
+    print('0|NOFIX|-1'); sys.exit(0)
+acts = f[0].get('actions') or []
+full = [a for a in acts if a.get('id') == 'actprobe.action.full']
+EXPECT = {'id': 'actprobe.action.full', 'title': '完整探针',
+          'when': 'files.count>=1', 'handler': 'probe'}
+if not full:
+    print(f'0|{len(acts)}|-1')
+else:
+    print(f'{len(full)}|{len(acts)}|'
+          f'{sum(1 for k, v in EXPECT.items() if full[0].get(k) != v)}')
+" "$(winpath "$WORK/actfix.json")" 2>/dev/null | tr -d '\r\n')"
+IFS='|' read -r FIX_FULL FIX_TOTAL FIX_MISMATCH <<< "$FIX_SUM"
+check "完整 action 声明被解析出 1 条（探针有效性前提 + 解析链未断）" 1 "${FIX_FULL:-0}"
+check "★ 残缺声明（缺 handler）被**拒绝**：总数恰好 1（校验若失效会变 2）" 1 \
+  "${FIX_TOTAL:-0}"
+check "完整声明四字段与源文件**逐字段相符**（正向值对照，含 when）" 0 \
+  "${FIX_MISMATCH:-none}"
+
+# ③ 派发未实现：钉住这个**当前限制**（给将来实现者一个更新点）
+"$EZ" invoke actprobe.action.full --tools-dir "$(winpath "$ACTFIX")" \
+  > "$WORK/invoke-action.log" 2>&1
+ACT_RC=$?
+ACT_HAS=$(grep -c '未找到命令' "$WORK/invoke-action.log")
+ACT_OK=0
+if [ "$ACT_RC" -ne 0 ]; then
+  if [ "$ACT_HAS" -ge 1 ]; then ACT_OK=1; fi
+fi
+# ★ 若将来实现了派发，本条会变红 —— 那是**故意设的更新点**：请一并更新本断言、
+#   设计方案 §4.5 的状态列，以及上面那条「0 实例」的反向断言。
+check "actions 目前不可被 invoke（派发未实现，给'未找到命令'而非静默成功）" 1 "$ACT_OK"
+if [ "$ACT_OK" -eq 0 ]; then
+  printf '        实测：rc=%s 输出=%s\n' "$ACT_RC" \
+    "$(head -c 160 "$WORK/invoke-action.log" | tr -d '\r\n')"
 fi
 
 # ── 4. 端到端调用（含非 ASCII 逐字符校验）──────────────────────────────────

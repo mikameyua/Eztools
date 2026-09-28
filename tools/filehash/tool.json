@@ -16,14 +16,6 @@
       { "id": "filehash.hash", "title": "计算文件哈希", "handler": "hash", "description": "对单个文件计算哈希" },
       { "id": "filehash.hashMany", "title": "批量计算文件哈希", "handler": "hashMany", "description": "对多个文件依次计算哈希" }
     ],
-    "actions": [
-      {
-        "id": "filehash.action.hashFile",
-        "title": "校验文件哈希",
-        "when": "files.count>=1",
-        "handler": "hashMany"
-      }
-    ],
     "hotkeys": [
       { "command": "filehash.hash", "default": "Ctrl+Alt+H" }
     ],

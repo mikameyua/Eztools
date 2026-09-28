@@ -16,14 +16,6 @@
       { "id": "wordcount.count", "title": "统计文本", "handler": "count", "description": "统计传入文本的字符/词/行数" },
       { "id": "wordcount.countFile", "title": "统计文件", "handler": "countFile", "description": "读取文件并统计" }
     ],
-    "actions": [
-      {
-        "id": "wordcount.action.countFile",
-        "title": "统计选中的文本文件",
-        "when": "files.ext:txt,md,py,json,csv",
-        "handler": "countFile"
-      }
-    ],
     "hotkeys": [
       { "command": "wordcount.count", "default": "Ctrl+Alt+N", "title": "统计剪贴板文本" }
     ],
