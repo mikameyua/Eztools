@@ -702,16 +702,13 @@ internal sealed class TrayApplication : IDisposable
                 return;
             }
 
-            // ★ UIPI 降级（FR-11③，W5-d 补齐桌面路径）：提权进程写剪贴板时，
-            //   非提权进程**收得到通知却读不到内容**（表现为：有 owner、三类内容全空）。
-            //   以前这里是"静默什么都不做"，用户会以为工具坏了 —— 改成记一条**占位条目**
-            //   （只记来源，绝不存内容）+ 一次性气泡（与 20MB 超限同款"一次性"语义，不刷屏）。
-            //   CLI 路径早有这条（ClipCommand），桌面路径之前漏了，属于能力不对等。
+            // ★ UIPI 降级（FR-11③，W5-d + 09-28 修正）：owner 是提权进程 ⇒ 一律记占位条目
+            //   （只记来源，绝不存内容）+ 一次性气泡。原设计"读不到内容才占位"判据在默认
+            //   Windows UIPI 下对 high IL 源永远不成立（UIPI 既拦 high→low 通知，也不拦低 IL
+            //   读 high IL 内容），占位分支是死代码。改为"提权即占位"才真正落地安全意图
+            //   （提权内容一律不收）。ClipboardMonitor 已放通 WM_CLIPBOARDUPDATE 跨 IL 接收。
             if (snapshot.OwnerElevated
-                && snapshot.OwnerProcess is { } elevatedOwner
-                && snapshot.Text is null
-                && snapshot.Image is null
-                && snapshot.Files.Count == 0)
+                && snapshot.OwnerProcess is { } elevatedOwner)
             {
                 EnsureClipStore().Upsert(CaptureService.FromPlaceholder(elevatedOwner), _clipMaxItems);
                 _clipCaptured++;

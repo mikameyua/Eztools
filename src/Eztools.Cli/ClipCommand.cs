@@ -146,10 +146,10 @@ internal static class ClipCommand
             return Task.FromResult(0);
         }
 
-        // UIPI（设计 §8 R1）：有 owner、owner 提权、但读不到内容 ⇒ 记占位条目（FR-11③）。
+        // UIPI（设计 §8 R1，09-28 修正）：owner 提权 ⇒ 记占位条目（FR-11③）。
+        // 原"读不到内容才占位"在默认 UIPI 下对 high IL 源不可达，改为"提权即占位"。
         ClipEntry? draft;
-        if (snapshot.OwnerProcess is not null && snapshot.OwnerElevated
-            && snapshot.Files.Count == 0 && string.IsNullOrWhiteSpace(snapshot.Text))
+        if (snapshot.OwnerProcess is not null && snapshot.OwnerElevated)
         {
             draft = CaptureService.FromPlaceholder(snapshot.OwnerProcess);
         }

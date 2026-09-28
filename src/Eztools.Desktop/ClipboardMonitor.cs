@@ -29,6 +29,13 @@ internal sealed class ClipboardMonitor : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool RemoveClipboardFormatListener(nint hwnd);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ChangeWindowMessageFilterEx(nint hwnd, uint msg, uint action, nint pChangedInfo);
+
+    // MSGFLT_ALLOW：允许目标窗口接收来自任意完整性级别的该消息（放通跨 IL 剪贴板通知）。
+    private const uint MSGFLT_ALLOW = 1;
+
     /// <summary>消息 sink：只负责把 WM_CLIPBOARDUPDATE 转成事件（HotkeyHook.Sink 同款）。</summary>
     private sealed class Sink : Control
     {
@@ -72,6 +79,11 @@ internal sealed class ClipboardMonitor : IDisposable
         {
             return false;
         }
+
+        // UIPI（设计 §8 R1 / FR-11③，09-28 修正）：默认 Windows UIPI 不向 low IL 监听窗口
+        // 投递 high IL 进程写的剪贴板变化通知，导致托盘收不到"提权进程动了剪贴板"的信号，
+        // 占位条目逻辑永远没机会执行。显式放通 WM_CLIPBOARDUPDATE 的跨 IL 接收。
+        _ = ChangeWindowMessageFilterEx(_sink.Handle, WM_CLIPBOARDUPDATE, MSGFLT_ALLOW, nint.Zero);
 
         IsRunning = true;
         _sink.OnUpdate = () => ClipboardChanged?.Invoke();
