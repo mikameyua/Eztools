@@ -866,6 +866,15 @@ def main() -> int:
            f"afterXResummon={ax} err={xv.get('resummonError')}")
 
     # live 变体（真链路 lei/LEI 大小写 + 未就绪诊断）：需要现成就绪索引，缺夹具则跳过。
+    #
+    # 🔴 2026-09-28 断言语审（专项）：这一段原本是「缺夹具就 info 一句、整块断言消失、
+    #    SKIPPED 不计数」⇒ 实测通过数在 **153 / 151** 之间漂移，而汇总行**不显示"跳过"**
+    #    （两次都报"失败 0"，看起来完全正常）。且夹具 `_scratch/manual/g2first2/index`
+    #    是**手工作坊产物且被 gitignore** ⇒ 干净机器 / CI 上**必然静默跳过**，
+    #    等于这 2 条断言在自动化里长期不存在（S9 复发形态 + 技能 §二.1 / §七）。
+    # 修法：两条跳过路径各自**精确计数**（数一遍再写，别照注释猜），并打现场快照。
+    LIVE_ASSERTS_ALL = 2   # 夹具缺失 ⇒ 退出码断言 + ★★大小写断言 **两条**都没跑
+    LIVE_ASSERTS_READY = 1  # 夹具在但未就绪 ⇒ 只有 ★★大小写断言被跳过（退出码断言照跑）
     live_root = os.path.join(repo, "_scratch", "manual", "g2first2")
     if os.path.isdir(os.path.join(live_root, "index")):
         live_env = dict(env, EZTOOLS_INSTALL_ROOT=live_root.replace("\\", "/"))
@@ -892,9 +901,14 @@ def main() -> int:
                lv.get("caseFoldEqual") is True and lei == lei_up and lei.startswith("显示"),
                f"{lei!r} vs {lei_up!r}")
         else:
-            info(f"live 探针索引未就绪（ready={lv.get('ready')}），跳过大小写断言（状态行原文已落盘）")
+            globals()["SKIPPED"] += LIVE_ASSERTS_READY
+            info(f"[跳过] {LIVE_ASSERTS_READY} 条 live 断言（索引未就绪 ready={lv.get('ready')}）"
+                 f"—— 夹具 {live_root}\\index 存在但未就绪；状态行原文已落盘 {live_file}")
     else:
-        info("live 探针跳过：未找到现成索引夹具 _scratch/manual/g2first2/index")
+        globals()["SKIPPED"] += LIVE_ASSERTS_ALL
+        info(f"[跳过] {LIVE_ASSERTS_ALL} 条 live 断言：未找到现成索引夹具 {live_root}\\index\n"
+             f"       ⚠️ 该夹具是手工产物且 `_scratch/` 被 gitignore ⇒ **干净机器/CI 上必然跳过**，"
+             f"这 2 条断言在自动化里等于不存在；要真跑需先用 ezt-index 建一次该根的索引")
 
     # ── 1c-6. W4-c：OCR 热键链路 + 宿主设置探针 ─────────────────────────────
     #     为什么必须有：selfcheck 只证明"热键注册成功"（RegisterHotKey 返回真），
@@ -999,8 +1013,12 @@ def main() -> int:
     if os.path.exists(ocr_file):
         os.remove(ocr_file)
     r = run(["--probe-clip-ocr", "--no-prompt", "--out", ocr_file], timeout=120)
-    ck("图片 OCR 提字探针退出码 0（语言包缺失时按跳过处理）", r.returncode == 0,
-       f"code={r.returncode} err={r.stderr[:200]}")
+    # ⚠️ 断言名必须与判据一致（技能 §四「名字也是契约」）：原名字写"按跳过处理"，
+    #    判据却只是 returncode==0 —— 探针在语言包缺失时**确实返回 0**（见 TrayApplication
+    #    RunProbeClipOcr：skipped 非空 ⇒ return 0），所以这条在跳过路径上会**计成 PASS**，
+    #    名字让人以为"它知道自己在跳过"。改成如实描述判据本身。
+    ck("图片 OCR 提字探针退出码 0（语言包缺失时探针如实落盘 skipped 并返回 0，不算失败）",
+       r.returncode == 0, f"code={r.returncode} err={r.stderr[:200]}")
     ocr = {}
     if os.path.isfile(ocr_file):
         try:
@@ -1009,7 +1027,12 @@ def main() -> int:
         except (OSError, json.JSONDecodeError) as ex:
             info(f"OCR 提字探针输出不可解析：{ex}")
     if ocr.get("skipped"):
-        info(f"图片 OCR 提字：跳过（{ocr.get('skipped')}）—— 本机无 OCR 语言包，属环境依赖分支")
+        # 🔴 2026-09-28 断言语审：这三条原来只打 info、**不计数** ⇒ 语言包缺失时
+        #    通过数静默少 3 而汇总不显示"跳过"。`_step17_ocr.sh` 的同口径分支是
+        #    `SKIPPED += 2` 且打印"满额随之少 2" —— 同一项目两种做法，此处对齐前者。
+        globals()["SKIPPED"] += 3
+        info(f"[跳过] 3 条图片 OCR 提字断言（{ocr.get('skipped')}）—— 本机无 OCR 语言包，"
+             f"属环境依赖分支；满额随之少 3（与 _step17_ocr.sh 同口径）")
     else:
         ck("★ 图片 OCR 提字：非图片条目菜单项不可用（反向 —— 证明判据不是恒真）",
            ocr.get("menuEnabledForText") is False,
