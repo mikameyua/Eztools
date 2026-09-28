@@ -14,6 +14,8 @@
 #          或 `A && B || C || D`，两者都会让退出码失去意义（恒真 / 分支串味）
 #    G4 🟡 幽灵代码候选 —— private 方法在源码语料里只有定义处一次出现（无调用点）
 #    G5 🟡 死产物目录 —— 项目 TFM 与 bin/obj 下实际 TFM 目录不一致（踩坑全集 §2.31）
+#    G6 🟡 跳过必须计数 —— 断言脚本里出现「跳过」文案却附近没有 SKIPPED 计数
+#          （2026-09-28 断言语审抓到 2 条「假绿通道」后新增，见 check_g6 的说明）
 #
 #  ⚠️ 故意不检查行宽（80/120 字符）：本仓已判定"不采纳"（长行是有意取舍，见
 #     docs/README.md §3.6）—— --selftest 里有一条反向断言钉住它，防后人顺手加回来。
@@ -504,6 +506,64 @@ def check_g5(root: str, hits: list):
 
 
 # ============================================================================
+# G6 跳过必须计数（断言脚本）
+#
+# 判据来源：2026-09-28 断言语审抓到**两条「假绿通道」**（共 5 处断言在特定环境下
+# 静默不执行且不计数）：verify-desktop 的 live 段（2 条）与 clip-ocr 语言包分支（3 条）。
+# 两处的形态完全一样 —— **打了『跳过』文案，却没有 SKIPPED 递增**，于是"通过 N"变成
+# 依赖环境的随机变量，而汇总行不显示跳过（两次都报"失败 0"）。
+#
+# 这是可机检的：**凡"给人看的跳过文案"，附近必须有计数**。
+# 精度控制（避免把"断言名里含跳过"误报）：
+#   · 只认**输出语句**（sh 的 printf/echo、py 的 info(...)）—— `check "…跳过…"` / `ck(…)`
+#     是**断言名**不是跳过通知，一律排除；
+#   · 注释行排除；
+#   · 窗口 ±6 行内出现过 `SKIPPED` 即认为已计数。
+# ⚠️ 它守不住"计错了数"（+1 写成 +2）—— 那需要人读，见报告 §二 的"数一遍再写"。
+# ============================================================================
+G6_SKIP_WORD = re.compile(r"跳过|skip", re.I)
+G6_NOTICE_SH = re.compile(r"^\s*(printf|echo)\b")
+G6_NOTICE_PY = re.compile(r"^\s*info\(")
+G6_COUNTER = re.compile(r"SKIPPED")
+
+
+def check_g6(root: str, hits: list):
+    sdir = os.path.join(root, "scripts")
+    if not os.path.isdir(sdir):
+        return
+    targets = [("sh", os.path.join(sdir, "acceptance.sh"))]
+    for fn in sorted(os.listdir(sdir)):
+        if fn.startswith("_step") and fn.endswith(".sh"):
+            targets.append(("sh", os.path.join(sdir, fn)))
+    for fn in ("verify-desktop.py", "verify-preview.py"):
+        targets.append(("py", os.path.join(sdir, fn)))
+
+    for kind, path in targets:
+        if not os.path.isfile(path):
+            continue
+        lines = open(path, encoding="utf-8-sig", errors="replace").read().splitlines()
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue
+            if not G6_SKIP_WORD.search(line):
+                continue
+            is_notice = (G6_NOTICE_SH.match(line) if kind == "sh"
+                         else G6_NOTICE_PY.match(line))
+            if not is_notice:
+                continue                       # 断言名里含"跳过"≠ 跳过通知
+            lo, hi = max(0, i - 6), min(len(lines), i + 7)
+            if any(G6_COUNTER.search(lines[k]) for k in range(lo, hi)):
+                continue
+            hits.append({
+                "check": "G6", "level": "WARN",
+                "file": rel(root, path), "line": i + 1,
+                "msg": "出现「跳过」文案，但附近 6 行内没有 SKIPPED 计数 —— "
+                       "跳过必须落数字，否则「通过 N」会随环境漂移且零信号"
+                       "（2026-09-28 抓到的 2 条假绿通道就是这个形态）",
+            })
+
+
+# ============================================================================
 # 运行器
 # ============================================================================
 CHECKS = [
@@ -512,6 +572,7 @@ CHECKS = [
     ("G3", "验收脚本禁用模式", check_g3),
     ("G4", "幽灵代码候选", check_g4),
     ("G5", "死产物目录（TFM 不一致）", check_g5),
+    ("G6", "跳过必须计数（断言脚本）", check_g6),
 ]
 
 
@@ -662,6 +723,11 @@ public class Bad
         os.makedirs(os.path.join(a, "src", "Demo", "bin", "Debug"), exist_ok=True)
         os.makedirs(os.path.join(a, "src", "Demo", "bin", "Debug", "net9.0-windows"),
                     exist_ok=True)
+        # G6 正向夹具：出现「跳过」文案但**没有** SKIPPED 计数
+        _write(a, "scripts/_step99_skip.sh",
+               "#!/usr/bin/env bash\n"
+               "printf '  [跳过] 2 条环境依赖断言\\n'\n"
+               "check \"跳过必须可见\" 0 0\n")
 
         hits_a = run_checks(a)
         by = {}
@@ -685,6 +751,7 @@ public class Bad
         expect("G4 正向：private 无调用点必须被报出",
                len([h for h in by.get("G4", []) if "NeverCalled" in h["msg"]]), 1)
         expect("G5 正向：TFM 不一致目录必须被报出", len(by.get("G5", [])), 1)
+        expect("G6 正向：「跳过」文案无 SKIPPED 计数必须被报出", len(by.get("G6", [])), 1)
 
         # ── 夹具仓 B：每条检查的**反向**（不得误伤）─────────────────────────
         b = os.path.join(tmp, "negative")
@@ -775,6 +842,14 @@ public class LexHard
         _write(b, "scripts/make-portable.sh",
                "#!/usr/bin/env bash\n"
                "if printf '%s\\n' \"$ZIP_LIST\" | grep -qxF \"$PKG/bin/x.dll\"; then :; fi\n")
+        # G6 反向夹具：三种"看着像跳过、其实不是"的写法都不得报出
+        #   ① 已计数（SKIPPED 在附近）② 断言名里含"跳过" ③ 注释里的"跳过"
+        _write(b, "scripts/_step99_skip.sh",
+               "#!/usr/bin/env bash\n"
+               "SKIPPED=$((SKIPPED + 2))\n"
+               "printf '  [跳过] 2 条环境依赖断言（满额随之少 2）\\n'\n"
+               "# 注释里的跳过不算跳过通知\n"
+               "check \"跳过必须带具体原因\" 0 0\n")
         _write(b, "scripts/acceptance.sh",
                "#!/usr/bin/env bash\n"
                "# 反面教材：不能用 `ls | grep -q`（命中即退会让上游收 SIGPIPE）\n"
@@ -796,6 +871,8 @@ public class LexHard
                len([h for h in byb.get("G4", []) if "Logged" in h["msg"]
                     or "Covered" in h["msg"] or "OnClick" in h["msg"]]), 0)
         expect("G5 反向：TFM 一致的 bin 目录不得报出", len(byb.get("G5", [])), 0)
+        expect("G6 反向：已计数 / 断言名含跳过 / 注释里的跳过 均不得报出",
+               len(byb.get("G6", [])), 0)
         expect("★ 行宽反向断言：300 字符长行不得产生任何命中",
                len([h for h in hits_b if "LongLine" in h["file"]]), 0)
         expect("★ 词法反向断言：原始字符串 `\"\"\"` 之后的调用点不得被吞（防错位误报）",
