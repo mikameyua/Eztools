@@ -57,6 +57,17 @@ assert_winpath() {  # assert_winpath <描述> <路径>
 
 assert_winpath "仓库根" "$REPO"
 
+# ── Python 解释器：**必须在工具函数区定义，不能等用到时才定义** ────────────────
+# 🔴 2026-09-28 断言语审实测踩到：`$PY` 原先定义在第 252 行（step 3 附近），而 step 2 就用到了它
+#    ⇒ 那条命令退化成 `"" -I -X utf8 -c …`（command not found，stderr 被 `2>/dev/null` 吞掉）
+#    ⇒ 一次跑出 **6 个 FAIL**。这与文件上方 `winpath` / `assert_winpath` 被提到前面是同一族问题
+#    （那里的注释写着"断言的位置本身也是契约：函数必须在第一次调用之前定义"）。
+#    当年第 257 行是用"把断言挪到 step 3"绕过去的，根因一直没修 —— 现在提到工具函数区。
+#    ⚠️ 由此也验证了另一条纪律：新断言的判据写成"取值缺失即**响亮失败**"（而不是 `:-0` 取默认），
+#       才没让这次"变量没定义"静默变成一个恒真断言。
+PY="$(command -v python || command -v python3 || true)"
+[ -n "$PY" ] || PY="$REPO/spike/_runtime-test/python/python.exe"
+
 WORK="$REPO/_scratch/accept"
 
 # 🔴 目标框架只在这一行改。
@@ -195,16 +206,66 @@ T2=$(date +%s%N)
 T3=$(date +%s%N)
 printf '  [信息] 幂等复用时延 %s ms\n' "$(( (T3-T2)/1000000 ))"
 
+# ── 2b. `ezt runtime payloads`：载荷清单的形状与自洽（2026-09-28 断言语审补的零覆盖）──
+# 🔴 为什么补：该子命令（**注意是 `runtime payloads`，不是顶层 `ezt payloads`**）在
+#    验收面 / selftest / 手工清单三处**全零命中** —— 而"载荷发现"是 `runtime install`
+#    找包的前提（runtime install 的输入就是它）。清单里有一条断言守着它，属纯空白格子。
+# 设计纪律（本次审计刚换来的两条）：
+#   ① 形状断言**无条件跑**：rc/数组/字段/自洽 —— 这些与"本机有没有包"无关；
+#   ② 数量断言（≥1）**环境依赖 ⇒ 跳过并计数**（`payload/` 被 gitignore，干净机器上为 0，
+#      不能假红，也不能静默少一条）；现场快照写明怎么补。
+#   ③ path 用 JSON 解析而非 grep/cut：JSON 里是转义反斜杠（"D:\\01-..."），
+#      grep 拆必然踩转义坑（§2.17⑤ \uXXXX 二次恢复同族）。
+PAY_JSON="$WORK/payloads.json"
+"$EZ" runtime payloads --json --compact --install-root "$EZTOOLS_INSTALL_ROOT" \
+  > "$PAY_JSON" 2>"$WORK/payloads.err"
+check "ezt runtime payloads --json 退出码 0" 0 $?
+PAY_SUM="$("$PY" -I -X utf8 -c "
+import json, os, re, sys
+BAD = '|'.join(['PARSE_FAIL'] * 6)
+try:
+    arr = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+except Exception:
+    print(BAD); sys.exit(0)
+if not isinstance(arr, list):
+    print('|'.join(['NOT_LIST'] * 6)); sys.exit(0)
+FIELDS = ('file', 'path', 'runtime', 'version', 'rid', 'size')
+missing = sum(1 for p in arr for k in FIELDS if k not in p)
+bad_rt = sum(1 for p in arr if p.get('runtime') != 'python')
+bad_ver = sum(1 for p in arr if not re.match(r'^\d+\.\d+\.\d+$', str(p.get('version', ''))))
+bad_size = sum(1 for p in arr if not (isinstance(p.get('size'), int) and p.get('size') > 0))
+dangling = sum(1 for p in arr if not os.path.isfile(str(p.get('path', ''))))
+print(f'{len(arr)}|{missing}|{bad_rt}|{bad_ver}|{bad_size}|{dangling}')
+" "$(winpath "$PAY_JSON")" 2>/dev/null | tr -d '\r\n')"
+IFS='|' read -r PAY_N PAY_MISS PAY_BADRT PAY_BADVER PAY_BADSIZE PAY_DANGLE <<< "$PAY_SUM"
+# 解析失败时上面 6 个数都是 PARSE_FAIL ⇒ 下面每条都响亮失败（**不许靠 `:-默认值` 侥幸通过**）
+check "载荷清单是 JSON 数组且可解析（落数字）" 1 \
+  "$(printf '%s' "${PAY_N:-x}" | grep -cE '^[0-9]+$')"
+check "每个载荷六字段齐全（file/path/runtime/version/rid/size）" 0 "${PAY_MISS:-none}"
+check "每个载荷 runtime 均为 python（正向值对照，非空壳字段）" 0 "${PAY_BADRT:-none}"
+check "每个载荷 version 均形如 X.Y.Z" 0 "${PAY_BADVER:-none}"
+check "每个载荷 size 均 > 0（不是 0 字节空包）" 0 "${PAY_BADSIZE:-none}"
+# ★ 正向值对照：清单里的 path 必须**真的是文件** —— 只断言"字段存在"会放过
+#   "清单写了一个不存在的包"（§七：被测对象必须显式钉住，不能靠字段自证）
+check "每个载荷的 path 都指向真实存在的包文件（0 悬空）" 0 "${PAY_DANGLE:-none}"
+if [ "${PAY_N:-0}" -ge 1 ]; then
+  pass "载荷条数 ≥ 1（实际 $PAY_N —— 载荷发现非空跑）"
+else
+  SKIPPED=$((SKIPPED + 1))
+  printf '  [跳过] 载荷条数断言：本机 0 个载荷（`payload/` 被 gitignore；干净机器/CI 上必然如此）\n'
+  printf '         补法：scripts/make-payload.sh 生成后重跑；形状断言（上 6 条）已无条件跑过\n'
+fi
+
 # ── 3. 清单驱动发现 ──────────────────────────────────────────────────────────
 step "3/18  清单驱动发现"
 
 "$EZ" list --json --quiet > "$WORK/list.json" 2>/dev/null
-PY="$(command -v python || command -v python3 || true)"
-[ -n "$PY" ] || PY="$REPO/spike/_runtime-test/python/python.exe"
 
 # 2.x 正向值断言：安装标记里的 version 必须**等于**实际落位的目录名。
 # 只断言"标记文件存在"（见上一步）无法发现"部署了个错的版本、标记照写"这类错。
-# 放在这里而不是第 2 步，是因为 $PY 在上一行才可用（第 2 步时它还没定义）。
+# ✅ 2026-09-28：`$PY` 已提到工具函数区 —— 原先把本断言放在 step 3 是为了躲
+#    "step 2 时 $PY 还没定义"（见上方 PY 定义处的注释），属**绕行**；根因已修，
+#    这里保留在 step 3 只是历史位置，不再有依赖性。
 RUNTIME_MARKER="$(ls -d "$WORK/install/runtimes/python"/*/ 2>/dev/null | head -1)"
 if [ -n "$RUNTIME_MARKER" ] && [ -f "$RUNTIME_MARKER/.ezt-runtime.json" ]; then
   MARKER_VERSION="$(basename "$RUNTIME_MARKER")"
