@@ -85,22 +85,6 @@ public sealed class LayoutUpdater
         _log = log;
     }
 
-    /// <summary>跨盘符移动用复制+删（<c>Directory.Move</c> 跨卷会抛）。</summary>
-    private static void MoveOrCopy(string source, string target)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        try
-        {
-            Directory.Move(source, target);
-        }
-        catch (IOException)
-        {
-            // 跨卷：退化成复制
-            CopyDirectory(source, target);
-            Directory.Delete(source, recursive: true);
-        }
-    }
-
     private static void CopyDirectory(string source, string target)
     {
         Directory.CreateDirectory(target);

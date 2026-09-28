@@ -22,7 +22,7 @@ internal static partial class ConsoleUi
         }
         catch
         {
-            // 输出被重定向时可能失败，不影响功能
+            // review-guards:allow-empty-catch :: 输出被重定向时可能失败，不影响功能
         }
     }
 

@@ -587,7 +587,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch
         {
-            // 已被回收 / 无权 kill：忽略
+            // review-guards:allow-empty-catch :: 已被回收 / 无权 kill：忽略
         }
     }
 
@@ -610,7 +610,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch (ObjectDisposedException)
         {
-            // 已 Dispose：没什么可取消的
+            // review-guards:allow-empty-catch :: 已 Dispose：没什么可取消的
         }
 
         try
@@ -623,7 +623,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch
         {
-            // 工具可能不接受 tool.stop 就直接退了：不算错误
+            // review-guards:allow-empty-catch :: 工具可能不接受 tool.stop 就直接退了：不算错误
         }
 
         try
@@ -636,7 +636,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch
         {
-            // 忽略
+            // review-guards:allow-empty-catch :: 已发过停止请求：管道断/进程已退都说明停止生效，后续强杀兜底
         }
 
         if (!_process.HasExited)
@@ -668,7 +668,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch
         {
-            // 忽略
+            // review-guards:allow-empty-catch :: 收尾时等输出收集线程结算：进程已死，超时或异常都无需处理
         }
 
         _writeGate.Dispose();
@@ -679,7 +679,7 @@ public sealed class ToolProcess : IAsyncDisposable
         }
         catch
         {
-            // 忽略
+            // review-guards:allow-empty-catch :: 进程已退出：Dispose 抛异常无补救意义，句柄随对象释放
         }
 
         // 工具进程已终止，Job 句柄此时关闭只是句柄卫生；

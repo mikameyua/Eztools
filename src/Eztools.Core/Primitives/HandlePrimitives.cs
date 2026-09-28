@@ -130,7 +130,7 @@ public static unsafe class HandlePrimitives
             }
             catch
             {
-                // 监督线程绝不外抛
+                // review-guards:allow-empty-catch :: 监督线程绝不外抛
             }
         })
         {
@@ -236,7 +236,7 @@ public static unsafe class HandlePrimitives
             }
             catch
             {
-                // 扫描线程绝不外抛：结果以已收集到的为准
+                // review-guards:allow-empty-catch :: 扫描线程绝不外抛：结果以已收集到的为准
             }
             finally
             {
@@ -329,7 +329,7 @@ public static unsafe class HandlePrimitives
             }
             catch
             {
-                // 扫描线程绝不外抛：结果以已收集到的为准
+                // review-guards:allow-empty-catch :: 扫描线程绝不外抛：结果以已收集到的为准
             }
             finally
             {

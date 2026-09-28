@@ -75,7 +75,7 @@ internal static class ClipboardPanelProbe
                     }
                     catch (Exception)
                     {
-                        // 探针内捕获异常：不计入（超时后 ok=false 会显式变红）
+                        // review-guards:allow-empty-catch :: 探针内捕获异常：不计入（超时后 ok=false 会显式变红）
                     }
                 };
 
@@ -88,7 +88,7 @@ internal static class ClipboardPanelProbe
                     }
                     catch (Exception)
                     {
-                        // 写失败 → captured 永不置位 → ok=false 显式红
+                        // review-guards:allow-empty-catch :: 写失败 → captured 永不置位 → ok=false 显式红
                     }
                 });
                 writer.SetApartmentState(ApartmentState.STA);
@@ -130,6 +130,8 @@ internal static class ClipboardPanelProbe
             }
             catch (IOException)
             {
+                // 临时目录清理失败不碍验收（系统 temp 兜底）
+                // review-guards:allow-empty-catch :: 同上：清理失败不影响断言结论
             }
         }
     }
@@ -176,7 +178,7 @@ internal static class ClipboardPanelProbe
             }
             catch (IOException)
             {
-                // 临时目录清理失败不碍验收（系统 temp 兜底）
+                // review-guards:allow-empty-catch :: 临时目录清理失败不碍验收（系统 temp 兜底）
             }
         }
     }
@@ -338,7 +340,7 @@ internal static class ClipboardPanelProbe
             }
             catch (IOException)
             {
-                // 临时目录清理失败不碍验收（系统 temp 兜底）
+                // review-guards:allow-empty-catch :: 临时目录清理失败不碍验收（系统 temp 兜底）
             }
         }
 

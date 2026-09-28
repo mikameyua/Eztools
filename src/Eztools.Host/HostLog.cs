@@ -184,7 +184,7 @@ public sealed class HostLog : IDisposable
             }
             catch
             {
-                // 忽略：日志失败不得影响业务
+                // review-guards:allow-empty-catch :: 忽略：日志失败不得影响业务
             }
         }
 

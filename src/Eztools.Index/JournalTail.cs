@@ -259,7 +259,7 @@ public sealed class JournalTail
             }
             catch (Exception)
             {
-                // 诊断用，取不到就算了（**绝不能**让诊断把自举搞挂）
+                // review-guards:allow-empty-catch :: 诊断用，取不到就算了（**绝不能**让诊断把自举搞挂）
             }
         }
 

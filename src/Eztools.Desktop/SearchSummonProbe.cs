@@ -227,7 +227,7 @@ internal static class SearchSummonProbe
             }
             catch (SearchIndexException)
             {
-                // 自举中端点可能未就绪 —— 继续等，落最终态即可
+                // review-guards:allow-empty-catch :: 自举中端点可能未就绪 —— 继续等，落最终态即可
             }
 
             if (sw.ElapsedMilliseconds >= waitReadyMs)

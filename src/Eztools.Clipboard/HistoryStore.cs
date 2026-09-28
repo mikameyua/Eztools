@@ -294,11 +294,11 @@ public sealed class HistoryStore : IDisposable
             }
             catch (IOException)
             {
-                // 文件被占用（另一实例正拿它做缩略图）——下次启动再对账。不重试、不抛。
+                // review-guards:allow-empty-catch :: 文件被占用（另一实例正拿它做缩略图）——下次启动再对账。不重试、不抛。
             }
             catch (UnauthorizedAccessException)
             {
-                // 权限问题同上：对账是"清理优化"，绝不能因为它让启动失败。
+                // review-guards:allow-empty-catch :: 权限问题同上：对账是"清理优化"，绝不能因为它让启动失败。
             }
         }
 
@@ -495,7 +495,7 @@ public sealed class HistoryStore : IDisposable
         }
         catch (IOException)
         {
-            // 文件被占用：留着给启动对账（W5-d）兜底，不让删除链路失败。
+            // review-guards:allow-empty-catch :: 文件被占用：留着给启动对账（W5-d）兜底，不让删除链路失败。
         }
 
         return relativePath;

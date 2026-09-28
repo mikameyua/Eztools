@@ -104,7 +104,11 @@ internal static class DiagCommand
         catch (Exception ex)
         {
             ConsoleUi.Error($"诊断包生成失败：{ex.Message}");
-            try { File.Delete(outPath); } catch { /* 半成品一并清理，失败忽略 */ }
+            try { File.Delete(outPath); }
+            catch
+            {
+                // review-guards:allow-empty-catch :: 半成品一并清理，失败忽略
+            }
             return 1;
         }
 

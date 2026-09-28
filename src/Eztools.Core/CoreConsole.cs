@@ -18,7 +18,7 @@ internal static class CoreConsole
         }
         catch
         {
-            // stdout 断了不致命
+            // review-guards:allow-empty-catch :: stdout 断了不致命
         }
     }
 
@@ -30,7 +30,7 @@ internal static class CoreConsole
         }
         catch
         {
-            // stderr 断了不致命
+            // review-guards:allow-empty-catch :: stderr 断了不致命
         }
     }
 }

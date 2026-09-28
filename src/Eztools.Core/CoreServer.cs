@@ -124,7 +124,7 @@ public sealed class CoreServer
         }
         catch
         {
-            // trace 失败无所谓
+            // review-guards:allow-empty-catch :: trace 失败无所谓
         }
     }
 

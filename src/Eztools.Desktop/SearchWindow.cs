@@ -434,7 +434,7 @@ public sealed class SearchWindow : Window
         }
         catch
         {
-            // 诊断写入失败（文件锁/权限）不吞功能 —— 空catch即诊断自身降级
+            // review-guards:allow-empty-catch :: 诊断写入失败（文件锁/权限）不吞功能 —— 空catch即诊断自身降级
         }
     }
 

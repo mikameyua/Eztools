@@ -179,7 +179,7 @@ public static class CoreEndpoint
         }
         catch
         {
-            // 忽略：文件清理失败不影响退出
+            // review-guards:allow-empty-catch :: 忽略：文件清理失败不影响退出
         }
     }
 }

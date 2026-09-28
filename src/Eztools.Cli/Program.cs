@@ -1236,7 +1236,7 @@ uninstall 专有选项
                 }
                 catch
                 {
-                    // 临时目录删不掉不该让更新失败（系统清理会兜底）
+                    // review-guards:allow-empty-catch :: 临时目录删不掉不该让更新失败（系统清理会兜底）
                 }
             }
         }

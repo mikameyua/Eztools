@@ -220,7 +220,7 @@ internal static class CoreCommand
             }
             catch
             {
-                // 进程刚好退出了
+                // review-guards:allow-empty-catch :: 进程刚好退出了
             }
         }
 

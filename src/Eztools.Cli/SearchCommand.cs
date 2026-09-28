@@ -117,7 +117,7 @@ internal static class SearchCommand
             }
             catch (SearchIndexException)
             {
-                // 自举期间端点可能还没就绪 —— 继续等，不当作失败
+                // review-guards:allow-empty-catch :: 自举期间端点可能还没就绪 —— 继续等，不当作失败
             }
 
             await Task.Delay(100).ConfigureAwait(false);

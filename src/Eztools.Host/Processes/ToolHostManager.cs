@@ -1231,7 +1231,7 @@ public sealed class ToolHostManager : IAsyncDisposable
         }
         catch
         {
-            // 忽略
+            // review-guards:allow-empty-catch :: 关停时等 sweeper 收尾：它失败不该阻止关停流程走完
         }
 
         _shutdown.Dispose();

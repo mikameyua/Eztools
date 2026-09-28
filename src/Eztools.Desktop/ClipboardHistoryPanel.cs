@@ -858,7 +858,7 @@ public sealed class ClipboardHistoryPanel : Window
         }
         catch
         {
-            // 诊断写入失败不影响功能
+            // review-guards:allow-empty-catch :: 诊断写入失败不影响功能
         }
     }
 
@@ -946,7 +946,7 @@ public sealed class ClipboardHistoryPanel : Window
         }
         catch (InvalidOperationException)
         {
-            // 未 Show 过的窗口 Close 抛异常——窗口本就没起来，无需清理
+            // review-guards:allow-empty-catch :: 未 Show 过的窗口 Close 抛异常——窗口本就没起来，无需清理
         }
     }
 

@@ -58,6 +58,7 @@ internal sealed class SingleInstance : IDisposable
         }
         catch (ApplicationException)
         {
+            // review-guards:allow-empty-catch :: 只有持有者能释放。走到这里说明线程归属和获取时不一致（不该发生），；但**不能因此让进程退不出去** —— 忽略即可，句柄随进程结束回收。
             // 只有持有者能释放。走到这里说明线程归属和获取时不一致（不该发生），
             // 但**不能因此让进程退不出去** —— 忽略即可，句柄随进程结束回收。
         }

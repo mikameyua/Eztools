@@ -411,7 +411,7 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
         }
         catch
         {
-            // 进程已死 = 目标达成；kill 的失败（如已退出竞态）无信息量
+            // review-guards:allow-empty-catch :: 进程已死 = 目标达成；kill 的失败（如已退出竞态）无信息量
         }
 
         _stdin?.Dispose();
@@ -478,7 +478,7 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
         }
         catch
         {
-            // 管道已断 = 进程已死，kill 兜底即可
+            // review-guards:allow-empty-catch :: 管道已断 = 进程已死，kill 兜底即可
         }
 
         if (!process.WaitForExit(GracefulStopTimeoutMs))
@@ -489,7 +489,7 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
             }
             catch
             {
-                // 同上
+                // review-guards:allow-empty-catch :: 强杀失败说明进程已自行退出 —— 目标已达成
             }
         }
 

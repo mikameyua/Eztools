@@ -371,7 +371,7 @@ internal static class SelfTestCommand
             }
             catch
             {
-                // 自动重启尚未完成，继续轮询（上限 10 秒）
+                // review-guards:allow-empty-catch :: 自动重启尚未完成，继续轮询（上限 10 秒）
             }
         }
 
@@ -1720,7 +1720,7 @@ internal static class SelfTestCommand
             }
             catch
             {
-                // 临时目录清理失败不影响判定（OS 会兜底回收）
+                // review-guards:allow-empty-catch :: 临时目录清理失败不影响判定（OS 会兜底回收）
             }
         }
     }
@@ -2162,7 +2162,7 @@ internal static class SelfTestCommand
                 }
                 catch
                 {
-                    // 临时目录清理失败不影响判定
+                    // review-guards:allow-empty-catch :: 临时目录清理失败不影响判定
                 }
             }
         }
@@ -2956,7 +2956,7 @@ internal static class SelfTestCommand
             }
             catch
             {
-                // 临时目录清理失败不影响用例结果（CI 磁盘延迟删除常见）
+                // review-guards:allow-empty-catch :: 临时目录清理失败不影响用例结果（CI 磁盘延迟删除常见）
             }
         }
     }
@@ -3250,7 +3250,7 @@ internal static class SelfTestCommand
                 }
                 catch
                 {
-                    // 清理失败不影响断言
+                    // review-guards:allow-empty-catch :: 清理失败不影响断言
                 }
             }
         }
@@ -3530,7 +3530,7 @@ internal static class SelfTestCommand
                 }
                 catch
                 {
-                    // 清理失败不影响断言
+                    // review-guards:allow-empty-catch :: 清理失败不影响断言
                 }
             }
         }
@@ -3568,7 +3568,7 @@ internal static class SelfTestCommand
                 }
                 catch
                 {
-                    // 清理失败不影响断言
+                    // review-guards:allow-empty-catch :: 清理失败不影响断言
                 }
             }
         }
@@ -4119,7 +4119,7 @@ internal static class SelfTestCommand
             }
             catch
             {
-                // 临时目录清理失败不影响断言（OS 会兜底回收）
+                // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言（OS 会兜底回收）
             }
         }
     }
@@ -4335,6 +4335,7 @@ internal static class SelfTestCommand
             }
             catch (IOException)
             {
+                // review-guards:allow-empty-catch :: 临时目录清理失败不阻塞 selftest，系统 temp 兜底
             }
         }
 
@@ -4403,7 +4404,4 @@ internal static class SelfTestCommand
 
         return _fail == 0 ? 0 : 1;
     }
-
-    private static JsonArray DeepCloneJson(this JsonArray array) =>
-        (JsonArray)JsonNode.Parse(array.ToJsonString())!;
 }

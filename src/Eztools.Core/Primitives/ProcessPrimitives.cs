@@ -43,7 +43,7 @@ public static unsafe class ProcessPrimitives
             }
             catch
             {
-                // path 为 null 即可
+                // review-guards:allow-empty-catch :: path 为 null 即可
             }
 
             processes.Add(new JsonObject
