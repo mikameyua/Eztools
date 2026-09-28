@@ -160,6 +160,36 @@ else
   fail "审计日志缺失或未记录调用（$AUDIT_FILE）"
 fi
 
+# ── 12.11b ★ 审计降级必须**可见**（RI-1 反向断言，2026-09-29 安全面专项审）──────
+# 背景（docs/代码审查报告-安全面专项-2026-09-29.md 的 RI-1）：
+#   AuditLog 的降级告警原先只走 stdout，而**提权 Core 的 stdout 无人接收**
+#   （CoreCommand.cs：提权只能走 ShellExecute，该处代码注释原文"ShellExecute 会把它吞掉"）
+#   ⇒ 审计可用性降级在过去是**完全静默**的。修法 = 告警加文件出口 + Failures 经 hello/ping 暴露。
+# 本条**故意制造审计写失败**，断言降级真的能被观察到 —— 否则"修好了"只是纸面结论。
+mv "$WORK/install/logs" "$WORK/install/logs.ri1bak"
+: > "$WORK/install/logs"     # 同名**文件**（不是目录）⇒ CreateDirectory / FileStream 全失败
+call_core "$CORE_OUT" "$EZ" primitive process.enumerate --compact --json   # 触发一次审计写入
+call_core "$CORE_OUT" "$EZ" core ping --json
+AF="$("$PY" -I -X utf8 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+except Exception:
+    print('PARSE_FAIL'); sys.exit(0)
+# 兼容两种输出形态：CLI 可能直接给 result 内容，也可能带 jsonrpc/result 包装
+r = d.get('result') if isinstance(d.get('result'), dict) else d
+print(r.get('auditFailures', 'MISSING'))
+" "$(winpath "$CORE_OUT")" 2>/dev/null | tr -d '\r\n')"
+if [ "${AF:-MISSING}" = "MISSING" ] || [ "${AF:-x}" = "PARSE_FAIL" ]; then
+  fail "auditFailures 字段缺失（审计健康无对外出口 —— RI-1 复发）"
+elif [ "${AF:-0}" -ge 1 ] 2>/dev/null; then
+  pass "★ 审计写失败被计数并经 ping 暴露（auditFailures=$AF）—— 降级不再静默"
+else
+  fail "auditFailures=$AF（期望 ≥1：已制造审计写失败却未被计数 ⇒ 降级仍不可见）"
+fi
+rm -f "$WORK/install/logs"
+mv "$WORK/install/logs.ri1bak" "$WORK/install/logs"
+
 # ── 12.12 安装形态：bin\ezt-core.exe 已铺进安装根 ────────────────────────────
 # 自含式安装验证（第 7 步的部署目录在托盘步骤末尾会被清理，不能跨步引用）
 P3_INSTALL="$WORK/p3-install"

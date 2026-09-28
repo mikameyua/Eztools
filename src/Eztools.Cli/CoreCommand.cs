@@ -250,6 +250,11 @@ internal static class CoreCommand
             ["pid"] = pong?["pid"]?.GetValue<int>(),
             ["elevated"] = pong?["elevated"]?.GetValue<bool>(),
             ["version"] = pong?["version"]?.GetValue<string>(),
+            // ⚠️ 这里是**白名单式**构造：Core 侧新增的协议字段不会自动透传，
+            //   漏掉就是"CLI 层静默吞字段"（同族先例：`ezt list --json` 曾漏 `handler`）。
+            //   审计健康必须在 ping 上能读到 —— 提权 Core 的 stdout 无人接收（见 AuditLog 类注释），
+            //   ping/hello 是运维侧唯一能发现"审计正在丢"的通道。
+            ["auditFailures"] = pong?["auditFailures"]?.GetValue<int>(),
         };
 
         Console.WriteLine(cli.GetBool("json")

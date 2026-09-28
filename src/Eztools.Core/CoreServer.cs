@@ -262,6 +262,9 @@ public sealed class CoreServer
                         ["version"] = _version,
                         ["elevated"] = Elevated,
                         ["callerUser"] = callerUser,
+                        // 审计健康：0 = 链路正常。提权 Core 的 stdout 无人接收（见 AuditLog 类注释），
+                        // 这是运维侧唯一能读到"审计正在丢"的通道。
+                        ["auditFailures"] = _audit.Failures,
                     }).ConfigureAwait(false);
                     return DispatchOutcome.Replied;
 
@@ -272,6 +275,7 @@ public sealed class CoreServer
                         ["elevated"] = Elevated,
                         ["pid"] = Pid,
                         ["version"] = _version,
+                        ["auditFailures"] = _audit.Failures,
                     }).ConfigureAwait(false);
                     return DispatchOutcome.Replied;
 
