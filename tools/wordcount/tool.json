@@ -25,7 +25,7 @@
       }
     ],
     "hotkeys": [
-      { "command": "wordcount.count", "default": "Ctrl+Alt+W", "title": "统计剪贴板文本" }
+      { "command": "wordcount.count", "default": "Ctrl+Alt+N", "title": "统计剪贴板文本" }
     ],
     "menus": [
       { "location": "tray", "command": "wordcount.count", "group": "text", "input": "clipboard" }

@@ -38,6 +38,74 @@ PASS = FAIL = 0
 # 不加这一项时，跳过表现为"通过数莫名从 222 变 219"，无任何信号（S9 复发形态）。
 SKIPPED = 0
 
+# ── 热键注册数的判据：区分「环境被占」与「代码没注册」─────────────────────────
+# 为什么需要分流（2026-09-28 实测）：`RegisterHotKey` 失败只有两个原因 ——
+#   ① 组合键已被**本机别的进程**占用（实测 Ctrl+Alt+W 返回 GetLastError=1409，
+#      而同组 H/P/S/O/V 全部可注册）；② 宿主/工具根本没去注册。
+# 这两种在日志里长得一模一样（都表现为"热键注册 = 5"），于是"别的软件占了键"
+# 会被读成"Eztools 坏了"，把人引向代码 —— 与 §3.2 2.4「环境依赖分支应跳过并计数」
+# 的纪律相悖。故按三态判定：
+#   registered >= expected                 → pass
+#   registered <  expected 且探针报占用     → **skip（落数字，不能静默少跑）**
+#   registered <  expected 且无占用/探针挂掉 → fail（这才是代码侧问题；探针不可用按失败处理）
+HOTKEY_ASSERT_NAME = ("热键注册 = 6（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c，"
+                      "RegisterHotKey 真实成功）")
+
+
+def hotkey_verdict(registered: int, expected: int, occupied):
+    """返回 (verdict, detail)；verdict ∈ {"pass","skip","fail"}。
+
+    纯函数（不碰 I/O）—— 三态都能在毫秒级做突变验证，见下方 --selftest 分支。
+    """
+    if registered >= expected:
+        return "pass", f"注册 {registered}/{expected}"
+    if occupied is None:
+        return "fail", (f"注册 {registered}/{expected}，且占用探针**跑不起来**"
+                        f"（无法区分环境与代码 ⇒ 按失败处理，不许静默放过）")
+    if occupied:
+        return "skip", (f"注册 {registered}/{expected}；探针确认这些组合键已被别的进程占用："
+                        f"{'、'.join(occupied)}")
+    return "fail", (f"注册 {registered}/{expected}，但探针显示所有声明的组合键**都可注册**"
+                    f" ⇒ 是代码侧没注册，不是环境冲突")
+
+
+def probe_occupied_hotkeys(repo: str):
+    """跑 scripts/probe-hotkey-free.py，返回被占用的组合键；探针不可用时返回 None。"""
+    script = os.path.join(repo, "scripts", "probe-hotkey-free.py")
+    if not os.path.exists(script):
+        return None
+    out = os.path.join(repo, "_scratch", "verify-desktop-hotkeys.json")
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        subprocess.run([sys.executable, "-I", "-X", "utf8", "-u", script, "--json", out],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=60)
+        with open(out, encoding="utf-8") as fh:
+            return list(json.load(fh).get("occupied", []))
+    except Exception:
+        return None
+
+
+def hotkey_selftest() -> int:
+    """三态判定的突变验证（不出仓、不碰真实热键）。"""
+    cases = [
+        ("注册满额 → pass", (6, 6, []), "pass"),
+        ("注册不满但有占用 → skip", (5, 6, ["Ctrl+Alt+W"]), "skip"),
+        ("注册不满且无占用 → fail（代码侧）", (5, 6, []), "fail"),
+        ("注册不满且探针挂掉 → fail（不许静默放过）", (5, 6, None), "fail"),
+        ("超额注册（>= 期望）→ pass", (7, 6, []), "pass"),
+    ]
+    bad = 0
+    for desc, args, want in cases:
+        got = hotkey_verdict(*args)[0]
+        ok = got == want
+        bad += 0 if ok else 1
+        print(f"  [{'PASS' if ok else 'FAIL'}] {desc}"
+              + ("" if ok else f"（期望 {want}，实际 {got}）"))
+    print(f"\nverify-desktop-hotkey-selftest: PASS={len(cases) - bad} FAIL={bad}")
+    return 1 if bad else 0
+
+
 
 def ck(name: str, cond: bool, detail: str = "") -> None:
     global PASS, FAIL
@@ -156,8 +224,18 @@ def set_clipboard(text: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo", required=True, help="仓库根（Windows 形式路径）")
+    # ⚠️ 不用 required=True：`--selftest` 是纯函数级突变验证，不需要仓库路径。
+    #    但**契约不能松** —— 非 selftest 分支下缺 --repo 仍必须报错（见下面 parser.error）。
+    parser.add_argument("--repo", default=None, help="仓库根（Windows 形式路径；--selftest 时可省）")
+    parser.add_argument("--selftest", action="store_true",
+                        help="只跑热键判定的三态突变验证（不碰托盘/热键），供验收元断言使用")
     args = parser.parse_args()
+
+    if args.selftest:
+        return hotkey_selftest()
+
+    if not args.repo:
+        parser.error("--repo 是必填项（--selftest 除外）")
 
     repo = args.repo
     desktop = os.path.join(repo, "src", "Eztools.Desktop", "bin", "Debug",
@@ -249,8 +327,19 @@ def main() -> int:
         ck("托盘项 = 3（与 Cli 侧一致 —— 同一个合成器；filehash/wordcount/preview；"
            "「搜索文件」是宿主直挂项，不进合成器模型）",
            m.group(2) == "3", m.group(2))
-        ck("热键注册 = 6（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c，RegisterHotKey 真实成功）",
-           m.group(3) == "6", m.group(3))
+        # 热键注册数：三态判定（环境占用 → 跳过并落数字；代码没注册 → 红）
+        n_hk = int(m.group(3))
+        if n_hk == 6:
+            ck(HOTKEY_ASSERT_NAME, True, str(n_hk))
+        else:
+            verdict, detail = hotkey_verdict(n_hk, 6, probe_occupied_hotkeys(repo))
+            if verdict == "skip":
+                globals()["SKIPPED"] += 1
+                info(f"[跳过] {HOTKEY_ASSERT_NAME}\n       {detail}")
+                info("       处置：跑 scripts/probe-hotkey-free.py 看占用者；关掉那个软件，"
+                     "或改该工具 tool.json 的默认热键（改后同步引用该热键的文档）")
+            else:
+                ck(HOTKEY_ASSERT_NAME, False, detail)
         ck("图标按 SmallIconSize 取到 16x16", m.group(4) == "16" and m.group(5) == "16",
            f"{m.group(4)}x{m.group(5)}")
 

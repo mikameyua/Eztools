@@ -142,8 +142,12 @@ cd /d/01-项目代码/Eztools   # ⚠️ 家目录下相对路径会报 No such 
 
 ## D+. 热键真实按键（P2 收官新增）
 
-复制一段文本 → **直接按 `Ctrl+Alt+W`** → 应弹"统计文本 完成"气泡（或查日志 `托盘调用 wordcount.count 完成…结果 {…}`）。
+复制一段文本 → **直接按 `Ctrl+Alt+N`** → 应弹"统计文本 完成"气泡（或查日志 `托盘调用 wordcount.count 完成…结果 {…}`）。
 **验什么**：RegisterHotKey → WM_HOTKEY → 调用的全链路（自动化只断言了注册数 2，真按键留给手）。
+
+> ⚠️ **2026-09-28 默认键由 `Ctrl+Alt+W` 改为 `Ctrl+Alt+N`**：`Ctrl+Alt+W` 在本机被**别的进程占用**
+> （`RegisterHotKey` 返回 `GetLastError=1409`，同组其它键正常），导致 wordcount 的热键在这台机器上从没注册成功过。
+> 排查用 `scripts/probe-hotkey-free.py`（探针会打印 `[OK]/[占用]`）。**换键前先探**，别猜。
 
 ## D. 收尾
 
