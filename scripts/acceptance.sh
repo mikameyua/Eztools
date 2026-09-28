@@ -315,6 +315,47 @@ if bad:
 PY
 if [ $? -eq 0 ]; then pass "清单结构与配置 schema 解析正确"; else fail "清单解析断言未通过"; fi
 
+# ── 3b. `contributes.actions` 的**解析契约** + 钉住"不可派发"这个当前限制 ─────────
+# 🔴 2026-09-28 断言语审补的零覆盖，同时纠正一个**文档与实现不符**：
+#   全仓范围内 `actions` 的消费面**只有"解析 + 列举"**（ManifestParser + `ezt list/info` 展示），
+#   **没有任何派发路径** —— `when` 从不被求值、action 从不被执行（`ezt invoke` 只认 commands，
+#   实测 `ezt invoke filehash.action.hashFile` 报"未找到命令"）。
+#   而设计文档 §4.5 贡献点表把它标成 `✅ P0`、用途写"文件、选中文本动作（右键 / 拖入）"
+#   ⇒ 读者会以为"选中文件右键就能用"。**故本条断言钉的是真实存在的那半边契约**，
+#   另加一条把"不可派发"这个限制钉成**显式契约**（防静默变更，并给将来实现者一个更新点）。
+ACT_SUM="$("$PY" -I -X utf8 -c "
+import json, sys
+tools = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+no_key = sum(1 for t in tools if 'actions' not in t)
+not_list = sum(1 for t in tools if not isinstance(t.get('actions'), list))
+acts = [a for t in tools for a in (t.get('actions') or [])]
+FIELDS = ('id', 'title', 'when', 'handler')
+missing = sum(1 for a in acts for k in FIELDS if not a.get(k))
+first = acts[0].get('id', '') if acts else ''
+print(f'{no_key}|{not_list}|{len(acts)}|{missing}|{first}')
+" "$(winpath "$WORK/list.json")" 2>/dev/null | tr -d '\r\n')"
+IFS='|' read -r ACT_NOKEY ACT_NOTLIST ACT_COUNT ACT_MISS ACT_FIRST <<< "$ACT_SUM"
+check "每个工具条目都带 actions 键（清单解析契约）" 0 "${ACT_NOKEY:-none}"
+check "actions 一律是数组（类型契约，不是 null / 字符串）" 0 "${ACT_NOTLIST:-none}"
+check "至少 1 个工具声明了 action（否则下面两条契约断言空跑）" 1 \
+  "$(if [ "${ACT_COUNT:-0}" -ge 1 ]; then echo 1; else echo 0; fi)"
+check "每个 action 四字段齐全且非空（id/title/when/handler）" 0 "${ACT_MISS:-none}"
+if [ -n "${ACT_FIRST:-}" ]; then
+  "$EZ" invoke "$ACT_FIRST" > "$WORK/invoke-action.log" 2>&1
+  ACT_RC=$?
+  ACT_HAS=$(grep -c '未找到命令' "$WORK/invoke-action.log")
+  ACT_OK=0
+  if [ "$ACT_RC" -ne 0 ]; then
+    if [ "$ACT_HAS" -ge 1 ]; then ACT_OK=1; fi
+  fi
+  # ★ 钉住**当前限制**（actions 派发未实现）。若将来实现了派发，本条会变红 ——
+  #   那是**故意设的更新点**：请一并更新本断言名与设计文档 §4.5 的 actions 状态列。
+  check "actions 目前不可被 invoke（派发未实现，实测给出'未找到命令'而非静默成功）" 1 "$ACT_OK"
+  if [ "$ACT_OK" -eq 0 ]; then
+    printf '        实测：rc=%s 输出=%s\n' "$ACT_RC" "$(head -c 160 "$WORK/invoke-action.log" | tr -d '\r\n')"
+  fi
+fi
+
 # ── 4. 端到端调用（含非 ASCII 逐字符校验）──────────────────────────────────
 step "4/18  端到端调用与编码"
 
@@ -1063,6 +1104,13 @@ if [ "$SKIPPED" -gt 0 ]; then
   printf " / 跳过 %s（环境依赖分支未满足；满额 %s）" "$SKIPPED" "$((PASS + SKIPPED))"
 fi
 printf "\n"
+
+# 🔴 2026-09-29：汇总行**同时落盘**。
+#    此前它只打到 stdout —— 调用方一旦用 `| tail -N` 截断（自动化/我本人都会这么干），
+#    "通过多少"就丢了，只能靠推算或重跑（本次会话为此重跑过一次，8 分钟）。
+#    落盘后：`cat _scratch/accept-summary.txt` 即可核对，也让历史数字可追溯。
+printf '通过 %s / 失败 %s / 跳过 %s / 满额 %s\n' \
+  "$PASS" "$FAIL" "$SKIPPED" "$((PASS + SKIPPED))" > "$REPO/_scratch/accept-summary.txt"
 
 # ── 自洽断言：满额 == PASS + SKIPPED ────────────────────────────────────────
 # 这是"跳过已被计数"的**判据本身**（§12.5.6 的核心不变量）：

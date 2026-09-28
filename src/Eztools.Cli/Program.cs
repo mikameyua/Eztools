@@ -866,6 +866,11 @@ uninstall 专有选项
                         ["id"] = a.Id,
                         ["title"] = a.Title,
                         ["when"] = a.When,
+                        // 🔴 2026-09-29 补：原先这里**漏了 handler**，而上面的 commands 分支有
+                        //    （`ezt info` 的表格也打印 handler）—— 同一份声明的两个展示面不一致，
+                        //    读 `list --json` 的人无法判断 handler 到底解析出来没有。
+                        //    是新增的 acceptance 3b 断言（actions 四字段齐全）把它抓出来的。
+                        ["handler"] = a.Handler,
                     }).ToArray()),
                     ["hotkeys"] = new JsonArray(tool.Manifest.Contributes.Hotkeys.Select(h => (JsonNode)new JsonObject
                     {
