@@ -992,6 +992,10 @@ source "$REPO/scripts/_step17_ocr.sh"
 # W5-a 剪贴板历史库验收（捕获 / 去重 / 双路搜索 / 置顶豁免 / 回复制比对）
 source "$REPO/scripts/_step18_clip.sh"
 
+# 代码审查红线静态守卫（空 catch / 字符串 switch 缺 default / 验收脚本禁用模式 /
+#   幽灵代码候选 / 死产物目录）+ 元断言（--selftest 双向突变验证、豁免落数字）
+source "$REPO/scripts/_step19_review_guards.sh"
+
 echo "=================================================================="
 printf " 结果: 通过 %s / 失败 %s" "$PASS" "$FAIL"
 if [ "$SKIPPED" -gt 0 ]; then
