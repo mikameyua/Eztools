@@ -865,6 +865,48 @@ def main() -> int:
            not xv.get("resummonError") and ax.get("visible") is True and ax.get("queryFocused") is True,
            f"afterXResummon={ax} err={xv.get('resummonError')}")
 
+    # ── 1c-6b. live 探针的**未就绪**侧：**无条件**断言（2026-09-28 断言语审补）──────
+    # 为什么这条能无条件跑（技能 §二 的判据：**前置状态能否总能被构造出来**）：
+    # 它要的前置是"**没有**索引"，而"没有索引"总能构造 —— 一个全新临时安装根就是。
+    # 守的是 W3-d-1 的契约：**未就绪必须如实说"正在建索引"，不是空列表、不是假零数据**
+    # （踩坑全集 §2.24②「异步快照零值必须区分'没有'与'还没查'」—— 这条断言就是那个契约）。
+    # 与下面那段"需要现成索引"的夹具断言互补：一个测未就绪、一个测已就绪。
+    nr_root = os.path.join(repo, "_scratch", "vd-empty-root", str(os.getpid()))
+    os.makedirs(nr_root, exist_ok=True)   # 唯一名 ⇒ 必定为空，不靠"恰好没索引"
+    nr_file = os.path.join(repo, "_scratch", "desktop-search-notready.json")
+    if os.path.exists(nr_file):
+        os.remove(nr_file)
+    nr = subprocess.run(
+        [desktop, "--probe-search-summon", "--probe-search-live", "--wait-ready", "3000",
+         "--no-prompt", "--out", nr_file],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=dict(env, EZTOOLS_INSTALL_ROOT=nr_root.replace("\\", "/")),
+        cwd=repo, timeout=180)
+    ck("搜索窗 live 探针在**空索引根**上退出码 0（未就绪不是失败）", nr.returncode == 0,
+       f"code={nr.returncode} err={nr.stderr[:200]}")
+    nrl = {}
+    if os.path.isfile(nr_file):
+        try:
+            with open(nr_file, encoding="utf-8") as f:
+                nrl = (json.load(f) or {}).get("live") or {}
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"空根 live 探针输出不可解析：{ex}")
+    # 夹具有效性前提：唯一空根必须**确实**未就绪 —— 否则下面两条断言测的就不是未就绪路径
+    ck("★ 空索引根如实报未就绪（ready=False —— 夹具有效性前提，防'恰好就绪'）",
+       nrl.get("ready") is False, f"ready={nrl.get('ready')!r}")
+    nrl_lei = nrl.get("lei") or {}
+    _st = f"{nrl_lei.get('statusRight') or ''}|{nrl_lei.get('statusText') or ''}"
+    ck("★★ 未就绪时状态行说自己**正在建索引**（不是空白、不是假零数据）",
+       "正在建索引" in _st, f"statusText={nrl_lei.get('statusText')!r}")
+    ck("★ 未就绪时卷清单行说明『索引准备中』（诊断与状态一致，非空白）",
+       "准备中" in (nrl_lei.get("volumesLine") or ""),
+       f"volumesLine={nrl_lei.get('volumesLine')!r}")
+    # 反向：未就绪**不得**伪装成"搜到了 0 个结果" —— items 必须是 0 **且**状态行有解释
+    #（只有 items==0 而不解释，就是用户看到"没结果"却不知道为什么）
+    ck("★ 反向：未就绪时 items=0 且状态行有解释（零值不许与'没搜到'混淆）",
+       (nrl_lei.get("items") or 0) == 0 and len(nrl_lei.get("statusText") or "") >= 8,
+       f"items={nrl_lei.get('items')!r} statusText={nrl_lei.get('statusText')!r}")
+
     # live 变体（真链路 lei/LEI 大小写 + 未就绪诊断）：需要现成就绪索引，缺夹具则跳过。
     #
     # 🔴 2026-09-28 断言语审（专项）：这一段原本是「缺夹具就 info 一句、整块断言消失、
@@ -906,9 +948,14 @@ def main() -> int:
                  f"—— 夹具 {live_root}\\index 存在但未就绪；状态行原文已落盘 {live_file}")
     else:
         globals()["SKIPPED"] += LIVE_ASSERTS_ALL
-        info(f"[跳过] {LIVE_ASSERTS_ALL} 条 live 断言：未找到现成索引夹具 {live_root}\\index\n"
-             f"       ⚠️ 该夹具是手工产物且 `_scratch/` 被 gitignore ⇒ **干净机器/CI 上必然跳过**，"
-             f"这 2 条断言在自动化里等于不存在；要真跑需先用 ezt-index 建一次该根的索引")
+        info(f"[跳过] {LIVE_ASSERTS_ALL} 条 live 断言（**已就绪**侧）：未找到现成索引夹具 "
+             f"{live_root}\\index\n"
+             f"       · 未就绪侧已由上面的 1c-6b 用「空根」夹具**无条件**覆盖（4 条），"
+             f"这里丢的只是「已就绪」侧的大小写折叠断言；\n"
+             f"       · 该夹具是手工产物且 `_scratch/` 被 gitignore ⇒ 干净机器/CI 上必然跳过。"
+             f"补它需**一次 UAC**（索引走 MFT 提权路径），步骤见 `docs/W3-手工验收清单.md` "
+             f"的 G2-a 节：新建根 → 把旧根的 core.json 拷进新根 → `ezt core start --elevate "
+             f"--install-root <新根>` 等 ready → 索引落在 <新根>\\index")
 
     # ── 1c-6. W4-c：OCR 热键链路 + 宿主设置探针 ─────────────────────────────
     #     为什么必须有：selfcheck 只证明"热键注册成功"（RegisterHotKey 返回真），
@@ -1351,6 +1398,7 @@ def main() -> int:
     #    explorer 会为每个出现过的托盘图标在 HKCU\Control Panel\NotifyIconSettings 建一条记录。
     #    这比"构造 NotifyIcon 没抛异常"硬得多 —— 那只能证明代码跑过，证明不了图标看得见。
     found = []
+    _notify_evidence = True     # 取证前提（键存在）默认成立；FileNotFoundError 时置 False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\NotifyIconSettings") as root:
@@ -1368,8 +1416,16 @@ def main() -> int:
                 except OSError:
                     continue
     except FileNotFoundError:
-        info("NotifyIconSettings 键不存在（更早的 Windows 版本），跳过")
-    ck("托盘图标已登记进通知区域", len(found) > 0, "未找到 —— 图标可能没真正显示")
+        # 本机没有该键 ⇒ **这条断言的取证前提不成立**（更早的 Windows 无此键）。
+        # 原先这里只打 info 而下面的断言照跑 —— 那会让缺键的机器**假红**
+        # （`found` 为空 ⇒ "未找到图标"）。G6（跳过必须计数）就是从这里嗅出来的。
+        # 改成**跳过并计数**：取证不到 ⇒ 不判红，但要落数字（满额随之少 1）。
+        _notify_evidence = False
+        globals()["SKIPPED"] += 1
+        info("[跳过] 1 条通知区域断言：本机无 NotifyIconSettings 键（更早的 Windows 版本），"
+             "无法枚举通知区域取证 ⇒ 不判红，满额随之少 1")
+    if _notify_evidence:
+        ck("托盘图标已登记进通知区域", len(found) > 0, "未找到 —— 图标可能没真正显示")
 
     # ── 5. 常驻内存与退出清理 ───────────────────────────────────────────────
     out = sh(["tasklist", "/FI", f"IMAGENAME eq {img}"]).stdout or ""
