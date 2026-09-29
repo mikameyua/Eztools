@@ -47,7 +47,8 @@ public static class PrimitiveRegistry
             (args, ctx) =>
             {
                 var pid = OptionalLong(args, "pid");
-                var entries = HandlePrimitives.Enumerate((ulong?)pid, ctx.Ct);
+                var outcome = HandlePrimitives.Enumerate((ulong?)pid, ctx.Ct);
+                var entries = outcome.Entries;
                 var array = new JsonArray();
                 foreach (var entry in entries.Take(2000))
                 {
@@ -63,6 +64,12 @@ public static class PrimitiveRegistry
                 {
                     ["count"] = entries.Count,
                     ["truncated"] = entries.Count > 2000,
+                    // ★ RI-6：挂起对象黑名单跳过的条数 + 已知挂起对象规模。
+                    //   两者都是**已知的数据缺失 / 机制状态**，必须对外可见
+                    //   （规范 §3.3 3.9：降级/丢弃类信号必须有可达出口 —— 否则调用方会把
+                    //   "少了几条"误读成"系统里就这么多"）。
+                    ["skippedStalled"] = outcome.SkippedStalled,
+                    ["stalledObjects"] = outcome.StalledObjectsKnown,
                     ["handles"] = array,
                 };
             }),

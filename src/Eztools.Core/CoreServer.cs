@@ -35,6 +35,7 @@ public sealed class CoreServer
     {
         _installRoot = Path.GetFullPath(installRoot);
         _audit = new AuditLog(Path.Combine(_installRoot, "logs"), echo);
+        CoreConsole.BindTraceDir(_installRoot);   // 让全 Core（含原语实现）都能写文件 trace
         _version = typeof(CoreServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         Elevated = VolumePrimitives.IsElevated();
         PipeName = CoreEndpoint.ComputePipeName(_installRoot);
@@ -91,42 +92,13 @@ public sealed class CoreServer
         }
     }
 
-    /// <summary>排查用的文件 trace（不依赖父进程的 stdout 是否还活着）。</summary>
-    private void Trace(string message)
-    {
-        try
-        {
-            var dir = Path.Combine(_installRoot, "logs");
-            var file = Path.Combine(dir, "core-trace.log");
-
-            // 按大小轮转，留 3 份历史（.1 最新 → .3 最旧）。
-            // 为什么必须轮转：Core 是**长期驻留**的特权进程，trace 每次连接/异常都写一行，
-            // 不轮转就是无界增长——而它落在用户磁盘的安装根里，没有任何东西会替它收拾。
-            // 阈值取 1 MB：单行约 100 B，1 万行足够回溯最近几次失败，又不至于占空间。
-            const long MaxBytes = 1024 * 1024;
-            if (File.Exists(file) && new FileInfo(file).Length >= MaxBytes)
-            {
-                for (var i = 2; i >= 1; i--)
-                {
-                    var older = file + "." + i;
-                    var newer = file + "." + (i + 1);
-                    if (File.Exists(older))
-                    {
-                        File.Move(older, newer, overwrite: true);
-                    }
-                }
-
-                File.Move(file, file + ".1", overwrite: true);
-            }
-
-            Directory.CreateDirectory(dir);
-            File.AppendAllText(file, $"{DateTime.Now:HH:mm:ss.fff} [pid={Pid}] {message}\n");
-        }
-        catch
-        {
-            // review-guards:allow-empty-catch :: trace 失败无所谓
-        }
-    }
+    /// <summary>
+    /// 排查用的文件 trace（不依赖父进程的 stdout 是否还活着）。
+    /// 实现已提到 <see cref="CoreConsole.Trace"/>，好让原语实现也能用它
+    /// （2026-09-29：诊断句柄扫描的累积变慢时，Console.WriteLine 那条路根本收不到 ——
+    /// 见 <see cref="CoreConsole"/> 的类注释）。
+    /// </summary>
+    private static void Trace(string message) => CoreConsole.Trace(message);
 
     /// <summary>请求退出（core.shutdown 走这里）。优雅：当前连接处理完自然结束。</summary>
     public void RequestStop() => _stop.Cancel();

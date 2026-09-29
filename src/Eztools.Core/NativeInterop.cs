@@ -20,6 +20,11 @@ internal static unsafe class NativeInterop
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
 
+    /// <summary>取进程当前句柄数（诊断用：定位"泄漏了多少句柄"这类问题必须能自测量）。</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetProcessHandleCount(IntPtr process, out uint count);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DuplicateHandle(
