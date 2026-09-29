@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Eztools contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using Eztools.Contracts;
@@ -25,10 +24,13 @@ namespace Eztools.Core.Primitives;
 /// 泄漏上界 = 挂起句柄数，进程退出时自动回收。这是已知取舍（P3 方案 §9）。
 ///
 /// <b>并行化（2026-09-21，清单 C2）</b>：原实现是单线程遍历全表，10 万+ 条目逐个
-/// <c>OpenProcess</c>/<c>DuplicateHandle</c>，实测 1~2 分钟。现改为<b>按 pid 分桶 + 多 worker</b>：
-/// 句柄表天然按 pid 聚集，分桶后 <c>OpenProcess</c> 由"每句柄一次"降为"每 pid 一次"，
-/// 不同 pid 的桶并行处理（同 pid 必须串行 —— 它们共用一个进程句柄）。
-/// 顺带把挂起隔离粒度从"整轮扫描"细化到"单个 pid 桶"。
+/// <c>OpenProcess</c>/<c>DuplicateHandle</c>，实测 1~2 分钟。现改为
+/// <b>按下标区间切段 + 每段一个监督线程</b>（区间内为"可重启 worker"）。
+/// ⚠️ 注意**不是**按 pid 分桶 —— 分桶要先扫全表建字典，且某个 pid 的桶挂住会丢掉该进程
+/// **全部**句柄；切段则天然保留原实现"跳过挂起的那一个句柄、从下一条继续"的语义，
+/// 挂起影响面只有 1 个句柄。两种方案的取舍详见 <see cref="StartRangeSupervisor"/> 的注释。
+/// （2026-09-29：本段原先写的是"按 pid 分桶 + 多 worker"，那是**被否决的方案**；
+/// 与之配套的死类 <c>BucketWorker</c> 一并删除，见安全面专项审 RI-5。）
 /// </summary>
 public static unsafe class HandlePrimitives
 {
@@ -47,6 +49,30 @@ public static unsafe class HandlePrimitives
                 RpcErrorCodes.InternalError, "NtQuerySystemInformation 无法返回句柄表");
         }
 
+        try
+        {
+            return Scan(buffer, pidFilter, ct);
+        }
+        finally
+        {
+            // 🔴 必须释放：QueryHandleTable 用 Marshal.AllocHGlobal 分配（1 MB 起步，表大时到 256 MB），
+            //    而**成功路径原先没有释放** —— 出参 buffer 被直接丢弃。Core 是**常驻**进程，
+            //    于是每次 handles.enumerate 调用泄漏一整张句柄表。
+            //    2026-09-29 安全面专项审 RI-4 实测（同一 Core 进程连续调用）：
+            //      基线 34620 KB → +9096 → +7280 → +8088 → +7948 KB，**线性累积、从不回收**，
+            //    约 8 MB/次 ⇒ 上百次调用即泄漏到 GB 级。
+            //    对照：同目录的 VolumePrimitives 对 CreateFileW 句柄一律 try/finally，做对了 ——
+            //    可见这是疏忽，不是取舍。
+            Marshal.FreeHGlobal((IntPtr)buffer);
+        }
+    }
+
+    /// <summary>
+    /// 扫描句柄表主体。buffer 的生命周期由 <see cref="Enumerate"/> 的 finally 管理 ——
+    /// 本方法**不得**释放它。拆成独立方法是为了让释放点只有一个、且不改变原主体的缩进与审阅基线。
+    /// </summary>
+    private static List<HandleEntry> Scan(byte* buffer, ulong? pidFilter, CancellationToken ct)
+    {
         var info = (NativeInterop.SystemHandleInformationEx*)buffer;
         var count = (long)info->NumberOfHandles;
         var first = (byte*)&info->FirstEntry;   // 条目统一按 40 字节步进，字段按布局偏移读取
@@ -259,139 +285,6 @@ public static unsafe class HandlePrimitives
     }
 
     private const int WatchdogIntervalMs = 200;
-
-    /// <summary>
-    /// 一个桶扫描 worker：独占一个后台线程，从共享队列取 pid 桶处理。
-    ///
-    /// 进度语义：<see cref="_progress"/> 只在**成功处理完一个句柄**或**取到一个新桶**时递增。
-    /// 因此"长时间不前进"精确对应"NtQueryObject 挂在某个句柄上"。
-    /// </summary>
-    private sealed class BucketWorker
-    {
-        private readonly ConcurrentQueue<KeyValuePair<ulong, List<uint>>> _queue;
-        private readonly List<HandleEntry> _results;
-        private readonly CancellationToken _ct;
-        private Thread? _thread;
-
-        private long _progress;
-        private long _lastSeen;
-        private volatile bool _finished;
-
-        // volatile：主线程写、工作线程读 —— 必须保证可见性，否则"放弃"标志可能迟迟不生效
-        private volatile bool _abandonCurrent;
-
-        internal BucketWorker(
-            ConcurrentQueue<KeyValuePair<ulong, List<uint>>> queue,
-            List<HandleEntry> results,
-            CancellationToken ct)
-        {
-            _queue = queue;
-            _results = results;
-            _ct = ct;
-        }
-
-        internal bool IsFinished => _finished;
-
-        internal void Start()
-        {
-            _thread = new Thread(Run)
-            {
-                IsBackground = true,   // 挂起的遗留线程不阻止进程退出
-                Name = "ezt-handle-scan",
-            };
-            _thread.Start();
-        }
-
-        /// <summary>主线程调用：距上次进度超过阈值即视为挂起。</summary>
-        internal bool Stalled()
-        {
-            var seen = Interlocked.Read(ref _lastSeen);
-            var now = Interlocked.Read(ref _progress);
-            return now == seen && now > 0;
-        }
-
-        /// <summary>主线程调用：让工作线程放弃当前 pid 桶。</summary>
-        internal void AbandonCurrent() => _abandonCurrent = true;
-
-        private void Run()
-        {
-            try
-            {
-                while (!_ct.IsCancellationRequested
-                       && _queue.TryDequeue(out var bucket))
-                {
-                    // 取到新桶 = 前进了一次（保证刚取到桶还没处理时不误判为挂起）
-                    Tick();
-
-                    var (pid, handles) = bucket;
-                    ScanOneProcess(pid, handles);
-                }
-            }
-            catch
-            {
-                // review-guards:allow-empty-catch :: 扫描线程绝不外抛：结果以已收集到的为准
-            }
-            finally
-            {
-                _finished = true;
-            }
-        }
-
-        private void ScanOneProcess(ulong pid, List<uint> handles)
-        {
-            var process = NativeInterop.OpenProcess(
-                NativeInterop.ProcessDupHandle, false, (uint)pid);
-            if (process == IntPtr.Zero)
-            {
-                return;   // 打不开的进程（权限/已退出）—— 整桶跳过，不逐句柄重试
-            }
-
-            try
-            {
-                foreach (var raw in handles)
-                {
-                    if (_abandonCurrent)
-                    {
-                        _abandonCurrent = false;
-                        return;   // 放弃本桶剩余句柄（挂起对策），交给下一个 pid
-                    }
-
-                    _ct.ThrowIfCancellationRequested();
-
-                    if (!NativeInterop.DuplicateHandle(
-                            process, (IntPtr)raw, NativeInterop.GetCurrentProcess(),
-                            out var copy, 0, false, NativeInterop.DuplicateSameAccess))
-                    {
-                        // 打不开的句柄（退出中的进程等）也算"前进"：
-                        // 否则一个打不开句柄密集的 pid 会被误判成挂起而整桶丢弃。
-                        Tick();
-                        continue;
-                    }
-
-                    try
-                    {
-                        InspectHandle(copy, (uint)pid, _results);
-                    }
-                    finally
-                    {
-                        NativeInterop.CloseHandle(copy);
-                    }
-
-                    Tick();
-                }
-            }
-            finally
-            {
-                NativeInterop.CloseHandle(process);
-            }
-        }
-
-        private void Tick()
-        {
-            var current = Interlocked.Increment(ref _progress);
-            Interlocked.Exchange(ref _lastSeen, current);
-        }
-    }
 
     // ── 条目布局（两条布局的步进都是 40 字节，字段位置不同！）──
     //
