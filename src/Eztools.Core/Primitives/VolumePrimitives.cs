@@ -490,9 +490,24 @@ public static unsafe class VolumePrimitives
     internal static string NormalizeVolume(string volume)
     {
         var value = volume.Trim().TrimEnd('\\', '/');
+
+        // 接受 `\\.\X:` 形式（调用方与自检用例都在用），但**只接受单盘符**。
+        // ⚠️ 2026-09-29 安全面专项审 RI-7：原先这里对 `\\.\` 前缀**直接 `return value`**，
+        //    等于放行 `\\.\PhysicalDrive0` 等**任意设备路径** —— 而卷级 IOCTL 只需要盘符句柄，
+        //    放宽没有任何收益，只是把参数面扩大（`writeUsnClose` 还带 `GenericWrite`）。
+        //    已核实全仓无消费方依赖更宽的形式（`volume.enumerate` 的 `kernelDevice` 没有回传调用点，
+        //    唯一的 `\\.\F:` 用例来自 `SelfTestCommand` 的 `OrderVolumes`，仍是单盘符）。
         if (value.StartsWith(@"\\.\", StringComparison.OrdinalIgnoreCase))
         {
-            return value;
+            value = value[4..].TrimEnd(':');
+            if (value.Length != 1 || !char.IsAsciiLetter(value[0]))
+            {
+                throw new PrimitiveException(
+                    RpcErrorCodes.InvalidParams,
+                    $"volume 参数只接受盘符或 \\\\.\\<盘符>: 形式（收到 '{volume}'）");
+            }
+
+            return @"\\.\" + char.ToUpperInvariant(value[0]) + ":";
         }
 
         value = value.TrimEnd(':');

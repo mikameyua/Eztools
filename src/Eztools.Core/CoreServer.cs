@@ -350,8 +350,14 @@ public sealed class CoreServer
         {
             var result = spec.Execute(args, new PrimitiveContext(callerPid, toolId, ct));
             var ms = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-            _audit.Append(AuditLog.NewEntry(callerUser, callerPid, toolId, name, ok: true, ms, null));
+
+            // ⚠️ 顺序很重要：**先写响应，成功之后才记 ok:true**。
+            //    原先相反（先记成功、再写响应）—— 于是"调用方已超时放弃、结果没人收到"的场景
+            //    会被记成一条**成功的审计**（审计在说谎），紧接着写响应失败又补一条 IOException。
+            //    2026-09-29 实测到的正是这组双记录：
+            //      {ok:true, 5213.8ms} + {ok:false, 5252.7ms, "IOException: Pipe is broken."}
             await WriteResultAsync(writer, id, result).ConfigureAwait(false);
+            _audit.Append(AuditLog.NewEntry(callerUser, callerPid, toolId, name, ok: true, ms, null));
         }
         catch (PrimitiveException pe)
         {
@@ -359,9 +365,18 @@ public sealed class CoreServer
             _audit.Append(AuditLog.NewEntry(callerUser, callerPid, toolId, name, false, ms, pe.Message));
             await WriteErrorAsync(writer, id, pe.Code, pe.Message).ConfigureAwait(false);
         }
+        catch (IOException ex)
+        {
+            // 写响应时管道断开 = **调用方已经不在了**（超时放弃 ⇒ CLI 进程退出）。
+            // 必须与"Core 内部错误"区分开：记成内部错误会把排查方向引到 Core 自己身上。
+            var ms = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            _audit.Append(AuditLog.NewEntry(
+                callerUser, callerPid, toolId, name, false, ms,
+                "结果未送达（连接已断开，调用方可能已超时放弃）：" + ex.Message));
+        }
         catch (OperationCanceledException)
         {
-            throw;
+            throw;   // 服务关停（ct 取消）：保持原语义上抛，由上层收尾
         }
         catch (Exception ex)
         {
