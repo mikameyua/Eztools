@@ -41,7 +41,7 @@ internal abstract class OverlayWindowBase : Window
 {
     private readonly Drawing.Rectangle _physicalBounds; // 本显示器物理像素矩形（虚拟桌面坐标）
     private readonly Canvas _root;
-    private readonly Rectangle _dim;
+    protected readonly Rectangle _dim; // 全屏 dim 层（派生类可按自身语义重排/隐藏，见三个拖拽钩子）
     private readonly Rectangle _selection;
     private readonly TextBlock _sizeLabel;
     private readonly TextBlock _hint;
@@ -70,7 +70,7 @@ internal abstract class OverlayWindowBase : Window
         {
             Stroke = new SolidColorBrush(Color.FromRgb(0x4C, 0xC2, 0xFF)),
             StrokeThickness = 1.5,
-            Fill = new SolidColorBrush(Color.FromArgb(0x20, 0x4C, 0xC2, 0xFF)),
+            Fill = SelectionFill,
             Visibility = Visibility.Collapsed,
         };
         _sizeLabel = new TextBlock
@@ -238,6 +238,25 @@ internal abstract class OverlayWindowBase : Window
 
     // ── 拖拽状态机 ──
 
+    /// <summary>选区高亮填充。默认半透明蓝（OCR 观感不变）；capture 覆写为全透 ——
+    /// 半透明填充会被 CopyFromScreen 抓进截图给内容加色罩（W6-d 实测 #123456 → #1a456b，
+    /// 混合比与 0x20 填充精确吻合），只留描边。</summary>
+    protected virtual Brush SelectionFill => new SolidColorBrush(Color.FromArgb(0x20, 0x4C, 0xC2, 0xFF));
+
+    /// <summary>
+    /// 拖拽选区更新时的 dim 重排钩子。默认**无操作**（OCR 全屏 dim 行为不变 —— W6-d 发现
+    /// dim 会被 CopyFromScreen 抓进截图/取色，capture/pick 派生类按自身语义重排，见各自实现）。
+    /// <paramref name="selectionDip"/> = 当前选区（DIP，Canvas 坐标）。
+    /// </summary>
+    protected virtual void OnSelectionDragging(Rect selectionDip) { }
+
+    /// <summary>拖拽开始钩子（CaptureMouse 之后）。默认无操作。</summary>
+    protected virtual void OnDragStarted() { }
+
+    /// <summary>拖拽结束钩子（释放鼠标之后、派生类 HandleClick/HandleRegion **之后** ——
+    /// capture 的同步截图依赖"拖拽中的视觉状态"（dim 亮洞）仍在）。默认无操作。</summary>
+    protected virtual void OnDragFinished() { }
+
     private void OnLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         ProbeMouseDownCount++;
@@ -255,6 +274,7 @@ internal abstract class OverlayWindowBase : Window
         }
         UpdateSelection(e.GetPosition(this));
         CaptureMouse();
+        OnDragStarted();
     }
 
     private void OnMouseMove(object sender, MouseEventArgs e)
@@ -282,6 +302,7 @@ internal abstract class OverlayWindowBase : Window
         _sizeLabel.Text = $"{(int)(w * _scaleX)} × {(int)(h * _scaleY)} px";
         Canvas.SetLeft(_sizeLabel, x);
         Canvas.SetTop(_sizeLabel, y - 26 > 0 ? y - 26 : y + h + 6);
+        OnSelectionDragging(new Rect(x, y, w, h));
     }
 
     private void OnLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -299,9 +320,12 @@ internal abstract class OverlayWindowBase : Window
             _selection.Visibility = Visibility.Collapsed;
             _sizeLabel.Visibility = Visibility.Collapsed;
         }
+        OnDragFinished();
 
         var physRect = ToPhysicalRect(_dragStart, current);
         var releasePoint = ToPhysicalPoint(current);
+        // 顺序纪律（W6-d）：先派生类语义（HandleRegion 的同步段就完成截图/取色 ——
+        // 依赖"拖拽中的视觉状态"如 capture 的 dim 亮洞仍在），**后** OnDragFinished 恢复视觉。
         if (physRect.Width < 6 || physRect.Height < 6)
         {
             HandleClick(releasePoint);
@@ -310,6 +334,7 @@ internal abstract class OverlayWindowBase : Window
         {
             HandleRegion(physRect, releasePoint);
         }
+        OnDragFinished();
     }
 
     // ── 提示与完成语义 ──

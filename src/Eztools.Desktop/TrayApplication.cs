@@ -370,6 +370,37 @@ internal sealed class TrayApplication : IDisposable
             return code;
         }
 
+        // 托盘菜单入口探针（W6-d，FR-9）：菜单真实构建，无副作用。
+        if (_options.ProbeTrayItems)
+        {
+            var code = RunProbeTrayItems();
+            Dispose();
+            return code;
+        }
+
+        // W6 自产内容入库探针（W6-d，D6=A）：真监听 + 真取色 → 库内断言。
+        if (_options.ProbeW6ClipIntegration)
+        {
+            var code = RunProbeW6ClipIntegration();
+            Dispose();
+            return code;
+        }
+
+        // 人工模式（W6-d 手工清单）：唤出后交给真人。
+        if (_options.CaptureShow)
+        {
+            var code = RunCaptureShow();
+            Dispose();
+            return code;
+        }
+
+        if (_options.PickShow)
+        {
+            var code = RunPickShow();
+            Dispose();
+            return code;
+        }
+
         // 剪贴板面板探针（W5-b）：生命周期循环 + 真键 Enter 直贴契约（注入被抑制）。
         if (_options.ProbeClipPanel)
         {
@@ -1945,6 +1976,186 @@ internal sealed class TrayApplication : IDisposable
     }
 
     /// <summary>
+    /// 托盘菜单入口探针（--probe-tray-items，W6-d FR-9 自动化）：真实构建托盘菜单，
+    /// 断言「区域截图…」「屏幕取色…」两个宿主直挂项存在且标签带热键（或显式降级文案）。
+    /// 无副作用（不开窗、不抢焦点、不碰剪贴板）。
+    /// </summary>
+    private int RunProbeTrayItems()
+    {
+        var snap = new JsonObject();
+        try
+        {
+            RebuildMenu();
+            var menu = _icon.ContextMenuStrip ?? throw new InvalidOperationException("托盘菜单未初始化");
+            var labels = new JsonArray();
+            foreach (var item in menu.Items.OfType<System.Windows.Forms.ToolStripItem>())
+            {
+                labels.Add(item.Text ?? string.Empty);
+            }
+
+            // ⚠️ JsonArray 里取字符串要经 JsonValue.GetValue<string>（OfType<string> 对
+            //    JsonNode 恒为空 —— 首跑 ok=false 假红，改后命中）。
+            var texts = labels.OfType<System.Text.Json.Nodes.JsonValue>()
+                .Select(v => v.GetValue<string>())
+                .ToList();
+            var captureLabel = texts.FirstOrDefault(t => t.StartsWith("区域截图", StringComparison.Ordinal));
+            var pickLabel = texts.FirstOrDefault(t => t.StartsWith("屏幕取色", StringComparison.Ordinal));
+            snap["items"] = labels;
+            snap["captureLabel"] = captureLabel;
+            snap["pickLabel"] = pickLabel;
+            snap["ok"] = captureLabel is not null && pickLabel is not null;
+            WriteOutFile(snap.ToJsonString());
+            _host!.Log.Info($"托盘菜单入口探针完成：ok={snap["ok"]}", "probe");
+            return snap["ok"]!.GetValue<bool>() ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            snap["ok"] = false;
+            snap["error"] = ex.Message;
+            WriteOutFile(snap.ToJsonString());
+            _host?.Log.Warn($"托盘菜单入口探针失败：{ex}", "probe");
+            return 2;
+        }
+    }
+
+    /// <summary>
+    /// W6 自产内容入库探针（--probe-w6-clip-integration，W6-d D6=A 自动化闭环）：
+    /// 显式启动真监听（本探针的被测对象就是"自产内容进历史"，不属于隐式副作用边界）→
+    /// 跑真实取色链 → 断言 W5 库内出现 == 色值的文本条目。
+    /// 副作用：改写剪贴板 + 库内新增一条记录（探针库，随验收环境丢弃）。
+    /// </summary>
+    private int RunProbeW6ClipIntegration()
+    {
+        var snap = new JsonObject();
+        try
+        {
+            ApplyClipMonitorState();
+            if (_clipMonitor is not { IsRunning: true })
+            {
+                snap["ok"] = false;
+                snap["error"] = "剪贴板监听未启动（clip.enabled=false 或启动失败）—— 先修监听再谈入库";
+                WriteOutFile(snap.ToJsonString());
+                _host!.Log.Warn("W6 入库探针：监听未启动，跳过", "probe");
+                return 1;
+            }
+
+            snap["monitorRunning"] = true;
+            var store = EnsureClipStore();
+            var before = store.Search(null, 500).Count;
+            snap["before"] = before;
+
+            var pick = PickOverlayProbe.Run(msg => _host?.Log.Warn(msg, "probe"));
+            // ⚠️ pick["ok"] 挂在 pick 树上，直接赋给 snap 会抛 "node already has a parent"
+            //（JsonNode 挂过父不能复用）—— 取值再写入。
+            snap["pickOk"] = pick["ok"]?.GetValue<bool>();
+            var clipText = pick["clipboardText"]?.GetValue<string>();
+
+            // 轮询库内出现 == 色值的文本条目（监听是消息驱动，泵喂它）
+            var found = false;
+            var deadline = Environment.TickCount64 + 10_000;
+            while (Environment.TickCount64 < deadline && !found)
+            {
+                Thread.Sleep(150);
+                WinForms.Application.DoEvents();
+                found = store.Search(null, 500)
+                    .Any(e => e.Kind == Eztools.ClipboardLib.ClipKind.Text && e.Content == clipText);
+            }
+
+            snap["clipText"] = clipText;
+            snap["foundInStore"] = found;
+            snap["after"] = store.Search(null, 500).Count;
+            snap["ok"] = pick["ok"]?.GetValue<bool>() == true && found;
+            WriteOutFile(snap.ToJsonString());
+            _host!.Log.Info($"W6 入库探针完成：ok={snap["ok"]}", "probe");
+            return snap["ok"]!.GetValue<bool>() ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            snap["ok"] = false;
+            snap["error"] = ex.Message;
+            WriteOutFile(snap.ToJsonString());
+            _host?.Log.Warn($"W6 入库探针失败：{ex}", "probe");
+            return 2;
+        }
+    }
+
+    /// <summary>截图遮罩人工模式（--capture-show，W6-d 手工清单）：唤出后交给真人，完成即退出。</summary>
+    private int RunCaptureShow()
+    {
+        try
+        {
+            var manager = new CaptureOverlayManager(msg => _host?.Log.Warn(msg, "capture"));
+            string? copied = null;
+            manager.ImageCopied += text => copied = text;
+            var finished = false;
+            manager.Finished += () =>
+            {
+                finished = true;
+                WinForms.Application.Exit();
+            };
+
+            var monitors = manager.ShowAll();
+            _host!.Log.Info($"截图遮罩人工模式：{monitors} 扇已唤出", "capture");
+
+            WinForms.Application.Run();
+
+            WriteOutFile(new JsonObject
+            {
+                ["ok"] = true,
+                ["mode"] = "manual",
+                ["monitors"] = monitors,
+                ["copied"] = copied,
+                ["finished"] = finished,
+            }.ToJsonString());
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            WriteOutFile(new JsonObject { ["ok"] = false, ["error"] = ex.Message }.ToJsonString());
+            _host?.Log.Warn($"截图人工模式失败：{ex}", "capture");
+            return 2;
+        }
+    }
+
+    /// <summary>取色遮罩人工模式（--pick-show，W6-d 手工清单）：唤出后交给真人，完成即退出。</summary>
+    private int RunPickShow()
+    {
+        try
+        {
+            var manager = new PickOverlayManager(msg => _host?.Log.Warn(msg, "pick"));
+            string? copied = null;
+            manager.ColorCopied += text => copied = text;
+            var finished = false;
+            manager.Finished += () =>
+            {
+                finished = true;
+                WinForms.Application.Exit();
+            };
+
+            var monitors = manager.ShowAll(_colorFormat);
+            _host!.Log.Info($"取色遮罩人工模式：{monitors} 扇已唤出（格式 {_colorFormat}）", "pick");
+
+            WinForms.Application.Run();
+
+            WriteOutFile(new JsonObject
+            {
+                ["ok"] = true,
+                ["mode"] = "manual",
+                ["monitors"] = monitors,
+                ["copied"] = copied,
+                ["finished"] = finished,
+            }.ToJsonString());
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            WriteOutFile(new JsonObject { ["ok"] = false, ["error"] = ex.Message }.ToJsonString());
+            _host?.Log.Warn($"取色人工模式失败：{ex}", "pick");
+            return 2;
+        }
+    }
+
+    /// <summary>
     /// 图片 OCR 提字探针（--probe-clip-ocr，W5-d FR-15）。逻辑全在
     /// <see cref="ClipboardPanelProbe.RunOcrProbe"/>，这里只负责落盘与日志。
     /// <b>语言包缺失时退出码 0</b>（环境依赖分支：如实落盘 skipped 并跳过，不算失败）——
@@ -2164,7 +2375,7 @@ internal sealed class TrayApplication : IDisposable
     /// 强制把前台让给目标窗口（搜索窗唤出同款组合拳，§2.24①）：
     /// AttachThreadInput 绑定前台线程输入队列 → SetForegroundWindow + SetFocus → 解绑。
     /// </summary>
-    private static void ForceForeground(nint hwnd)
+    internal static void ForceForeground(nint hwnd)
     {
         var foreThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
         var thisThread = GetCurrentThreadId();

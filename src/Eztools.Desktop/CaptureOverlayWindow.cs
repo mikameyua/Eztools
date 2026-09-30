@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -30,12 +31,84 @@ namespace Eztools.Desktop;
 internal sealed class CaptureOverlayWindow : OverlayWindowBase
 {
     private readonly CaptureOverlayManager _owner;
+    private readonly System.Windows.Shapes.Rectangle[] _dimBands;
 
     public CaptureOverlayWindow(CaptureOverlayManager owner, Drawing.Rectangle physicalBounds)
         : base(physicalBounds, "拖拽框选要复制的屏幕区域 · Esc 取消")
     {
         _owner = owner;
         Title = "Eztools 截图";
+
+        // W6-d 修正：CopyFromScreen 会把本遮罩（layered window）一起抓进截图 ——
+        // 全屏 dim 不重排的话，用户截到的是**被 dim 压暗**的图。拖拽开始后把 dim
+        // 重排成选区外的四条边带（选区内亮，标准截图 UX），松开后恢复全屏 dim。
+        var dimBrush = new SolidColorBrush(Color.FromArgb(0x60, 0, 0, 0));
+        _dimBands =
+        [
+            new System.Windows.Shapes.Rectangle { Fill = dimBrush, Visibility = Visibility.Collapsed },
+            new System.Windows.Shapes.Rectangle { Fill = dimBrush, Visibility = Visibility.Collapsed },
+            new System.Windows.Shapes.Rectangle { Fill = dimBrush, Visibility = Visibility.Collapsed },
+            new System.Windows.Shapes.Rectangle { Fill = dimBrush, Visibility = Visibility.Collapsed },
+        ];
+        var root = (Canvas)Content;
+        foreach (var band in _dimBands)
+        {
+            root.Children.Add(band);
+        }
+    }
+
+    /// <summary>W6-d：选区高亮填充改全透 —— 半透明填充会被截图抓进去给内容加色罩（实测），只留描边。</summary>
+    protected override Brush SelectionFill => Brushes.Transparent;
+
+    /// <summary>W6-d：拖拽开始 ⇒ 全屏 dim 换四条边带（选区内亮）。</summary>
+    protected override void OnDragStarted()
+    {
+        _dim.Visibility = Visibility.Collapsed;
+        foreach (var band in _dimBands)
+        {
+            band.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>W6-d：选区变化 ⇒ 四条边带围绕选区排布（挖出亮洞）。</summary>
+    protected override void OnSelectionDragging(Rect selectionDip)
+    {
+        var width = ActualWidth;
+        var height = ActualHeight;
+        var top = _dimBands[0];
+        var bottom = _dimBands[1];
+        var left = _dimBands[2];
+        var right = _dimBands[3];
+
+        top.Width = width;
+        Canvas.SetTop(top, 0);
+        Canvas.SetLeft(top, 0);
+        top.Height = Math.Max(0, selectionDip.Y);
+
+        bottom.Width = width;
+        Canvas.SetLeft(bottom, 0);
+        Canvas.SetTop(bottom, selectionDip.Bottom);
+        bottom.Height = Math.Max(0, height - selectionDip.Bottom);
+
+        left.Height = selectionDip.Height;
+        Canvas.SetLeft(left, 0);
+        Canvas.SetTop(left, selectionDip.Y);
+        left.Width = Math.Max(0, selectionDip.X);
+
+        right.Height = selectionDip.Height;
+        Canvas.SetLeft(right, selectionDip.Right);
+        Canvas.SetTop(right, selectionDip.Y);
+        right.Width = Math.Max(0, width - selectionDip.Right);
+    }
+
+    /// <summary>W6-d：拖拽结束 ⇒ 恢复全屏 dim（窗多半已收；失败重试态回到与拖拽前一致的观感）。</summary>
+    protected override void OnDragFinished()
+    {
+        _dim.Visibility = Visibility.Visible;
+        foreach (var band in _dimBands)
+        {
+            band.Visibility = Visibility.Collapsed;
+        }
     }
 
     // ── Base 扩展点实现 ──

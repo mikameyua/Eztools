@@ -82,6 +82,20 @@ internal static class CaptureOverlayProbe
             var y1 = bounds.Y + (bounds.Height - h) / 2;
             json["dragRect"] = $"{x1},{y1},{w}x{h}";
 
+            // 内容核验准备（FR-2 深化）：把拖拽矩形用**不透明纯色窗**填满 —— 非 layered
+            // 窗进 GDI 抓屏、layered 遮罩不进（W4 实测口径）⇒ 截出的位图应整块都是
+            // 定义色 #123456，中心/四角抽样可精确断言（活动屏幕内容变化不再影响判据）。
+            using var patch = new System.Windows.Forms.Form
+            {
+                StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                ShowInTaskbar = false,
+                BackColor = System.Drawing.Color.FromArgb(18, 52, 86),
+                Bounds = new System.Drawing.Rectangle(x1, y1, w, h),
+            };
+            patch.Show();
+            PumpFor(400);
+
             InjectDrag(x1, y1, x1 + w, y1 + h);
             PumpFor(800); // 截图 + GDI→BitmapSource + 剪贴板写落地
 
@@ -105,15 +119,44 @@ internal static class CaptureOverlayProbe
 
             json["clipboardHasImage"] = image is not null;
             var sizeMatch = false;
+            var contentMatch = false;
             if (image is not null)
             {
                 json["clipW"] = image.PixelWidth;
                 json["clipH"] = image.PixelHeight;
                 sizeMatch = Math.Abs(image.PixelWidth - w) <= 1
                     && Math.Abs(image.PixelHeight - h) <= 1;
+
+                // 内容核验：整图应为纯色 #123456 —— 中心 + 四角（内缩 3px）五点抽样，
+                // 每通道 ±1 容差（DIB 往返的理论抖动）。样本实际值进 JSON 供失败诊断。
+                try
+                {
+                    var stride = image.PixelWidth * 4;
+                    var buffer = new byte[stride * image.PixelHeight];
+                    image.CopyPixels(buffer, stride, 0);
+                    contentMatch = SampleIsPatchColor(buffer, image.PixelWidth, image.PixelHeight);
+                    var samples = new JsonArray();
+                    foreach (var (sx, sy) in new[]
+                             {
+                                 (image.PixelWidth / 2, image.PixelHeight / 2),
+                                 (3, 3), (image.PixelWidth - 4, 3),
+                                 (3, image.PixelHeight - 4), (image.PixelWidth - 4, image.PixelHeight - 4),
+                             })
+                    {
+                        var o = (sy * image.PixelWidth + sx) * 4;
+                        samples.Add($"#{buffer[o + 2]:x2}{buffer[o + 1]:x2}{buffer[o]:x2}");
+                    }
+
+                    json["samples"] = samples;
+                }
+                catch (Exception ex)
+                {
+                    json["contentCheckError"] = ex.Message;
+                }
             }
 
             json["sizeMatch"] = sizeMatch;
+            json["contentMatch"] = contentMatch;
 
             // ④ Esc 防御性收尾（正常复制路径窗已被收；仅失败态才会走到）
             var escClosed = true;
@@ -150,7 +193,7 @@ internal static class CaptureOverlayProbe
 
             json["ok"] = t0Visible == monitors && monitors > 0
                 && placementAllMatch
-                && copiedClosed && image is not null && sizeMatch
+                && copiedClosed && image is not null && sizeMatch && contentMatch
                 && escClosed
                 && (json["clickCancelled"] is null || clickCancelled);
             return json;
@@ -177,6 +220,23 @@ internal static class CaptureOverlayProbe
     }
 
     // ── 注入原语（与 OcrOverlayProbe 同款纪律；刻意自含 —— 不为复用去动 OCR 稳定面）──
+
+    /// <summary>Bgra32 缓冲五点抽样（中心 + 四角内缩 3px），每通道与 #123456 差 ≤1 即通过。</summary>
+    private static bool SampleIsPatchColor(byte[] pixels, int width, int height)
+    {
+        bool Match(int x, int y)
+        {
+            var o = (y * width + x) * 4;
+            return Math.Abs(pixels[o] - 0x56) <= 1      // B
+                && Math.Abs(pixels[o + 1] - 0x34) <= 1  // G
+                && Math.Abs(pixels[o + 2] - 0x12) <= 1; // R
+        }
+
+        var cx = width / 2;
+        var cy = height / 2;
+        return Match(cx, cy) && Match(3, 3) && Match(width - 4, 3)
+            && Match(3, height - 4) && Match(width - 4, height - 4);
+    }
 
     private static void InjectDrag(int x1, int y1, int x2, int y2)
     {

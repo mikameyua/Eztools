@@ -1061,6 +1061,8 @@ def main() -> int:
        capo.get("copiedClosed") is True, str(capo)[:200])
     ck("★★ 剪贴板真拿到位图（Clipboard.SetImage 可读回）",
        capo.get("clipboardHasImage") is True, str(capo)[:200])
+    ck("★★ 截图内容核验：五点抽样 == 自绘纯色窗定义值（dim 挖洞 + 选区透明填充修正的回归）",
+       capo.get("contentMatch") is True, str(capo)[:300])
     ck("★★ 剪贴板位图尺寸与拖拽矩形一致（±1 圆整容差，物理像素坐标链证据）",
        capo.get("sizeMatch") is True, str(capo)[:300])
     ck("★★ 空拖拽（单击）= 取消出窗（W6 §4 契约）",
@@ -1115,9 +1117,48 @@ def main() -> int:
     ck("★★ 确定性面：已知纯色三格式 = 手算精确值（hex/rgb/hsl，FR-7 ±0）",
        det.get("hex") is True and det.get("rgb") is True and det.get("hsl") is True,
        str(picko)[:300])
-    ck("★★ 真链路面：单击取色后遮罩全收 + 剪贴板为合法 hex 色值（ColorFormatter 全链；"
-       "颜色精确性由确定性面钉住 —— 活动终端上单像素颜色相等断言天然 flaky，不采用）",
+    ck("★★ 真屏纯色块：单击取色 == 定义值 #123456（±1/通道，FR-7 真链路 + 抗点击穿透层容差）",
+       picko.get("realScreenMatch") is True, str(picko)[:300])
+    ck("★★ 真链路面：单击取色后遮罩全收 + 剪贴板为合法 hex 色值（ColorFormatter 全链）",
        picko.get("copiedClosed") is True and picko.get("clipboardFormat") is True, str(picko)[:300])
+
+    # ── 1c-6f. W6-d：托盘菜单入口 + 自产内容入库（FR-9 / D6=A 自动化闭环）────────
+    tray_file = os.path.join(repo, "_scratch", "desktop-w6-tray-items.json")
+    if os.path.exists(tray_file):
+        os.remove(tray_file)
+    r = run(["--probe-tray-items", "--no-prompt", "--out", tray_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=60)
+    ck("托盘菜单入口探针退出码 0（无副作用）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    tray = {}
+    if os.path.isfile(tray_file):
+        try:
+            with open(tray_file, encoding="utf-8") as f:
+                tray = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"托盘菜单探针输出不可解析：{ex}")
+    ck("★★ 托盘菜单含「区域截图…」「屏幕取色…」宿主直挂项（FR-9，热键标签或降级文案）",
+       tray.get("captureLabel") is not None and tray.get("pickLabel") is not None,
+       f"capture={tray.get('captureLabel')} pick={tray.get('pickLabel')}")
+
+    w6clip_file = os.path.join(repo, "_scratch", "desktop-w6-clip-integration.json")
+    if os.path.exists(w6clip_file):
+        os.remove(w6clip_file)
+    r = run(["--probe-w6-clip-integration", "--no-prompt", "--out", w6clip_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=120)
+    ck("W6 自产入库探针退出码 0（真监听 + 真取色 → 库内断言）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    w6clip = {}
+    if os.path.isfile(w6clip_file):
+        try:
+            with open(w6clip_file, encoding="utf-8") as f:
+                w6clip = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"W6 入库探针输出不可解析：{ex}")
+    ck("★★ 取色自产色值进 W5 剪贴板历史（D6=A 决策的自动化闭环）",
+       w6clip.get("foundInStore") is True, str(w6clip)[:300])
 
     # ── 1c-7. W5-b：剪贴板面板探针 ──────────────────────────────────────────
     #     生命周期循环（唤出/收起/X=隐藏契约）+ 直贴契约：程序化过滤到 1 条 →

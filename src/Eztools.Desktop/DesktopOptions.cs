@@ -236,6 +236,25 @@ internal sealed class DesktopOptions
     public bool ProbePickOverlay { get; private init; }
 
     /// <summary>
+    /// 托盘菜单入口探针（--probe-tray-items，W6-d FR-9 自动化）：真实构建托盘菜单并断言
+    /// 「区域截图…」「屏幕取色…」存在。无副作用。
+    /// </summary>
+    public bool ProbeTrayItems { get; private init; }
+
+    /// <summary>
+    /// W6 自产内容入库探针（--probe-w6-clip-integration，W6-d D6=A 自动化闭环）：
+    /// 显式启动真监听 → 真实取色 → 断言 W5 库内出现色值条目。
+    /// ⚠️ 副作用：改写剪贴板 + 真实移动鼠标（探针库新增一条记录）。
+    /// </summary>
+    public bool ProbeW6ClipIntegration { get; private init; }
+
+    /// <summary>截图遮罩人工模式（--capture-show，W6-d 手工清单）：唤出后交给真人，完成退出。</summary>
+    public bool CaptureShow { get; private init; }
+
+    /// <summary>取色遮罩人工模式（--pick-show，W6-d 手工清单）：唤出后交给真人，完成退出。</summary>
+    public bool PickShow { get; private init; }
+
+    /// <summary>
     /// WinForms 打字判决探针（--probe-winforms-typing，2026-09-27 换方案判决）：
     /// 纯 WinForms TextBox 注入真键 "hi" → 断言 Text=="hi"。无副作用。
     /// </summary>
@@ -291,6 +310,10 @@ internal sealed class DesktopOptions
         var probeCaptureOverlay = false;
         var probePickHotkey = false;
         var probePickOverlay = false;
+        var probeTrayItems = false;
+        var probeW6ClipIntegration = false;
+        var captureShow = false;
+        var pickShow = false;
         var probeWinformsTyping = false;
         var waitReadyMs = 0;
         var probeWarmup = 0;
@@ -373,6 +396,18 @@ internal sealed class DesktopOptions
                 case "--probe-pick-overlay":
                     probePickOverlay = true;
                     break;
+                case "--probe-tray-items":
+                    probeTrayItems = true;
+                    break;
+                case "--probe-w6-clip-integration":
+                    probeW6ClipIntegration = true;
+                    break;
+                case "--capture-show":
+                    captureShow = true;
+                    break;
+                case "--pick-show":
+                    pickShow = true;
+                    break;
                 case "--probe-winforms-typing":
                     probeWinformsTyping = true;
                     break;
@@ -449,6 +484,10 @@ internal sealed class DesktopOptions
             ProbeCaptureOverlay = probeCaptureOverlay,
             ProbePickHotkey = probePickHotkey,
             ProbePickOverlay = probePickOverlay,
+            ProbeTrayItems = probeTrayItems,
+            ProbeW6ClipIntegration = probeW6ClipIntegration,
+            CaptureShow = captureShow,
+            PickShow = pickShow,
             ProbeWinFormsTyping = probeWinformsTyping,
             WaitReadyMs = waitReadyMs,
             ProbeWarmup = probeWarmup,

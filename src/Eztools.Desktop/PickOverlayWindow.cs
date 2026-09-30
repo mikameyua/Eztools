@@ -50,6 +50,16 @@ internal sealed class PickOverlayWindow : OverlayWindowBase
         _format = format;
         Title = "Eztools 取色";
 
+        // W6-d 修正：CopyFromScreen 会把本遮罩（layered window）一起抓进取色采样 ——
+        // 全屏 dim（alpha 0x60）不重排的话，取到的颜色全部被压暗（实测 255 → 159 =
+        // ×0.6235 精确吻合）。pick 无框选语义 ⇒ dim 换成 **alpha 0x01**：
+        //   · 视觉不可见（0.4% 黑，PowerToys ColorPicker 同款代价）；
+        //   · 但不能全透（alpha 0）—— layered window 的 alpha=0 像素在 Win32 层
+        //     **点击穿透**，单击会落到下面的窗口上，取色直接失效（首跑实测）。
+        // 代价：采样色 = 真实色 × 254/255（每通道 ≤1 的理论偏差）。
+        // OCR 保持全屏 dim 不动（W4 范畴，行为零变化红线）。
+        _dim.Fill = new SolidColorBrush(Color.FromArgb(0x01, 0, 0, 0));
+
         // D7：采样块 → WriteableBitmap（Bgra32）→ NearestNeighbor 放大出像素网格效果。
         _loupeBitmap = new WriteableBitmap(SampleSize, SampleSize, 96, 96, PixelFormats.Bgra32, null);
         _loupe = new Image

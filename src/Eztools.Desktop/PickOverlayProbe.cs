@@ -68,15 +68,43 @@ internal static class PickOverlayProbe
             var py = bounds.Y + bounds.Height / 2;
             json["pickPoint"] = $"{px},{py}";
 
-            InjectMove(px, py);
+            // ②′ 真屏纯色块（FR-7 全链自动化 + 真链路精确断言的稳定化）：
+            //     探针自己显示一块**不透明**纯色 WinForms 窗（非 layered ⇒ GDI 抓屏含它，
+            //     而 layered 的取色遮罩不进抓屏 —— W4 实测口径），把真实单击目标从
+            //     "屏幕上恰好那一点"（活动终端，内容必变 ⇒ 首版断言假红）换成
+            //     "已知定义色的窗中心" ⇒ 剪贴板可精确断言 == 定义值 #123456（±1/通道）。
+            using var patch = new System.Windows.Forms.Form
+            {
+                StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                ShowInTaskbar = false,
+                BackColor = System.Drawing.Color.FromArgb(18, 52, 86),
+                Bounds = new System.Drawing.Rectangle(px - 80, py - 60, 160, 120),
+            };
+            patch.Show();
+            PumpFor(400);
+            // 读回**实际**物理矩形。⚠️ GetWindowRect 出参是 RECT{L,T,R,B}，直接 marshal 成
+            // Rectangle{X,Y,Width,Height} 时 Width 字段装的是 Right —— 必须 FromLTRB
+            // （W4-b 踩过并写进 ProbeWin32Rect 注释的同一个坑，首跑又踩了一次）。
+            if (!GetWindowRect(patch.Handle, out var patchRectRaw))
+            {
+                json["error"] = "纯色窗 GetWindowRect 失败";
+                return json;
+            }
+
+            var patchRect = System.Drawing.Rectangle.FromLTRB(
+                patchRectRaw.X, patchRectRaw.Y, patchRectRaw.Width, patchRectRaw.Height);
+            var patchCx = patchRect.X + patchRect.Width / 2;
+            var patchCy = patchRect.Y + patchRect.Height / 2;
+            json["patchRect"] = $"{patchRect.X},{patchRect.Y},{patchRect.Width}x{patchRect.Height}";
+
+            InjectMove(patchCx, patchCy);
             PumpFor(300);
-            InjectClick(px, py);
+            InjectClick(patchCx, patchCy);
 
             // 单击 → 取色 → SetText → 收窗；轮询剪贴板文本落地。
-            // ⚠️ 断言口径（2026-09-30 实测修正）：真链路面只断言"剪贴板 = 合法 hex 色值"。
-            //   不要断言"剪贴板 == 探针自采样同点颜色"——两次采样间隔数百毫秒，采样点若是
-            //   活动终端/动画区域，内容必然变化（实测 #003a71→#9f9f9f 假红）；颜色**精确性**
-            //   已由确定性面（喂已知位图 ±0）钉住，这里验的是链路活性与格式正确。
+            // 断言（2026-09-30 二次修正后定案）：真链路目标 = 自绘纯色窗 ⇒ 可精确断言
+            // 剪贴板 == "#123456"；同时保留 hex 格式匹配兜底诊断。
             var clipboardText = string.Empty;
             var deadline = Environment.TickCount64 + 8000;
             while (Environment.TickCount64 < deadline)
@@ -91,14 +119,45 @@ internal static class PickOverlayProbe
 
             json["copiedClosed"] = manager.VisibleCount == 0;
             json["clipboardText"] = clipboardText;
+            // 失败诊断：提示文案区分"取色失败/剪贴板失败"与"根本没点进窗"
+            foreach (var window in manager.EnumerableWindows())
+            {
+                json["hintAfterWait"] = window.ProbeHintText;
+                break;
+            }
             var clipboardFormat = System.Text.RegularExpressions.Regex.IsMatch(
                 clipboardText, "^#[0-9a-f]{6}$");
             json["clipboardFormat"] = clipboardFormat;
+            // 真屏断言 ±1/通道：遮罩抗点击穿透层（alpha 1/255）的理论偏差
+            // （c × 254/255，round/truncate 都 ≤1）。
+            var realScreenMatch = false;
+            if (System.Text.RegularExpressions.Regex.Match(clipboardText, "^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$")
+                is { Success: true } m)
+            {
+                var pr = Convert.ToInt32(m.Groups[1].Value, 16);
+                var pg = Convert.ToInt32(m.Groups[2].Value, 16);
+                var pb = Convert.ToInt32(m.Groups[3].Value, 16);
+                realScreenMatch = Math.Abs(pr - 0x12) <= 1 && Math.Abs(pg - 0x34) <= 1 && Math.Abs(pb - 0x56) <= 1;
+            }
 
-            // Esc 防御性收尾（失败态才走到）
+            json["realScreenMatch"] = realScreenMatch;
+
+            // Esc 防御性收尾（失败态才走到）：探针后台启动 ⇒ 抢前台被拒（§2.24①）——
+            // 注入 Esc 前必须 AttachThreadInput 让前台 + WPF Focus 补位，否则 Esc 永远
+            // 到不了 PreviewKeyDown（首跑实测：失败态遮罩关不掉 = 兜底名存实亡）。
             var escClosed = true;
             if (manager.AnyAlive)
             {
+                foreach (var window in manager.EnumerableWindows())
+                {
+                    TrayApplication.ForceForeground(
+                        new System.Windows.Interop.WindowInteropHelper(window).Handle);
+                    window.Focus();
+                    break;
+                }
+
+                Thread.Sleep(150);
+                PumpFor(100);
                 InjectEscape();
                 PumpFor(600);
                 escClosed = manager.VisibleCount == 0;
@@ -112,6 +171,7 @@ internal static class PickOverlayProbe
                 && json["deterministic"]!["hsl"]!.GetValue<bool>()
                 && manager.VisibleCount == 0
                 && clipboardFormat
+                && realScreenMatch
                 && escClosed;
             return json;
         }
@@ -207,4 +267,8 @@ internal static class PickOverlayProbe
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, nint dwExtraInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint hWnd, out System.Drawing.Rectangle rect);
 }
