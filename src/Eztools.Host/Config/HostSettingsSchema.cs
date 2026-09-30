@@ -25,6 +25,7 @@ public static class HostSettingsSchema
     public const string DefaultSearchHotkey = "Ctrl+Alt+S";
     public const string DefaultOcrHotkey = "Ctrl+Alt+O";
     public const string DefaultClipHotkey = "Ctrl+Alt+V";
+    public const string DefaultCaptureHotkey = "Ctrl+Alt+X";
 
     public const string KeySearchHotkey = "search.hotkey";
     public const string KeyOcrHotkey = "ocr.hotkey";
@@ -34,6 +35,7 @@ public static class HostSettingsSchema
     public const string KeyClipMaxItems = "clip.max-items";
     public const string KeyClipImageRetentionDays = "clip.image-retention-days";
     public const string KeyClipBlacklist = "clip.blacklist";
+    public const string KeyCaptureHotkey = "capture.hotkey";
 
     /// <summary>剪贴板历史上限默认值（FR-4；可配 100~50000，schema 校验）。</summary>
     public const int DefaultClipMaxItems = 1000;
@@ -132,6 +134,13 @@ public static class HostSettingsSchema
               "description": "这些进程里复制的内容不入库。分号分隔进程名（如 1password.exe;Bitwarden;keepassxc.exe），.exe 后缀可省略。",
               "default": "",
               "x-order": 8
+            },
+            "capture.hotkey": {
+              "type": "string",
+              "title": "区域截图热键",
+              "description": "唤出区域截图遮罩的全局热键，格式如 Ctrl+Alt+X。拖拽框选，松开鼠标即把所选区域位图复制进剪贴板。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
+              "default": "Ctrl+Alt+X",
+              "x-order": 9
             }
           }
         }

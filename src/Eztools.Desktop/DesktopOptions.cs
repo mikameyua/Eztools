@@ -75,6 +75,13 @@ internal sealed class DesktopOptions
     public string? OcrHotkey { get; private init; }
 
     /// <summary>
+    /// 区域截图全局热键（W6-b）。**null = 命令行未显式传** —— 生效值由托盘按
+    /// 「命令行 &gt; config/desktop.json 的 capture.hotkey &gt; 默认 Ctrl+Alt+X」合成。
+    /// 与 OCR 热键同款"宿主级开关"定位（D2 拍板：X，2026-09-30 复探可注册）。
+    /// </summary>
+    public string? CaptureHotkey { get; private init; }
+
+    /// <summary>
     /// 走一次真实的 <see cref="Search.SearchIndexProcess"/> 通路（懒启动 ezt-index → stdio
     /// → search.query），把结构化结局写进 <c>--out</c> 文件后退出（W3-d-1 验收断言面）。
     /// </summary>
@@ -193,6 +200,21 @@ internal sealed class DesktopOptions
     public bool ProbeClipHotkey { get; private init; }
 
     /// <summary>
+    /// 截图热键真按键探针（--probe-capture-hotkey，W6-b 真机项自动化，--probe-ocr-hotkey 同款）：
+    /// keybd_event 注入真实 Ctrl+Alt+X → WM_HOTKEY → 截图遮罩唤出 → Esc 真键收窗。
+    /// ⚠️ 副作用：真实按键、遮罩全屏抢焦点 1~2 秒 —— 只能跑在无人交互的会话。
+    /// </summary>
+    public bool ProbeCaptureHotkey { get; private init; }
+
+    /// <summary>
+    /// 截图遮罩端到端探针（--probe-capture-overlay，W6-b 验收面，OcrOverlayProbe 同款纪律）：
+    /// 真鼠标拖拽 → 断言剪贴板真拿到位图且尺寸与拖拽矩形一致（±1 圆整容差）→
+    /// 空拖拽（单击）= 取消出窗契约。
+    /// ⚠️ 副作用：真实移动鼠标、**改写系统剪贴板** —— 只能跑在无人交互的会话。
+    /// </summary>
+    public bool ProbeCaptureOverlay { get; private init; }
+
+    /// <summary>
     /// WinForms 打字判决探针（--probe-winforms-typing，2026-09-27 换方案判决）：
     /// 纯 WinForms TextBox 注入真键 "hi" → 断言 Text=="hi"。无副作用。
     /// </summary>
@@ -230,6 +252,7 @@ internal sealed class DesktopOptions
         string? probeHotkey = null;
         string? searchHotkey = null;
         string? ocrHotkey = null;
+        string? captureHotkey = null;
         var probeSearch = false;
         var probeSearchUi = false;
         var probeSearchSummon = false;
@@ -242,6 +265,8 @@ internal sealed class DesktopOptions
         var probeClipMonitor = false;
         var probeClipOcr = false;
         var probeClipHotkey = false;
+        var probeCaptureHotkey = false;
+        var probeCaptureOverlay = false;
         var probeWinformsTyping = false;
         var waitReadyMs = 0;
         var probeWarmup = 0;
@@ -270,6 +295,9 @@ internal sealed class DesktopOptions
                     break;
                 case "--ocr-hotkey" when i + 1 < args.Length:
                     ocrHotkey = args[++i];
+                    break;
+                case "--capture-hotkey" when i + 1 < args.Length:
+                    captureHotkey = args[++i];
                     break;
                 case "--probe-search":
                     probeSearch = true;
@@ -305,6 +333,12 @@ internal sealed class DesktopOptions
                     break;
                 case "--probe-clip-hotkey":
                     probeClipHotkey = true;
+                    break;
+                case "--probe-capture-hotkey":
+                    probeCaptureHotkey = true;
+                    break;
+                case "--probe-capture-overlay":
+                    probeCaptureOverlay = true;
                     break;
                 case "--probe-winforms-typing":
                     probeWinformsTyping = true;
@@ -364,6 +398,7 @@ internal sealed class DesktopOptions
             ProbeHotkey = probeHotkey,
             SearchHotkey = searchHotkey,
             OcrHotkey = ocrHotkey,
+            CaptureHotkey = captureHotkey,
             ProbeSearch = probeSearch,
             ProbeSearchUi = probeSearchUi,
             ProbeSearchSummon = probeSearchSummon,
@@ -376,6 +411,8 @@ internal sealed class DesktopOptions
             ProbeClipMonitor = probeClipMonitor,
             ProbeClipOcr = probeClipOcr,
             ProbeClipHotkey = probeClipHotkey,
+            ProbeCaptureHotkey = probeCaptureHotkey,
+            ProbeCaptureOverlay = probeCaptureOverlay,
             ProbeWinFormsTyping = probeWinformsTyping,
             WaitReadyMs = waitReadyMs,
             ProbeWarmup = probeWarmup,

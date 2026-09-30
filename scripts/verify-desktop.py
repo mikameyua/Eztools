@@ -48,7 +48,7 @@ SKIPPED = 0
 #   registered >= expected                 → pass
 #   registered <  expected 且探针报占用     → **skip（落数字，不能静默少跑）**
 #   registered <  expected 且无占用/探针挂掉 → fail（这才是代码侧问题；探针不可用按失败处理）
-HOTKEY_ASSERT_NAME = ("热键注册 = 6（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c，"
+HOTKEY_ASSERT_NAME = ("热键注册 = 7（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c + 截图 W6-b，"
                       "RegisterHotKey 真实成功）")
 
 
@@ -89,11 +89,11 @@ def probe_occupied_hotkeys(repo: str):
 def hotkey_selftest() -> int:
     """三态判定的突变验证（不出仓、不碰真实热键）。"""
     cases = [
-        ("注册满额 → pass", (6, 6, []), "pass"),
-        ("注册不满但有占用 → skip", (5, 6, ["Ctrl+Alt+W"]), "skip"),
-        ("注册不满且无占用 → fail（代码侧）", (5, 6, []), "fail"),
-        ("注册不满且探针挂掉 → fail（不许静默放过）", (5, 6, None), "fail"),
-        ("超额注册（>= 期望）→ pass", (7, 6, []), "pass"),
+        ("注册满额 → pass", (7, 7, []), "pass"),
+        ("注册不满但有占用 → skip", (6, 7, ["Ctrl+Alt+W"]), "skip"),
+        ("注册不满且无占用 → fail（代码侧）", (6, 7, []), "fail"),
+        ("注册不满且探针挂掉 → fail（不许静默放过）", (6, 7, None), "fail"),
+        ("超额注册（>= 期望）→ pass", (8, 7, []), "pass"),
     ]
     bad = 0
     for desc, args, want in cases:
@@ -329,10 +329,10 @@ def main() -> int:
            m.group(2) == "3", m.group(2))
         # 热键注册数：三态判定（环境占用 → 跳过并落数字；代码没注册 → 红）
         n_hk = int(m.group(3))
-        if n_hk == 6:
+        if n_hk == 7:
             ck(HOTKEY_ASSERT_NAME, True, str(n_hk))
         else:
-            verdict, detail = hotkey_verdict(n_hk, 6, probe_occupied_hotkeys(repo))
+            verdict, detail = hotkey_verdict(n_hk, 7, probe_occupied_hotkeys(repo))
             if verdict == "skip":
                 globals()["SKIPPED"] += 1
                 info(f"[跳过] {HOTKEY_ASSERT_NAME}\n       {detail}")
@@ -399,10 +399,13 @@ def main() -> int:
     # preview 起加入了第 5 个有 schema 的工具（3 个 integer 字段）—— 共 11 个字段
     # W4-c：宿主设置节 desktop（search.hotkey / ocr.hotkey / ocr.language，3 个 string 字段）
     # 也以同格式进清单 —— 宿主设置接 P1a 的落地证据。
+    # W4-c：宿主设置节 desktop（search/ocr/clip 热键等）以同格式进清单；
+    # W6-b：capture.hotkey 加入（9 个字段）—— 宿主设置接 P1a 的落地证据。
     expected = {
         "desktop": {"search.hotkey=TextBox", "ocr.hotkey=TextBox", "ocr.language=TextBox",
                      "clip.enabled=CheckBox", "clip.hotkey=TextBox", "clip.max-items=TextBox",
-                     "clip.image-retention-days=TextBox", "clip.blacklist=TextBox"},
+                     "clip.image-retention-days=TextBox", "clip.blacklist=TextBox",
+                     "capture.hotkey=TextBox"},
         "echo": {"uppercase=CheckBox"},
         "wordcount": {"countWhitespace=CheckBox", "language=ComboBox", "maxFileSizeMb=TextBox"},
         "filehash": {"algorithm=ComboBox", "uppercase=CheckBox", "chunkSizeKb=TextBox"},
@@ -1010,6 +1013,60 @@ def main() -> int:
        ocr_hotkey.get("overlayShown") is True, str(ocr_hotkey)[:200])
     ck("★★ Esc 真按键收窗（键盘消息→PreviewKeyDown→Cancel 链）",
        ocr_hotkey.get("escClosed") is True, str(ocr_hotkey)[:200])
+
+    # ── 1c-6b. W6-b：截图热键真按键探针（--probe-capture-hotkey，--probe-ocr-hotkey 同款）──
+    #     真注入 Ctrl+Alt+X → WM_HOTKEY → 截图遮罩唤出 → Esc 真键收窗。
+    #     副作用：真实按键 + 全屏遮罩抢焦点 1~2 秒（与 OCR 探针同量级）。
+    cap_file = os.path.join(repo, "_scratch", "desktop-capture-hotkey.json")
+    if os.path.exists(cap_file):
+        os.remove(cap_file)
+    r = run(["--probe-capture-hotkey", "--no-prompt", "--out", cap_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=120)
+    ck("截图热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    cap_hotkey = {}
+    if os.path.isfile(cap_file):
+        try:
+            with open(cap_file, encoding="utf-8") as f:
+                cap_hotkey = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"截图热键探针输出不可解析：{ex}")
+    ck("★★ 真按键 Ctrl+Alt+X 触发截图遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
+       cap_hotkey.get("overlayShown") is True, str(cap_hotkey)[:200])
+    ck("★★ Esc 真按键收窗（截图遮罩 PreviewKeyDown→Cancel 链）",
+       cap_hotkey.get("escClosed") is True, str(cap_hotkey)[:200])
+
+    # ── 1c-6c. W6-b：截图端到端（真鼠标拖拽 → 剪贴板位图尺寸对账 → 单击取消契约）────
+    #     断言三层：① 拖拽复制后遮罩全收 + 剪贴板真拿到位图（FR-2）；
+    #     ② 位图尺寸与拖拽矩形一致（±1 圆整容差 —— 坐标纪律的直接证据，R2 自动化面）；
+    #     ③ 空拖拽（单击）= 取消出窗（W6 设计方案 §4 契约，与 pick 单击取色语义不串味）。
+    #     副作用：真实移动鼠标 + 改写系统剪贴板（复制屏幕内容）。
+    capo_file = os.path.join(repo, "_scratch", "desktop-capture-overlay.json")
+    if os.path.exists(capo_file):
+        os.remove(capo_file)
+    r = run(["--probe-capture-overlay", "--no-prompt", "--out", capo_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=120)
+    ck("截图端到端探针退出码 0（真拖拽→剪贴板位图→单击取消）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    capo = {}
+    if os.path.isfile(capo_file):
+        try:
+            with open(capo_file, encoding="utf-8") as f:
+                capo = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"截图端到端探针输出不可解析：{ex}")
+    ck("★★ 真鼠标拖拽复制后遮罩全收（HandleRegion→GrabRegion→SetImage→Finish 链）",
+       capo.get("copiedClosed") is True, str(capo)[:200])
+    ck("★★ 剪贴板真拿到位图（Clipboard.SetImage 可读回）",
+       capo.get("clipboardHasImage") is True, str(capo)[:200])
+    ck("★★ 剪贴板位图尺寸与拖拽矩形一致（±1 圆整容差，物理像素坐标链证据）",
+       capo.get("sizeMatch") is True, str(capo)[:300])
+    ck("★★ 空拖拽（单击）= 取消出窗（W6 §4 契约）",
+       capo.get("clickCancelled") is True, str(capo)[:200])
+    ck("★★ 遮罩摆放与预期物理矩形一致（W6-a Base 坐标纪律回归）",
+       capo.get("placementAllMatch") is True, str(capo)[:200])
 
     # ── 1c-7. W5-b：剪贴板面板探针 ──────────────────────────────────────────
     #     生命周期循环（唤出/收起/X=隐藏契约）+ 直贴契约：程序化过滤到 1 条 →
