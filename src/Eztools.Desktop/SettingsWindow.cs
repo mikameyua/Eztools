@@ -39,6 +39,7 @@ public sealed class SettingsWindow : Window
     private readonly Action? _hostSettingsSaved;
     private readonly ListBox _toolList;
     private readonly StackPanel _fieldPanel;
+    private ScrollViewer? _fieldScroller;
     private readonly TextBlock _header;
     private readonly TextBlock _hint;
     private readonly Button _saveButton;
@@ -84,12 +85,16 @@ public sealed class SettingsWindow : Window
         var right = new DockPanel { Margin = new Thickness(10, 12, 14, 12) };
         DockPanel.SetDock(buttons, Dock.Bottom);
         right.Children.Add(buttons);
-        var scroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = _fieldPanel };
-        var rightTop = new StackPanel();
-        rightTop.Children.Add(_header);
-        rightTop.Children.Add(_hint);
-        rightTop.Children.Add(scroller);
-        right.Children.Add(rightTop);
+        DockPanel.SetDock(_header, Dock.Top);
+        right.Children.Add(_header);
+        DockPanel.SetDock(_hint, Dock.Top);
+        right.Children.Add(_hint);
+        // ★ 滚动容器必须**直接**吃 DockPanel 的剩余高度（LastChildFill 默认 true）——
+        //   不能包进 StackPanel：StackPanel 给子元素的测量高度是无限，ScrollViewer 拿到
+        //   无限可用高度就永不裁剪、永不出现滚动条，内容超出窗口的部分直接被裁掉
+        //   （用户实测：宿主节字段加到 11 个后，底部的 pick.hotkey / color.format 不可达）。
+        _fieldScroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = _fieldPanel };
+        right.Children.Add(_fieldScroller);
 
         var root = new Grid();
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -574,6 +579,33 @@ public sealed class SettingsWindow : Window
                     .Where(e => FieldKey.Get(e) is not null)
                     .Select(e => $"{FieldKey.Get(e)}={e.GetType().Name}");
                 lines.Add($"设置清单 {_hostSection.Id}: {string.Join(", ", hostEditors)}");
+
+                // 右栏滚动诊断（W6-d 用户实测回归）：ScrollViewer 必须直接吃 DockPanel 剩余
+                // 高度才有真实 Viewport —— 包 StackPanel 时 Viewport=∞、ScrollableHeight=0，
+                // 内容溢出窗口被裁且不可滚（底部字段不可达）。未显示窗口可 Measure/Arrange
+                //（selfcheck 先例），布局后读数才有意义。
+                if (_fieldScroller is not null)
+                {
+                    // ⚠️ 对未显示的 Window 直接 Measure/Arrange 是 no-op（Window 布局绑定
+                    // hwnd，实测 IsMeasureValid=False）—— 要测 **Content 根**（排布出真实视口
+                    // 高度）；ScrollViewer 的 Extent/Viewport 依赖模板 presenter 时序拿不到，
+                    // ⇒ 字段面板**单独**用无限高测量拿自然内容高度，与视口比较：
+                    //   内容高于视口 = 滚动条必出现 = 底部字段可达。StackPanel 包裹回归时
+                    //   scroller 高度=内容高度（无约束），可滚=False，此处即红。
+                    if (Content is System.Windows.Controls.Grid rootGrid)
+                    {
+                        rootGrid.Measure(new Size(Width, Height));
+                        rootGrid.Arrange(new Rect(0, 0, Width, Height));
+                    }
+
+                    _fieldPanel.Measure(new Size(
+                        _fieldScroller.ActualWidth > 0 ? _fieldScroller.ActualWidth : 530,
+                        double.PositiveInfinity));
+                    var contentHeight = _fieldPanel.DesiredSize.Height;
+                    var viewportHeight = Math.Max(_fieldScroller.ViewportHeight, _fieldScroller.ActualHeight);
+                    lines.Add($"设置窗右栏滚动: 内容高度={contentHeight:F0} 视口高度={viewportHeight:F0} "
+                        + $"可滚={(contentHeight > viewportHeight && viewportHeight > 0 ? "True" : "False")} 字段数={_fieldPanel.Children.Count}");
+                }
             }
         }
 

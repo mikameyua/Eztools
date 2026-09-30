@@ -998,6 +998,23 @@ def main() -> int:
        str(restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+O"
        and restored.get("registered") is True, f"restored={restored}")
 
+    # W6-d：pick.hotkey 同一条 UI 保存链（滚动修复后字段可达）；右栏滚动结构回归。
+    pick_part = host.get("pick") or {}
+    pick_restored = host.get("pickRestored") or {}
+    ck("★★ 设置窗口改取色热键（pick.hotkey）保存 → 落盘 + 立即生效 + 重注册",
+       pick_part.get("fieldSet") is True
+       and str(pick_part.get("savedValue", "")).upper() == "CTRL+ALT+K"
+       and str(pick_part.get("effectiveHotkey", "")).upper() == "CTRL+ALT+K"
+       and pick_part.get("registered") is True, f"pick={pick_part}")
+    ck("★★ 取色热键恢复默认回落 Ctrl+Alt+C 且重注册成功",
+       str(pick_restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+C"
+       and pick_restored.get("registered") is True, f"pickRestored={pick_restored}")
+    scroll_line = next((ln for ln in lines if ln.startswith("设置窗右栏滚动")), None)
+    ck("★★ 设置窗右栏可滚（字段内容高度 > 视口 ⇒ 滚动条必出现，底部字段可达；"
+       "StackPanel 包裹回归即此处红）",
+       scroll_line is not None and "可滚=True" in scroll_line,
+       scroll_line)
+
     hotkey_file = os.path.join(repo, "_scratch", "desktop-ocr-hotkey.json")
     if os.path.exists(hotkey_file):
         os.remove(hotkey_file)

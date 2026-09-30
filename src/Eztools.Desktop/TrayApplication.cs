@@ -1565,11 +1565,44 @@ internal sealed class TrayApplication : IDisposable
                 ["registered"] = _ocrHotkeyId is not null,
             };
 
+            // W6-d 补充：pick.hotkey 走**同一条 UI 保存链**（用户实测 OCR 可改成功、取色字段
+            // 当时因右栏不可滚而不可达；滚动修复后字段可达，这里把"可达字段的保存 → 重注册
+            // → 恢复"也钉进自动化）。Ctrl+Alt+K 在 OCR 恢复默认后已空闲，复用。
+            var pickWindow = new SettingsWindow(
+                _host!,
+                new SettingsWindow.HostSettingsSection(
+                    HostSettingsSchema.SectionId, "桌面宿主", HostSettingsSchema.SchemaJson),
+                OnHostSettingsSaved);
+            var pickSelected = pickWindow.ProbeSelectHostSection();
+            var pickSet = pickSelected && pickWindow.ProbeSetField(HostSettingsSchema.KeyPickHotkey, newHotkey);
+            pickWindow.ProbeSaveAsync().GetAwaiter().GetResult();
+            var pickSaved = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyPickHotkey);
+            snap["pick"] = new JsonObject
+            {
+                ["hostSectionSelected"] = pickSelected,
+                ["fieldSet"] = pickSet,
+                ["savedValue"] = pickSaved,
+                ["effectiveHotkey"] = _pickHotkey,
+                ["registered"] = _pickHotkeyId is not null,
+            };
+            _host.Configs.Unset(HostSettingsSchema.SectionId, HostSettingsSchema.KeyPickHotkey);
+            ReRegisterHotkeys();
+            snap["pickRestored"] = new JsonObject
+            {
+                ["effectiveHotkey"] = _pickHotkey,
+                ["registered"] = _pickHotkeyId is not null,
+            };
+
             var ok = string.Equals(saved, newHotkey, StringComparison.OrdinalIgnoreCase)
                 && string.Equals($"{after["effectiveHotkey"]}", newHotkey, StringComparison.OrdinalIgnoreCase)
                 && after["registered"]?.GetValue<bool>() == true
                 && string.Equals($"{snap["restored"]!["effectiveHotkey"]}", HostSettingsSchema.DefaultOcrHotkey, StringComparison.OrdinalIgnoreCase)
-                && snap["restored"]!["registered"]?.GetValue<bool>() == true;
+                && snap["restored"]!["registered"]?.GetValue<bool>() == true
+                && pickSet && pickSaved == newHotkey
+                && string.Equals($"{snap["pick"]!["effectiveHotkey"]}", newHotkey, StringComparison.OrdinalIgnoreCase)
+                && snap["pick"]!["registered"]?.GetValue<bool>() == true
+                && string.Equals($"{snap["pickRestored"]!["effectiveHotkey"]}", HostSettingsSchema.DefaultPickHotkey, StringComparison.OrdinalIgnoreCase)
+                && snap["pickRestored"]!["registered"]?.GetValue<bool>() == true;
             snap["ok"] = ok;
             WriteOutFile(snap.ToJsonString());
             _host.Log.Info($"宿主设置探针完成：ok={ok}", "probe");
