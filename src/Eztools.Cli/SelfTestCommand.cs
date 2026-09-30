@@ -8,6 +8,7 @@ using Eztools.Contracts;
 using Eztools.Host;
 using Eztools.Host.Processes;
 using Eztools.Index;
+using Eztools.Ocr;
 
 namespace Eztools.Cli;
 
@@ -293,6 +294,15 @@ internal static class SelfTestCommand
         // CLI 引用不到 Desktop；其生命周期与真实"复制→事件"链路由 verify-desktop 的托盘 e2e 覆盖
         //（真进程真事件，比无头实例化更有断言力）。
 
+        // 6b) 色值格式化（W6-c，W6 设计方案 §9）：已知 RGB → HEX/RGB/HSL **手算精确断言**
+        //     （§2.17③ 纪律：期望值是人算的，禁"算完跟自己比"的恒真）。
+        if (!cli.GetBool("json"))
+        {
+            ConsoleUi.Section("色值格式化（W6-c）");
+        }
+
+        RunColorFormatterCases();
+
         // 7) 进程残留
         if (!cli.GetBool("json"))
         {
@@ -311,8 +321,36 @@ internal static class SelfTestCommand
         return Finish(cli);
     }
 
-    // ── 生命周期（resident / task）──
+    // ── 色值格式化（W6-c）──
 
+    /// <summary>
+    /// ColorFormatter 手算精确断言（W6 设计方案 §9；§2.17③ 纪律）。
+    /// 期望值全部为人工换算：hsl 的 H/S/L 公式值四舍五入（AwayFromZero）后必须是整数精确匹配。
+    /// </summary>
+    private static void RunColorFormatterCases()
+    {
+        Report("hex 基本色（#ff0000）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 0, 0), "hex") == "#ff0000");
+        Report("hex 低位补零（#010203）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(1, 2, 3), "hex") == "#010203");
+        Report("hex 全字母（#abcdef）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(171, 205, 239), "hex") == "#abcdef");
+        Report("rgb 语法（逗号+空格）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(1, 2, 3), "rgb") == "rgb(1, 2, 3)");
+        Report("hsl 红 = hsl(0, 100%, 50%)", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 0, 0), "hsl") == "hsl(0, 100%, 50%)");
+        Report("hsl 绿 = hsl(120, 100%, 50%)", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(0, 255, 0), "hsl") == "hsl(120, 100%, 50%)");
+        Report("hsl 蓝 = hsl(240, 100%, 50%)", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(0, 0, 255), "hsl") == "hsl(240, 100%, 50%)");
+        Report("hsl 黑白灰（S=0 分支）",
+            ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(0, 0, 0), "hsl") == "hsl(0, 0%, 0%)"
+            && ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 255, 255), "hsl") == "hsl(0, 0%, 100%)"
+            && ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(128, 128, 128), "hsl") == "hsl(0, 0%, 50%)");
+        // 纯绿 (0,128,0)：L = 128/2/255 = 25.098…% → 手算舍入 25；S = delta/(max+min) = 1 → 100%
+        Report("hsl 四舍五入（绿 25%）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(0, 128, 0), "hsl") == "hsl(120, 100%, 25%)");
+        // 橙 (255,165,0)：H = 60×(165/255) = 38.82° → 39；L = 0.5 → 50%
+        Report("hsl 橙 = hsl(39, 100%, 50%)", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 165, 0), "hsl") == "hsl(39, 100%, 50%)");
+        Report("格式名大小写/空白容忍（' RGB '）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(1, 2, 3), " RGB ") == "rgb(1, 2, 3)");
+        Report("空格式 = 默认 hex", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 0, 0), null) == "#ff0000"
+            && ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 0, 0), "  ") == "#ff0000");
+        Report("未知格式显式失败返回 null（R10，不静默回落）", ColorFormatter.TryFormat(System.Drawing.Color.FromArgb(255, 0, 0), "bogus") is null);
+    }
+
+    // ── 生命周期（resident / task）──
     private static async Task RunLifecycleCasesAsync(EztoolsHost host)
     {
         if (!host.Registry.TryGetTool("keepalive", out _))

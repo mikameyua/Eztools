@@ -46,9 +46,9 @@ internal sealed class OcrOverlayWindow : OverlayWindowBase
         _ = CopyWordAtAsync(localPhysicalPoint);
     }
 
-    protected override void HandleRegion(Drawing.Rectangle localPhysicalRect)
+    protected override void HandleRegion(Drawing.Rectangle localPhysicalRect, Drawing.Point releasePhysicalPoint)
     {
-        _ = CopyRegionAsync(localPhysicalRect);
+        _ = CopyRegionAsync(localPhysicalRect); // OCR 只认选区；释放点语义与取词无关（W6-c 扩展点保持兼容）
     }
 
     protected override void OnCopied(string text) => _owner.NotifyCopied(this, text);

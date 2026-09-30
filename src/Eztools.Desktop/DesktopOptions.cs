@@ -82,6 +82,13 @@ internal sealed class DesktopOptions
     public string? CaptureHotkey { get; private init; }
 
     /// <summary>
+    /// 屏幕取色全局热键（W6-c）。**null = 命令行未显式传** —— 生效值由托盘按
+    /// 「命令行 &gt; config/desktop.json 的 pick.hotkey &gt; 默认 Ctrl+Alt+C」合成
+    /// （D2 拍板：C，2026-09-30 复探可注册）。
+    /// </summary>
+    public string? PickHotkey { get; private init; }
+
+    /// <summary>
     /// 走一次真实的 <see cref="Search.SearchIndexProcess"/> 通路（懒启动 ezt-index → stdio
     /// → search.query），把结构化结局写进 <c>--out</c> 文件后退出（W3-d-1 验收断言面）。
     /// </summary>
@@ -215,6 +222,20 @@ internal sealed class DesktopOptions
     public bool ProbeCaptureOverlay { get; private init; }
 
     /// <summary>
+    /// 取色热键真按键探针（--probe-pick-hotkey，W6-c 真机项自动化，--probe-ocr-hotkey 同款）：
+    /// keybd_event 注入真实 Ctrl+Alt+C → WM_HOTKEY → 取色遮罩唤出 → Esc 真键收窗。
+    /// ⚠️ 副作用：真实按键、遮罩全屏抢焦点 1~2 秒 —— 只能跑在无人交互的会话。
+    /// </summary>
+    public bool ProbePickHotkey { get; private init; }
+
+    /// <summary>
+    /// 取色端到端探针（--probe-pick-overlay，W6-c 验收面）：确定性面（已知纯色 → 三格式
+    /// 手算精确断言）+ 真链路面（真移动+单击 → 剪贴板 == 自采样同点格式化值）。
+    /// ⚠️ 副作用：真实移动鼠标、**改写系统剪贴板** —— 只能跑在无人交互的会话。
+    /// </summary>
+    public bool ProbePickOverlay { get; private init; }
+
+    /// <summary>
     /// WinForms 打字判决探针（--probe-winforms-typing，2026-09-27 换方案判决）：
     /// 纯 WinForms TextBox 注入真键 "hi" → 断言 Text=="hi"。无副作用。
     /// </summary>
@@ -253,6 +274,7 @@ internal sealed class DesktopOptions
         string? searchHotkey = null;
         string? ocrHotkey = null;
         string? captureHotkey = null;
+        string? pickHotkey = null;
         var probeSearch = false;
         var probeSearchUi = false;
         var probeSearchSummon = false;
@@ -267,6 +289,8 @@ internal sealed class DesktopOptions
         var probeClipHotkey = false;
         var probeCaptureHotkey = false;
         var probeCaptureOverlay = false;
+        var probePickHotkey = false;
+        var probePickOverlay = false;
         var probeWinformsTyping = false;
         var waitReadyMs = 0;
         var probeWarmup = 0;
@@ -298,6 +322,9 @@ internal sealed class DesktopOptions
                     break;
                 case "--capture-hotkey" when i + 1 < args.Length:
                     captureHotkey = args[++i];
+                    break;
+                case "--pick-hotkey" when i + 1 < args.Length:
+                    pickHotkey = args[++i];
                     break;
                 case "--probe-search":
                     probeSearch = true;
@@ -339,6 +366,12 @@ internal sealed class DesktopOptions
                     break;
                 case "--probe-capture-overlay":
                     probeCaptureOverlay = true;
+                    break;
+                case "--probe-pick-hotkey":
+                    probePickHotkey = true;
+                    break;
+                case "--probe-pick-overlay":
+                    probePickOverlay = true;
                     break;
                 case "--probe-winforms-typing":
                     probeWinformsTyping = true;
@@ -399,6 +432,7 @@ internal sealed class DesktopOptions
             SearchHotkey = searchHotkey,
             OcrHotkey = ocrHotkey,
             CaptureHotkey = captureHotkey,
+            PickHotkey = pickHotkey,
             ProbeSearch = probeSearch,
             ProbeSearchUi = probeSearchUi,
             ProbeSearchSummon = probeSearchSummon,
@@ -413,6 +447,8 @@ internal sealed class DesktopOptions
             ProbeClipHotkey = probeClipHotkey,
             ProbeCaptureHotkey = probeCaptureHotkey,
             ProbeCaptureOverlay = probeCaptureOverlay,
+            ProbePickHotkey = probePickHotkey,
+            ProbePickOverlay = probePickOverlay,
             ProbeWinFormsTyping = probeWinformsTyping,
             WaitReadyMs = waitReadyMs,
             ProbeWarmup = probeWarmup,

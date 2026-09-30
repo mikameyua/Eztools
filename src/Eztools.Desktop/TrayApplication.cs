@@ -88,12 +88,18 @@ internal sealed class TrayApplication : IDisposable
     private CaptureOverlayManager? _captureManager;
     private int? _captureHotkeyId;
 
+    // ── 屏幕取色（W6-c）：同款懒创建。色值文本进剪贴板，格式在唤出时读定 ──
+    private PickOverlayManager? _pickManager;
+    private int? _pickHotkeyId;
+
     // 宿主设置的生效值（W4-c 接 P1a）：合成优先级 = 命令行显式 > config/desktop.json > 代码默认。
     // 缓存在字段里（菜单标签 / selfcheck 都要用），配置重读走 ReloadHostSettings()
     // —— 不在每次弹菜单时读文件：菜单是同步构建的，磁盘 IO 不该在那条路径上。
     private string _searchHotkey = HostSettingsSchema.DefaultSearchHotkey;
     private string _ocrHotkey = HostSettingsSchema.DefaultOcrHotkey;
     private string _captureHotkey = HostSettingsSchema.DefaultCaptureHotkey;
+    private string _pickHotkey = HostSettingsSchema.DefaultPickHotkey;
+    private string _colorFormat = "hex";
     private string? _ocrLanguage;
 
     /// <summary>最近一次由托盘侧确认的暂停态（null = 未知）。**只由协议返回的实际状态更新** —— 不猜。</summary>
@@ -132,6 +138,13 @@ internal sealed class TrayApplication : IDisposable
             {
                 // 区域截图同为宿主功能（W6-b）
                 StartScreenCapture();
+                return;
+            }
+
+            if (id == _pickHotkeyId)
+            {
+                // 屏幕取色同为宿主功能（W6-c）
+                StartColorPick();
                 return;
             }
 
@@ -223,6 +236,9 @@ internal sealed class TrayApplication : IDisposable
 
         // 区域截图热键（W6-b）：同为宿主级，顺序即优先级。
         RegisterCaptureHotkey();
+
+        // 屏幕取色热键（W6-c）：同为宿主级，顺序即优先级。
+        RegisterPickHotkey();
 
         // 剪贴板热键（W5-c）：同为宿主级，排在最后。监听**不在此启动** ——
         // selfcheck/探针模式都会流经这里，而监听是个隐式副作用（复制会被捕获入库），
@@ -334,6 +350,22 @@ internal sealed class TrayApplication : IDisposable
         if (_options.ProbeCaptureOverlay)
         {
             var code = RunProbeCaptureOverlay();
+            Dispose();
+            return code;
+        }
+
+        // 取色热键真按键探针（W6-c）：注入 Ctrl+Alt+C → 取色遮罩 → Esc。
+        if (_options.ProbePickHotkey)
+        {
+            var code = RunProbePickHotkey();
+            Dispose();
+            return code;
+        }
+
+        // 取色端到端探针（W6-c）：确定性三格式断言 + 真移动单击 → 剪贴板对账。
+        if (_options.ProbePickOverlay)
+        {
+            var code = RunProbePickOverlay();
             Dispose();
             return code;
         }
@@ -461,6 +493,18 @@ internal sealed class TrayApplication : IDisposable
         }
 
         _captureManager = null;
+
+        // 取色遮罩（W6-c）：同 OCR/截图纪律。
+        try
+        {
+            _pickManager?.CloseAll();
+        }
+        catch (Exception ex)
+        {
+            _host?.Log.Warn($"关闭取色遮罩失败（忽略）：{ex.Message}", "shutdown");
+        }
+
+        _pickManager = null;
 
         try
         {
@@ -625,6 +669,38 @@ internal sealed class TrayApplication : IDisposable
     }
 
     /// <summary>
+    /// 注册屏幕取色热键（W6-c，W6 FR-8）。与 <see cref="RegisterOcrHotkey"/> 同款纪律：
+    /// 失败 = Warn 日志 + **气泡**，托盘菜单「屏幕取色…」是兜底入口。可重入。
+    /// </summary>
+    private void RegisterPickHotkey()
+    {
+        _pickHotkeyId = null;
+        var combo = HotkeyCombo.TryParse(_pickHotkey);
+        if (combo is null)
+        {
+            _host!.Log.Warn(
+                $"取色热键 '{_pickHotkey}' 无法解析（格式如 Ctrl+Alt+C）。"
+                + "屏幕取色仍可从托盘菜单打开", "hotkey");
+            return;
+        }
+
+        _pickHotkeyId = _hotkeys!.Register(combo);
+        if (_pickHotkeyId is null)
+        {
+            _host!.Log.Warn(
+                $"取色热键 {combo.Normalized} 注册失败——组合键可能已被其它程序占用"
+                + "（Win32 RegisterHotKey 拿不到，占用方名字系统不提供）。"
+                + "可改用托盘菜单「屏幕取色」，或换一个组合键（--pick-hotkey / 设置窗口）", "hotkey");
+            _icon.ShowBalloonTip(5000, "取色热键注册失败",
+                $"{combo.Normalized} 被其他程序占用，屏幕取色热键未生效——可用托盘菜单「屏幕取色…」，或在设置里换键",
+                ToolTipIcon.Warning);
+            return;
+        }
+
+        _host!.Log.Info($"取色热键已注册：{combo.Normalized} → 屏幕取色", "hotkey");
+    }
+
+    /// <summary>
     /// 注册剪贴板历史热键（W5-c）。失败 = Warn 日志 + 气泡（同款"仲裁失败→气泡"纪律），
     /// 托盘子菜单「剪贴板历史」是兜底入口。可重入。
     /// </summary>
@@ -680,6 +756,13 @@ internal sealed class TrayApplication : IDisposable
         _captureHotkey = _options.CaptureHotkey
             ?? HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyCaptureHotkey)
             ?? HostSettingsSchema.DefaultCaptureHotkey;
+        _pickHotkey = _options.PickHotkey
+            ?? HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyPickHotkey)
+            ?? HostSettingsSchema.DefaultPickHotkey;
+
+        // color.format（W6-c，R10）：非法值显式回落 hex 并告警 —— 禁静默用错格式。
+        _colorFormat = NormalizeColorFormat(
+            HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyColorFormat));
 
         var lang = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyOcrLanguage);
         _ocrLanguage = string.IsNullOrWhiteSpace(lang) ? null : lang.Trim();
@@ -985,6 +1068,59 @@ internal sealed class TrayApplication : IDisposable
         {
             _icon.ShowBalloonTip(3000, "区域截图", $"已复制 {text}（位图，可直接 Ctrl+V）", ToolTipIcon.Info);
             _host?.Log.Info($"截图复制完成：{text}", "capture");
+        };
+        return manager;
+    }
+
+    /// <summary>
+    /// color.format 生效值归一（W6-c，R10）：大小写/空白容忍；未知值**显式回落 hex 并记日志**
+    /// —— 静默用错格式会让"配置生效了"变成谎言（S 系红线）。
+    /// </summary>
+    private string NormalizeColorFormat(string? raw)
+    {
+        var key = raw?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return "hex";
+        }
+
+        if (key is "hex" or "rgb" or "hsl")
+        {
+            return key;
+        }
+
+        _host?.Log.Warn($"color.format '{raw}' 不是合法格式（hex/rgb/hsl），回落 hex", "pick");
+        return "hex";
+    }
+
+    /// <summary>托盘菜单 / 全局热键共用的屏幕取色唤出入口（W6-c）。</summary>
+    private void StartColorPick()
+    {
+        try
+        {
+            _pickManager ??= CreatePickManager();
+            var monitors = _pickManager.ShowAll(_colorFormat);
+            _host?.Log.Info($"取色遮罩已唤出：{monitors} 扇（格式 {_colorFormat}）", "pick");
+        }
+        catch (Exception ex)
+        {
+            // 错误必须有可见出口（S 系红线）：日志用户不看，气泡是主动出口（与 OCR 同款收敛）。
+            _host?.Log.Warn($"屏幕取色启动失败：{ex.Message}", "pick");
+            _icon.ShowBalloonTip(6000, "屏幕取色无法启动", Shorten(ex.Message, 240), ToolTipIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// 取色遮罩管理器懒创建 + 反馈接线（与 <see cref="CreateCaptureManager"/> 同款）。
+    /// 气泡文案承载 W6 FR-3（"已复制 #rrggbb"）；D6=A：色值文本允许进 W5 剪贴板历史。
+    /// </summary>
+    private PickOverlayManager CreatePickManager()
+    {
+        var manager = new PickOverlayManager(msg => _host?.Log.Warn(msg, "pick"));
+        manager.ColorCopied += text =>
+        {
+            _icon.ShowBalloonTip(3000, "屏幕取色", $"已复制 {text}", ToolTipIcon.Info);
+            _host?.Log.Info($"取色复制完成：{text}（格式 {_colorFormat}）", "pick");
         };
         return manager;
     }
@@ -1683,6 +1819,132 @@ internal sealed class TrayApplication : IDisposable
     }
 
     /// <summary>
+    /// 取色热键真按键探针（--probe-pick-hotkey，W6-c）：与 <see cref="RunProbeCaptureHotkey"/>
+    /// 完全同款链路，差异只有被测对象（pick 管理器 / Ctrl+Alt+C）。
+    /// </summary>
+    private int RunProbePickHotkey()
+    {
+        var snap = new JsonObject();
+        try
+        {
+            if (_pickHotkeyId is null)
+            {
+                snap["ok"] = false;
+                snap["error"] = $"取色热键未注册（{_pickHotkey}）—— 先修注册再谈按键链路";
+                WriteOutFile(snap.ToJsonString());
+                _host!.Log.Warn("取色热键探针：热键未注册，跳过注入", "probe");
+                return 1;
+            }
+
+            snap["hotkey"] = _pickHotkey;
+
+            InjectHotkeyCombo(_pickHotkey);
+            var shown = false;
+            for (var i = 0; i < 40 && !shown; i++)
+            {
+                Thread.Sleep(100);
+                WinForms.Application.DoEvents();
+                shown = _pickManager is { AnyAlive: true };
+            }
+
+            snap["overlayShown"] = shown;
+            snap["monitors"] = shown ? _pickManager!.VisibleCount : 0;
+
+            var closed = false;
+            if (shown)
+            {
+                // ★ 与 OCR/截图热键探针同款：AttachThreadInput 让前台 + WPF Focus 补位 + 裸泵收窗。
+                var overlayHwnd = nint.Zero;
+                foreach (var window in _pickManager!.EnumerableWindows())
+                {
+                    overlayHwnd = new WindowInteropHelper(window).Handle;
+                    break;
+                }
+
+                if (overlayHwnd != nint.Zero)
+                {
+                    ForceForeground(overlayHwnd);
+                }
+
+                foreach (var window in _pickManager!.EnumerableWindows())
+                {
+                    window.Focus();
+                    break;
+                }
+
+                Thread.Sleep(150);
+                WinForms.Application.DoEvents();
+
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+
+                var pumpLog = new JsonArray();
+                var deadline = Environment.TickCount64 + 4000;
+                while (Environment.TickCount64 < deadline && !closed)
+                {
+                    Thread.Sleep(100);
+                    while (PeekMessage(out var m, nint.Zero, 0, 0, PM_REMOVE))
+                    {
+                        if (m.Message is >= 0x0006 and <= 0x0008 or 0x0100 or 0x0102 or 0x0104 or 0x0106)
+                        {
+                            pumpLog.Add(new JsonObject
+                            {
+                                ["msg"] = $"0x{m.Message:X4}",
+                                ["hwnd"] = m.Hwnd.ToInt64(),
+                            });
+                        }
+
+                        _ = TranslateMessage(in m);
+                        _ = DispatchMessage(in m);
+                    }
+
+                    closed = _pickManager is { AnyAlive: false };
+                }
+
+                if (!closed)
+                {
+                    snap["diagPumpLog"] = pumpLog;
+                }
+            }
+
+            snap["escClosed"] = closed;
+            snap["ok"] = shown && closed;
+            WriteOutFile(snap.ToJsonString());
+            _host!.Log.Info($"取色热键真按键探针完成：ok={snap["ok"]}", "probe");
+            return snap["ok"]!.GetValue<bool>() ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            snap["ok"] = false;
+            snap["error"] = ex.Message;
+            WriteOutFile(snap.ToJsonString());
+            _host?.Log.Warn($"取色热键真按键探针失败：{ex}", "probe");
+            return 2;
+        }
+    }
+
+    /// <summary>
+    /// 取色端到端探针（--probe-pick-overlay，W6-c）：机械全在
+    /// <see cref="PickOverlayProbe.Run"/>，这里只负责落盘与日志（W5-d 同款壳）。
+    /// </summary>
+    private int RunProbePickOverlay()
+    {
+        try
+        {
+            var snap = PickOverlayProbe.Run(msg => _host?.Log.Warn(msg, "probe"));
+            WriteOutFile(snap.ToJsonString());
+            _host!.Log.Info($"取色端到端探针完成：ok={snap["ok"]}", "probe");
+            return snap["ok"]?.GetValue<bool>() == true ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            WriteOutFile(new JsonObject { ["ok"] = false, ["error"] = ex.Message }.ToJsonString());
+            _host?.Log.Warn($"取色端到端探针失败：{ex}", "probe");
+            return 2;
+        }
+    }
+
+    /// <summary>
     /// 图片 OCR 提字探针（--probe-clip-ocr，W5-d FR-15）。逻辑全在
     /// <see cref="ClipboardPanelProbe.RunOcrProbe"/>，这里只负责落盘与日志。
     /// <b>语言包缺失时退出码 0</b>（环境依赖分支：如实落盘 skipped 并跳过，不算失败）——
@@ -2073,6 +2335,12 @@ internal sealed class TrayApplication : IDisposable
             ? "区域截图…（热键未注册，可改用此项；换键用 --capture-hotkey 或设置窗口）"
             : $"区域截图…（{_captureHotkey}）";
         menu.Items.Add(new ToolStripMenuItem(captureLabel, null, (_, _) => StartScreenCapture()));
+
+        // 屏幕取色（W6-c）：同为宿主功能入口，契约同 OCR/截图（热键快路径 + 菜单可见兜底）。
+        var pickLabel = _pickHotkeyId is null
+            ? "屏幕取色…（热键未注册，可改用此项；换键用 --pick-hotkey 或设置窗口）"
+            : $"屏幕取色…（{_pickHotkey}）";
+        menu.Items.Add(new ToolStripMenuItem(pickLabel, null, (_, _) => StartColorPick()));
 
         // 剪贴板历史（W5-c）：子菜单 = 打开 / 暂停捕获 / 清空。标签缓存字段（selfcheck 同源），
         // 菜单每次 Opening 重建所以暂停态总是最新 —— 与托盘菜单"只重建菜单模型"的纪律一致。
@@ -2704,6 +2972,7 @@ internal sealed class TrayApplication : IDisposable
         RegisterSearchHotkey();
         RegisterOcrHotkey();
         RegisterCaptureHotkey();
+        RegisterPickHotkey();
         RegisterClipHotkey();
         ApplyClipMonitorState();   // clip.enabled 翻转要跟着启停监听（其余键已在 Reload 里生效）
     }
@@ -2776,6 +3045,14 @@ internal sealed class TrayApplication : IDisposable
             : $"截图热键：{_captureHotkey} → 区域截图（已注册）";
         _host.Log.Info(captureLine, "selfcheck");
 
+        // 屏幕取色热键 + 格式（W6-c）：同款断言面。格式行把"生效值"打出来（R10 回落可见）。
+        var pickLine = _pickHotkeyId is null
+            ? "取色热键：未注册（组合键被占用或解析失败——托盘菜单「屏幕取色」可用）"
+            : $"取色热键：{_pickHotkey} → 屏幕取色（已注册）";
+        var pickFormatLine = $"取色格式：{_colorFormat}";
+        _host.Log.Info(pickLine, "selfcheck");
+        _host.Log.Info(pickFormatLine, "selfcheck");
+
         // 剪贴板热键 + 监听状态（W5-c）：注册结局与监听运行态单列成行 ——
         // "面板能唤出"与"复制真的进历史"是两条链路，断言面分开（后者看监听行）。
         var clipLine = !_clipEnabled
@@ -2794,6 +3071,7 @@ internal sealed class TrayApplication : IDisposable
 
         WriteReport(line, settings.Concat(panels).Append(bindLine).Append(searchLine)
             .Append(ocrLine).Append(ocrLangLine).Append(captureLine)
+            .Append(pickLine).Append(pickFormatLine)
             .Append(clipLine).Append(monitorLine).ToList());
     }
 

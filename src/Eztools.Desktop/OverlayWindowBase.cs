@@ -139,11 +139,21 @@ internal abstract class OverlayWindowBase : Window
 
     // ── 派生类扩展点 ──
 
-    /// <summary>拖拽距离过小（&lt;6 物理像素）视为单击：命中域由派生类决定语义（OCR=取词，pick=取色）。</summary>
+    /// <summary>
+    /// 拖拽过程中是否显示选区高亮与尺寸标签。
+    /// OCR/capture 有框选语义（true）；pick 无框选概念（false）—— 按下不画选区，
+    /// 拖拽只是"点起来又放下"，语义仍归取色（W6 设计方案 §4）。
+    /// </summary>
+    protected virtual bool ShowDragSelection => true;
+
+    /// <summary>拖拽距离过小（&lt;6 物理像素）视为单击：命中域由派生类决定语义（OCR=取词，pick/capture=取色/取消）。</summary>
     protected abstract void HandleClick(Drawing.Point localPhysicalPoint);
 
-    /// <summary>有效框选完成：选区为窗口内部物理像素矩形，语义由派生类决定（OCR=识别，capture=进剪贴板）。</summary>
-    protected abstract void HandleRegion(Drawing.Rectangle localPhysicalRect);
+    /// <summary>
+    /// 有效框选完成：选区与**释放点**均为窗口内部物理像素坐标，语义由派生类决定
+    /// （OCR=识别选区，capture=截选区，pick=对释放点取色 —— 拖拽释放也是一次取色意图）。
+    /// </summary>
+    protected abstract void HandleRegion(Drawing.Rectangle localPhysicalRect, Drawing.Point releasePhysicalPoint);
 
     /// <summary>成功写入剪贴板后的上报钩子（收全部窗 + 气泡由 manager 层负责）。</summary>
     protected abstract void OnCopied(string text);
@@ -238,8 +248,11 @@ internal abstract class OverlayWindowBase : Window
 
         _dragging = true;
         _dragStart = e.GetPosition(this);
-        _selection.Visibility = Visibility.Visible;
-        _sizeLabel.Visibility = Visibility.Visible;
+        if (ShowDragSelection)
+        {
+            _selection.Visibility = Visibility.Visible;
+            _sizeLabel.Visibility = Visibility.Visible;
+        }
         UpdateSelection(e.GetPosition(this));
         CaptureMouse();
     }
@@ -281,17 +294,21 @@ internal abstract class OverlayWindowBase : Window
         _dragging = false;
         ReleaseMouseCapture();
         var current = e.GetPosition(this);
-        _selection.Visibility = Visibility.Collapsed;
-        _sizeLabel.Visibility = Visibility.Collapsed;
+        if (ShowDragSelection)
+        {
+            _selection.Visibility = Visibility.Collapsed;
+            _sizeLabel.Visibility = Visibility.Collapsed;
+        }
 
         var physRect = ToPhysicalRect(_dragStart, current);
+        var releasePoint = ToPhysicalPoint(current);
         if (physRect.Width < 6 || physRect.Height < 6)
         {
-            HandleClick(ToPhysicalPoint(current));
+            HandleClick(releasePoint);
         }
         else
         {
-            HandleRegion(physRect);
+            HandleRegion(physRect, releasePoint);
         }
     }
 

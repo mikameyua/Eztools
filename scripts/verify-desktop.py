@@ -48,7 +48,7 @@ SKIPPED = 0
 #   registered >= expected                 → pass
 #   registered <  expected 且探针报占用     → **skip（落数字，不能静默少跑）**
 #   registered <  expected 且无占用/探针挂掉 → fail（这才是代码侧问题；探针不可用按失败处理）
-HOTKEY_ASSERT_NAME = ("热键注册 = 7（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c + 截图 W6-b，"
+HOTKEY_ASSERT_NAME = ("热键注册 = 8（3 个工具热键 + 搜索 W3-d-1 + OCR W4-c + 剪贴板 W5-c + 截图 W6-b + 取色 W6-c，"
                       "RegisterHotKey 真实成功）")
 
 
@@ -89,11 +89,11 @@ def probe_occupied_hotkeys(repo: str):
 def hotkey_selftest() -> int:
     """三态判定的突变验证（不出仓、不碰真实热键）。"""
     cases = [
-        ("注册满额 → pass", (7, 7, []), "pass"),
-        ("注册不满但有占用 → skip", (6, 7, ["Ctrl+Alt+W"]), "skip"),
-        ("注册不满且无占用 → fail（代码侧）", (6, 7, []), "fail"),
-        ("注册不满且探针挂掉 → fail（不许静默放过）", (6, 7, None), "fail"),
-        ("超额注册（>= 期望）→ pass", (8, 7, []), "pass"),
+        ("注册满额 → pass", (8, 8, []), "pass"),
+        ("注册不满但有占用 → skip", (7, 8, ["Ctrl+Alt+W"]), "skip"),
+        ("注册不满且无占用 → fail（代码侧）", (7, 8, []), "fail"),
+        ("注册不满且探针挂掉 → fail（不许静默放过）", (7, 8, None), "fail"),
+        ("超额注册（>= 期望）→ pass", (9, 8, []), "pass"),
     ]
     bad = 0
     for desc, args, want in cases:
@@ -329,10 +329,10 @@ def main() -> int:
            m.group(2) == "3", m.group(2))
         # 热键注册数：三态判定（环境占用 → 跳过并落数字；代码没注册 → 红）
         n_hk = int(m.group(3))
-        if n_hk == 7:
+        if n_hk == 8:
             ck(HOTKEY_ASSERT_NAME, True, str(n_hk))
         else:
-            verdict, detail = hotkey_verdict(n_hk, 7, probe_occupied_hotkeys(repo))
+            verdict, detail = hotkey_verdict(n_hk, 8, probe_occupied_hotkeys(repo))
             if verdict == "skip":
                 globals()["SKIPPED"] += 1
                 info(f"[跳过] {HOTKEY_ASSERT_NAME}\n       {detail}")
@@ -400,12 +400,12 @@ def main() -> int:
     # W4-c：宿主设置节 desktop（search.hotkey / ocr.hotkey / ocr.language，3 个 string 字段）
     # 也以同格式进清单 —— 宿主设置接 P1a 的落地证据。
     # W4-c：宿主设置节 desktop（search/ocr/clip 热键等）以同格式进清单；
-    # W6-b：capture.hotkey 加入（9 个字段）—— 宿主设置接 P1a 的落地证据。
+    # W6-b：capture.hotkey；W6-c：pick.hotkey + color.format（enum→ComboBox，11 个字段）。
     expected = {
         "desktop": {"search.hotkey=TextBox", "ocr.hotkey=TextBox", "ocr.language=TextBox",
                      "clip.enabled=CheckBox", "clip.hotkey=TextBox", "clip.max-items=TextBox",
                      "clip.image-retention-days=TextBox", "clip.blacklist=TextBox",
-                     "capture.hotkey=TextBox"},
+                     "capture.hotkey=TextBox", "pick.hotkey=TextBox", "color.format=ComboBox"},
         "echo": {"uppercase=CheckBox"},
         "wordcount": {"countWhitespace=CheckBox", "language=ComboBox", "maxFileSizeMb=TextBox"},
         "filehash": {"algorithm=ComboBox", "uppercase=CheckBox", "chunkSizeKb=TextBox"},
@@ -1067,6 +1067,57 @@ def main() -> int:
        capo.get("clickCancelled") is True, str(capo)[:200])
     ck("★★ 遮罩摆放与预期物理矩形一致（W6-a Base 坐标纪律回归）",
        capo.get("placementAllMatch") is True, str(capo)[:200])
+
+    # ── 1c-6d. W6-c：取色热键真按键探针（--probe-pick-hotkey，--probe-ocr-hotkey 同款）─────
+    #     真注入 Ctrl+Alt+C → WM_HOTKEY → 取色遮罩唤出 → Esc 真键收窗。
+    #     副作用：真实按键 + 全屏遮罩抢焦点 1~2 秒。
+    pick_file = os.path.join(repo, "_scratch", "desktop-pick-hotkey.json")
+    if os.path.exists(pick_file):
+        os.remove(pick_file)
+    r = run(["--probe-pick-hotkey", "--no-prompt", "--out", pick_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=120)
+    ck("取色热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    pick_hotkey = {}
+    if os.path.isfile(pick_file):
+        try:
+            with open(pick_file, encoding="utf-8") as f:
+                pick_hotkey = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"取色热键探针输出不可解析：{ex}")
+    ck("★★ 真按键 Ctrl+Alt+C 触发取色遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
+       pick_hotkey.get("overlayShown") is True, str(pick_hotkey)[:200])
+    ck("★★ Esc 真按键收窗（取色遮罩 PreviewKeyDown→Cancel 链）",
+       pick_hotkey.get("escClosed") is True, str(pick_hotkey)[:200])
+
+    # ── 1c-6e. W6-c：取色端到端（确定性三格式 + 真移动单击 → 剪贴板对账）────────────
+    #     ① 确定性面：已知纯色（255,0,0）走 SampleCenter+ColorFormatter 同一条链，
+    #        断言 hex/rgb/hsl 三格式 = 手算精确值（FR-7"取色准确性"的机器判据）；
+    #     ② 真链路面：真移动+单击 → 剪贴板文本 == 探针自采样同点格式化值。
+    #     副作用：真实移动鼠标 + 改写系统剪贴板。
+    picko_file = os.path.join(repo, "_scratch", "desktop-pick-overlay.json")
+    if os.path.exists(picko_file):
+        os.remove(picko_file)
+    r = run(["--probe-pick-overlay", "--no-prompt", "--out", picko_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=120)
+    ck("取色端到端探针退出码 0（确定性三格式 + 真单击取色）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    picko = {}
+    if os.path.isfile(picko_file):
+        try:
+            with open(picko_file, encoding="utf-8") as f:
+                picko = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"取色端到端探针输出不可解析：{ex}")
+    det = picko.get("deterministic") or {}
+    ck("★★ 确定性面：已知纯色三格式 = 手算精确值（hex/rgb/hsl，FR-7 ±0）",
+       det.get("hex") is True and det.get("rgb") is True and det.get("hsl") is True,
+       str(picko)[:300])
+    ck("★★ 真链路面：单击取色后遮罩全收 + 剪贴板为合法 hex 色值（ColorFormatter 全链；"
+       "颜色精确性由确定性面钉住 —— 活动终端上单像素颜色相等断言天然 flaky，不采用）",
+       picko.get("copiedClosed") is True and picko.get("clipboardFormat") is True, str(picko)[:300])
 
     # ── 1c-7. W5-b：剪贴板面板探针 ──────────────────────────────────────────
     #     生命周期循环（唤出/收起/X=隐藏契约）+ 直贴契约：程序化过滤到 1 条 →

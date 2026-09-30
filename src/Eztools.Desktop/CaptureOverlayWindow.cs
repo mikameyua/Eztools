@@ -46,9 +46,9 @@ internal sealed class CaptureOverlayWindow : OverlayWindowBase
         Cancel();
     }
 
-    protected override void HandleRegion(Drawing.Rectangle localPhysicalRect)
+    protected override void HandleRegion(Drawing.Rectangle localPhysicalRect, Drawing.Point releasePhysicalPoint)
     {
-        _ = CopyRegionAsync(localPhysicalRect);
+        _ = CopyRegionAsync(localPhysicalRect); // capture 只认选区；释放点语义与截图无关（W6-c 扩展点保持兼容）
     }
 
     protected override void OnCopied(string text) => _owner.NotifyCopied(this, text);

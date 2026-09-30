@@ -26,6 +26,7 @@ public static class HostSettingsSchema
     public const string DefaultOcrHotkey = "Ctrl+Alt+O";
     public const string DefaultClipHotkey = "Ctrl+Alt+V";
     public const string DefaultCaptureHotkey = "Ctrl+Alt+X";
+    public const string DefaultPickHotkey = "Ctrl+Alt+C";
 
     public const string KeySearchHotkey = "search.hotkey";
     public const string KeyOcrHotkey = "ocr.hotkey";
@@ -36,6 +37,8 @@ public static class HostSettingsSchema
     public const string KeyClipImageRetentionDays = "clip.image-retention-days";
     public const string KeyClipBlacklist = "clip.blacklist";
     public const string KeyCaptureHotkey = "capture.hotkey";
+    public const string KeyPickHotkey = "pick.hotkey";
+    public const string KeyColorFormat = "color.format";
 
     /// <summary>剪贴板历史上限默认值（FR-4；可配 100~50000，schema 校验）。</summary>
     public const int DefaultClipMaxItems = 1000;
@@ -141,6 +144,21 @@ public static class HostSettingsSchema
               "description": "唤出区域截图遮罩的全局热键，格式如 Ctrl+Alt+X。拖拽框选，松开鼠标即把所选区域位图复制进剪贴板。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+X",
               "x-order": 9
+            },
+            "pick.hotkey": {
+              "type": "string",
+              "title": "屏幕取色热键",
+              "description": "唤出屏幕取色遮罩的全局热键，格式如 Ctrl+Alt+C。移动放大镜预览，左键单击即复制色值。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
+              "default": "Ctrl+Alt+C",
+              "x-order": 10
+            },
+            "color.format": {
+              "type": "string",
+              "enum": ["hex", "rgb", "hsl"],
+              "title": "取色色值格式",
+              "description": "单击取色后复制进剪贴板的色值格式：hex = #rrggbb，rgb = rgb(r, g, b)，hsl = hsl(h, s%, l%)。下次唤出取色时生效。",
+              "default": "hex",
+              "x-order": 11
             }
           }
         }
