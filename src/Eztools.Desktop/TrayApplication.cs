@@ -2086,8 +2086,27 @@ internal sealed class TrayApplication : IDisposable
         {
             var manager = new CaptureOverlayManager(msg => _host?.Log.Warn(msg, "capture"));
             string? copied = null;
-            manager.ImageCopied += text => copied = text;
             var finished = false;
+
+            // 人工模式没有托盘图标（气泡的常规出口）——用临时 NotifyIcon 承担复制反馈。
+            using var notify = new System.Windows.Forms.NotifyIcon { Icon = _iconImage, Visible = false };
+            manager.ImageCopied += text =>
+            {
+                copied = text;
+                notify.Visible = true;
+                notify.ShowBalloonTip(2500, "区域截图", $"已复制 {text}（位图，可直接 Ctrl+V）", ToolTipIcon.Info);
+                // ★ 复制路径也必须退泵：早先只挂 Finished（取消）⇒ 复制成功后窗全关但
+                //   Application.Run 不退出 = 无窗无图标进程挂着（W6-d 用户实测踩中）。
+                //   给气泡留 ~1.8s 显示期再退（icon 存活期气泡才可见）。
+                var timer = new System.Windows.Forms.Timer { Interval = 1800 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                    WinForms.Application.Exit();
+                };
+                timer.Start();
+            };
             manager.Finished += () =>
             {
                 finished = true;
@@ -2095,6 +2114,7 @@ internal sealed class TrayApplication : IDisposable
             };
 
             var monitors = manager.ShowAll();
+            GiveOverlayForeground(manager.EnumerableWindows());
             _host!.Log.Info($"截图遮罩人工模式：{monitors} 扇已唤出", "capture");
 
             WinForms.Application.Run();
@@ -2124,8 +2144,25 @@ internal sealed class TrayApplication : IDisposable
         {
             var manager = new PickOverlayManager(msg => _host?.Log.Warn(msg, "pick"));
             string? copied = null;
-            manager.ColorCopied += text => copied = text;
             var finished = false;
+
+            // 人工模式没有托盘图标 —— 临时 NotifyIcon 承担复制反馈（同 RunCaptureShow）。
+            using var notify = new System.Windows.Forms.NotifyIcon { Icon = _iconImage, Visible = false };
+            manager.ColorCopied += text =>
+            {
+                copied = text;
+                notify.Visible = true;
+                notify.ShowBalloonTip(2500, "屏幕取色", $"已复制 {text}", ToolTipIcon.Info);
+                // ★ 复制路径退泵（同 RunCaptureShow 的挂起修正）。
+                var timer = new System.Windows.Forms.Timer { Interval = 1800 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                    WinForms.Application.Exit();
+                };
+                timer.Start();
+            };
             manager.Finished += () =>
             {
                 finished = true;
@@ -2133,6 +2170,7 @@ internal sealed class TrayApplication : IDisposable
             };
 
             var monitors = manager.ShowAll(_colorFormat);
+            GiveOverlayForeground(manager.EnumerableWindows());
             _host!.Log.Info($"取色遮罩人工模式：{monitors} 扇已唤出（格式 {_colorFormat}）", "pick");
 
             WinForms.Application.Run();
@@ -2153,6 +2191,26 @@ internal sealed class TrayApplication : IDisposable
             _host?.Log.Warn($"取色人工模式失败：{ex}", "pick");
             return 2;
         }
+    }
+
+    /// <summary>
+    /// 把键盘前台让给遮罩窗（W6-d 用户实测修正）：show 模式从终端后台启动 ⇒ 遮罩
+    /// 抢焦点被拒（§2.24①）⇒ Esc 落进终端、遮罩永不退出（双屏两扇全没焦点更迷惑）。
+    /// AttachThreadInput 组合 + WPF Focus 补位，与热键探针同款。
+    /// </summary>
+    private static void GiveOverlayForeground(IEnumerable<OverlayWindowBase> windows)
+    {
+        // 给 WPF 窗口完成 Show/激活协商留时间，再抢前台。
+        Thread.Sleep(200);
+        WinForms.Application.DoEvents();
+        foreach (var window in windows)
+        {
+            ForceForeground(new WindowInteropHelper(window).Handle);
+            window.Focus();
+            break;
+        }
+
+        WinForms.Application.DoEvents();
     }
 
     /// <summary>
@@ -2452,8 +2510,25 @@ internal sealed class TrayApplication : IDisposable
         {
             var manager = new OcrOverlayManager(msg => _host?.Log.Warn(msg, "ocr"));
             string? copied = null;
-            manager.TextCopied += text => copied = text;
             var finished = false;
+
+            // 人工模式没有托盘图标 —— 临时 NotifyIcon 承担复制反馈。
+            // ★ 同 RunCaptureShow 的挂起修正：复制路径也必须退泵（早先只挂 Finished）。
+            using var notify = new System.Windows.Forms.NotifyIcon { Icon = _iconImage, Visible = false };
+            manager.TextCopied += text =>
+            {
+                copied = text;
+                notify.Visible = true;
+                notify.ShowBalloonTip(2500, "屏幕取字", $"已复制 {text}", ToolTipIcon.Info);
+                var timer = new System.Windows.Forms.Timer { Interval = 1800 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                    WinForms.Application.Exit();
+                };
+                timer.Start();
+            };
             manager.Finished += () =>
             {
                 finished = true;
@@ -2461,6 +2536,7 @@ internal sealed class TrayApplication : IDisposable
             };
 
             var monitors = manager.ShowAll();
+            GiveOverlayForeground(manager.EnumerableWindows());
             _host!.Log.Info($"OCR 遮罩人工模式：{monitors} 扇已唤出", "ocr");
 
             WinForms.Application.Run();

@@ -340,7 +340,11 @@ def main() -> int:
                      "或改该工具 tool.json 的默认热键（改后同步引用该热键的文档）")
             else:
                 ck(HOTKEY_ASSERT_NAME, False, detail)
-        ck("图标按 SmallIconSize 取到 16x16", m.group(4) == "16" and m.group(5) == "16",
+        # 图标尺寸 = SystemInformation.SmallIconSize（随系统 DPI 变化：单屏 175% 时 16，
+        # 双屏/150% 等环境取 24 —— 2026-09-30 用户接第二块屏后实测 24x24，产品行为更清晰）。
+        # 判据放宽为合法小图标档位，不再硬编码 16（环境依赖断言过时 = 假红）。
+        ck("图标按 SmallIconSize 取到合法尺寸（16/20/24/32，随系统 DPI）",
+           m.group(4) in ("16", "20", "24", "32") and m.group(4) == m.group(5),
            f"{m.group(4)}x{m.group(5)}")
 
     # ★ 搜索热键（W3-d-1）：注册结局单列一行 —— 被第三方占用时的提示文案是断言面。
