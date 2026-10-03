@@ -71,6 +71,7 @@
     "type": "object",
     "properties": {
       "maxTextBytes": {
+        "x-advanced": true,
         "type": "integer",
         "default": 65536,
         "minimum": 1024,
@@ -86,6 +87,7 @@
         "title": "文本预览行数上限"
       },
       "binaryProbeBytes": {
+        "x-advanced": true,
         "type": "integer",
         "default": 4096,
         "minimum": 64,

@@ -213,8 +213,8 @@ internal static class CaptureOverlayProbe
             }
             catch
             {
-                // 收窗失败无出口可去（探针即将退进程），吞 —— 与 TrayApplication.Dispose 的
-                // try/catch + Warn 同级噪音，但这里连日志宿主都可能没就绪。
+                // review-guards:allow-empty-catch :: 探针收尾路径（即将退进程），连日志宿主都可能没就绪 ——
+                // 有出口可去的收窗失败见 TrayApplication.Dispose（那里是 try/catch + Warn）
             }
         }
     }

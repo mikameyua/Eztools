@@ -345,6 +345,22 @@ public static class ManifestParser
             }
         }
 
+        // ── configHidden（方案 C2）：配置照常、设置窗口不展示 ──
+        // 与 recover 同口径：写了但不是布尔 = 作者意图没被满足，警告 + 按未声明处理
+        //（静默取 false 会让"想隐藏没隐藏"成为无声的失败）。
+        var configHidden = false;
+        if (obj["configHidden"] is JsonNode hiddenNode)
+        {
+            if (hiddenNode is JsonValue hiddenVal && hiddenVal.TryGetValue<bool>(out var hiddenBool))
+            {
+                configHidden = hiddenBool;
+            }
+            else
+            {
+                Warn("config.hidden-not-boolean", "configHidden 必须是布尔值，按未声明处理");
+            }
+        }
+
         var manifest = new ToolManifest
         {
             Id = id ?? string.Empty,
@@ -368,6 +384,7 @@ public static class ManifestParser
             ExclusiveResources = ParseExclusiveResources(obj),
             Contributes = contributes,
             ConfigSchema = configSchema,
+            ConfigHidden = configHidden,
             ToolDirectory = toolDir,
             ManifestPath = Path.GetFullPath(manifestPath),
             SourceName = sourceName,

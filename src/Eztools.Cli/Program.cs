@@ -855,6 +855,9 @@ uninstall 专有选项
                     // ⚠️ 必须 Clone：ConfigSchema 已经挂在清单解析出的节点上，
                     //    直接挂到新对象会抛 "The node already has a parent."
                     ["configSchema"] = tool.Manifest.ConfigSchema?.Clone(),
+                    // C2（2026-09-30）：configHidden 进双展示面 —— 恒输出（false 也输出），
+                    // 读 JSON 的人才能区分"没隐藏"与"字段被吞"（acceptance 3 断言消费）。
+                    ["configHidden"] = tool.Manifest.ConfigHidden,
                     ["commands"] = new JsonArray(tool.Manifest.Contributes.Commands.Select(c => (JsonNode)new JsonObject
                     {
                         ["id"] = c.Id,

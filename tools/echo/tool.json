@@ -13,14 +13,30 @@
   "needs": [],
   "contributes": {
     "commands": [
-      { "id": "echo.echo", "title": "回显文本", "handler": "echo", "description": "返回输入文本与其长度" },
-      { "id": "echo.large", "title": "生成大 payload", "handler": "large", "description": "生成指定大小的文本，用于验证分帧不截断" }
+      {
+        "id": "echo.echo",
+        "title": "回显文本",
+        "handler": "echo",
+        "description": "返回输入文本与其长度"
+      },
+      {
+        "id": "echo.large",
+        "title": "生成大 payload",
+        "handler": "large",
+        "description": "生成指定大小的文本，用于验证分帧不截断"
+      }
     ]
   },
   "config": {
     "type": "object",
     "properties": {
-      "uppercase": { "type": "boolean", "default": false, "title": "转为大写", "description": "回显前把文本转成大写" }
+      "uppercase": {
+        "type": "boolean",
+        "default": false,
+        "title": "转为大写",
+        "description": "回显前把文本转成大写"
+      }
     }
-  }
+  },
+  "configHidden": true
 }

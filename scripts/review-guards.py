@@ -16,6 +16,11 @@
 #    G5 🟡 死产物目录 —— 项目 TFM 与 bin/obj 下实际 TFM 目录不一致（踩坑全集 §2.31）
 #    G6 🟡 跳过必须计数 —— 断言脚本里出现「跳过」文案却附近没有 SKIPPED 计数
 #          （2026-09-28 断言语审抓到 2 条「假绿通道」后新增，见 check_g6 的说明）
+#    G7 🔴 分层守卫（W7）—— `src/*/Launcher/` 的分层红线：
+#          · `Eztools.Host/Launcher`（平台中立层）禁 UI/平台依赖（System.Windows*）——
+#            否则打破"纯逻辑可被 selftest 测 + 编译器强制不碰 Win32"；
+#          · 两侧都禁 `Eztools.Core` 引用（NFR-2 零特权）。
+#          ★ Desktop 侧**允许** UI/Win32（图标提取、Shell、注册表本来就在那儿）。
 #
 #  ⚠️ 故意不检查行宽（80/120 字符）：本仓已判定"不采纳"（长行是有意取舍，见
 #     docs/README.md §3.6）—— --selftest 里有一条反向断言钉住它，防后人顺手加回来。
@@ -564,6 +569,67 @@ def check_g6(root: str, hits: list):
 
 
 # ============================================================================
+# G7 分层守卫（W7 启动器）：纯逻辑层不得碰 UI / 平台 API；启动器代码不得碰特权层
+#
+# 判据来源：W7 设计方案 §3.2 / §12.5 —— 分层在这里**不是偏好而是硬约束**：
+#   · 纯逻辑 provider 落 `Eztools.Host/Launcher`（Host 的 TFM 是 net10.0，平台中立）
+#     ⇒ ① `Eztools.Cli` 与 `Eztools.Desktop` 都引用 Host ⇒ selftest 能直接测纯函数；
+#        ② **编译器强制**"不碰 Win32/WPF"，而不是靠自觉；
+#   · Win32 相关（Shell 扫描 / 注册表 / 图标提取）落 `Eztools.Desktop/Launcher`
+#     —— 放 Host 会产生 CA1416 平台兼容告警 ⇒ 破坏"警告数 = 基线"这条验收判据；
+#   · 启动器代码不得引用 `Eztools.Core`（NFR-2 零特权：files 能力的唯一入口是
+#     `SearchIndexClient`）。
+#
+# ★ 为什么分两个作用域（★ 2026-10-01 W7-b 修正）：第一版把"禁 UI 依赖"也套到了
+#   `src/Eztools.Desktop/Launcher/` 上 —— 那是**错的**：那一层本来就该有 WPF/Win32
+#   （图标提取、SHGetFileInfo、注册表）。分层的判据是"**平台中立层**不得沾 UI"，
+#   而不是"Launcher 目录不得沾 UI"。清单只会把自己逼到关掉（同 G4 收窄的理由）。
+# ★ 为什么用 `strip_csharp`：**注释里写"为什么不碰 System.Windows"是合法的**
+#   （本仓大量文档注释正是这么写的）—— 不剥注释，守卫会把自己的理由书判成违规。
+# ============================================================================
+G7_UI_FORBIDDEN = ("System.Windows", "System.Windows.Forms", "System.Drawing")
+G7_PRIVILEGE_FORBIDDEN = "Eztools.Core"
+
+# (作用域目录, 是否禁 UI/平台依赖) —— 只有 Host 侧平台中立层禁 UI
+G7_LAYER_SCOPE = (
+    (os.path.join("src", "Eztools.Host", "Launcher"), True),
+    (os.path.join("src", "Eztools.Desktop", "Launcher"), False),
+)
+
+
+def check_g7(root: str, hits: list):
+    for scope, forbid_ui in G7_LAYER_SCOPE:
+        d = os.path.join(root, scope)
+        if not os.path.isdir(d):
+            continue                     # 目录尚未建（如 W7-b 前的 Desktop/Launcher）⇒ 跳过
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".cs"):
+                continue
+            path = os.path.join(d, name)
+            src = strip_csharp(open(path, encoding="utf-8-sig", errors="replace").read())
+
+            # 每文件每条**类别**最多一条命中（System.Windows 是 System.Windows.Forms
+            # 的子串 —— 逐 token 报会重复计数，汇总数字就不可信了）
+            matched = [t for t in G7_UI_FORBIDDEN if t in src] if forbid_ui else []
+            if matched:
+                hits.append({
+                    "check": "G7", "level": "FAIL",
+                    "file": rel(root, path), "line": 0,
+                    "msg": f"平台中立层（Eztools.Host）出现 UI/平台依赖 {matched} —— 它必须落 "
+                           f"Eztools.Desktop/Launcher（Host 用 WPF/WinForms/Win32 会同时"
+                           f"破坏可测性与 CA1416 警告基线，见 W7 设计方案 §3.2）",
+                })
+
+            if G7_PRIVILEGE_FORBIDDEN in src:
+                hits.append({
+                    "check": "G7", "level": "FAIL",
+                    "file": rel(root, path), "line": 0,
+                    "msg": f"启动器代码引用了 {G7_PRIVILEGE_FORBIDDEN} —— 违反 NFR-2 零特权；"
+                           f"files 能力的唯一入口是 SearchIndexClient（W7 设计方案 §12.5）",
+                })
+
+
+# ============================================================================
 # 运行器
 # ============================================================================
 CHECKS = [
@@ -573,6 +639,7 @@ CHECKS = [
     ("G4", "幽灵代码候选", check_g4),
     ("G5", "死产物目录（TFM 不一致）", check_g5),
     ("G6", "跳过必须计数（断言脚本）", check_g6),
+    ("G7", "分层守卫（Launcher 层）", check_g7),
 ]
 
 
@@ -728,6 +795,27 @@ public class Bad
                "#!/usr/bin/env bash\n"
                "printf '  [跳过] 2 条环境依赖断言\\n'\n"
                "check \"跳过必须可见\" 0 0\n")
+        # G7 正向夹具：平台中立层里同时出现 UI 依赖与特权层引用（两类别各一条）
+        _write(a, "src/Eztools.Host/Launcher/BadLayer.cs",
+               "using System.Windows;\n"
+               "using Eztools.Core.Primitives;\n"
+               "\n"
+               "namespace Demo;\n"
+               "\n"
+               "public sealed class BadLayer\n"
+               "{\n"
+               "    public string? Tag { get; set; }\n"
+               "}\n")
+        # G7 正向夹具（Desktop 侧）：那一层**允许** UI，但**不允许**特权层
+        _write(a, "src/Eztools.Desktop/Launcher/BadDesktopLayer.cs",
+               "using Eztools.Core.Primitives;\n"
+               "\n"
+               "namespace Demo;\n"
+               "\n"
+               "internal sealed class BadDesktopLayer\n"
+               "{\n"
+               "    public string? Tag { get; set; }\n"
+               "}\n")
 
         hits_a = run_checks(a)
         by = {}
@@ -752,6 +840,8 @@ public class Bad
                len([h for h in by.get("G4", []) if "NeverCalled" in h["msg"]]), 1)
         expect("G5 正向：TFM 不一致目录必须被报出", len(by.get("G5", [])), 1)
         expect("G6 正向：「跳过」文案无 SKIPPED 计数必须被报出", len(by.get("G6", [])), 1)
+        expect("G7 正向：Host 侧 UI/特权层各报一条 + Desktop 侧特权层报一条（UI 在 Desktop 合法）",
+               len(by.get("G7", [])), 3)
 
         # ── 夹具仓 B：每条检查的**反向**（不得误伤）─────────────────────────
         b = os.path.join(tmp, "negative")
@@ -855,6 +945,30 @@ public class LexHard
                "# 反面教材：不能用 `ls | grep -q`（命中即退会让上游收 SIGPIPE）\n"
                "REPO=$(cd x && pwd -W) || REPO=$(pwd)\n"
                "grep -qrE 'x' \"$D\" >/dev/null && echo raw-usage-is-fine\n")
+        # G7 反向夹具：注释与字符串里提到 UI/特权层**不得**报出（判据是"引用了"，不是"提到"）
+        _write(b, "src/Eztools.Host/Launcher/GoodLayer.cs",
+               "namespace Eztools.Host.Launcher;\n"
+               "\n"
+               "/// <summary>\n"
+               "/// 反向夹具：注释里出现 System.Windows.Forms 与 Eztools.Core 是**合法**的\n"
+               "/// —— 本仓正是靠文档注释解释「为什么不碰它们」。\n"
+               "/// </summary>\n"
+               "public sealed class GoodLayer\n"
+               "{\n"
+               "    private const string Note = \"System.Windows.Forms 与 Eztools.Core 只是说明文字\";\n"
+               "}\n")
+        # G7 反向夹具（Desktop 侧）：**真用** WPF/Win32 也不得报出 —— 分层判据是
+        # "平台中立层不得沾 UI"，不是"Launcher 目录不得沾 UI"（W7-b 修正的第一版误伤）
+        _write(b, "src/Eztools.Desktop/Launcher/GoodDesktopLayer.cs",
+               "using System.Windows;\n"
+               "using System.Windows.Media.Imaging;\n"
+               "\n"
+               "namespace Eztools.Desktop;\n"
+               "\n"
+               "internal static class GoodDesktopLayer\n"
+               "{\n"
+               "    internal static BitmapSource? Probe() => null;\n"
+               "}\n")
 
         hits_b = run_checks(b)
         byb = {}
@@ -873,6 +987,8 @@ public class LexHard
         expect("G5 反向：TFM 一致的 bin 目录不得报出", len(byb.get("G5", [])), 0)
         expect("G6 反向：已计数 / 断言名含跳过 / 注释里的跳过 均不得报出",
                len(byb.get("G6", [])), 0)
+        expect("G7 反向：注释与字符串里提到 UI/特权层不得报出（防误伤理由书）；Desktop 侧真用 WPF 也不报",
+               len(byb.get("G7", [])), 0)
         expect("★ 行宽反向断言：300 字符长行不得产生任何命中",
                len([h for h in hits_b if "LongLine" in h["file"]]), 0)
         expect("★ 词法反向断言：原始字符串 `\"\"\"` 之后的调用点不得被吞（防错位误报）",

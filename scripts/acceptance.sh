@@ -304,7 +304,9 @@ print(f"  [PASS] 发现 {len(tools)} 个工具，贡献点与配置 schema 均�
 # 写成显式清单而不是 "weight != script and id != probe"：
 # 那种"按排除法"的写法每次新增一个无 schema 的合法工具都会假红一次，
 # 逼着后来的人往条件里再挂一个 `and id != xxx`——清单会烂掉，且没人看得出哪个才是"故意没有"。
-NO_SCHEMA_TOOLS = {"oneshot", "probe", "paneltool"}
+NO_SCHEMA_TOOLS = {"oneshot", "probe", "paneltool", "keepalive", "tasktool"}
+#   keepalive / tasktool 是 C1（2026-09-30 设置面板降噪）删掉的空 config：
+#   解析器容忍缺省 ⇒ configSchema=None 是**故意没有**，与 oneshot 同列。
 bad = [t["id"] for t in tools
        if t["configSchema"] is None
        and t["id"] not in NO_SCHEMA_TOOLS
@@ -312,6 +314,16 @@ bad = [t["id"] for t in tools
 if bad:
     print(f"  [FAIL] 以下工具的 config schema 未解析: {bad}")
     sys.exit(1)
+# C2（2026-09-30）：configHidden 双展示面 —— `list --json` 必须暴露该字段，
+# 且恰好 echo/pinfo 为 true（缺键 = 白名单吞字段家族，RI-3 同款）。
+hidden = sorted(t["id"] for t in tools if t.get("configHidden") is True)
+if "configHidden" not in tools[0]:
+    print("  [FAIL] list --json 未暴露 configHidden 字段（双展示面断裂）")
+    sys.exit(1)
+if hidden != ["echo", "pinfo"]:
+    print(f"  [FAIL] configHidden=true 的工具集漂移: {hidden}（应为 ['echo', 'pinfo']）")
+    sys.exit(1)
+print("  [信息] configHidden 断言通过：echo/pinfo 隐藏，其余字段齐全")
 PY
 if [ $? -eq 0 ]; then pass "清单结构与配置 schema 解析正确"; else fail "清单解析断言未通过"; fi
 
@@ -458,7 +470,15 @@ if [ $? -eq 0 ]; then pass "全部自检用例通过"; else fail "存在失败�
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 names = [c["case"] for c in data["cases"]]
-# 下限：184 = G2 节流参数归位（25.6 搜索窗防抖 30 ms ×1）后
+# 下限：281 = W7-e 频次/别名（36.x ×10）后
+#      （236 = W7-d 单位换算/编码转换（35.x ×18）后
+#      （218 = W7-c 计算器（34.x ×17：算术精确值/幂与一元号/取模 fmod/科学记数/括号/格式化/
+#                            除零/溢出/未定义/语法错+位置/非法字符/两层门槛/长度上限/深度上限/
+#                            结果行构成/注册表/predictor 行为）后
+#      （201 = W7-b 启动器配置/匹配/补发（W7-1~W7-13，+12 后为 200，再 +1 Requery）
+#      （200 = W7-b 启动器配置/匹配（W7-1~W7-12，+12）后
+#      （188 = W7-a 启动器链路（25.x 由 6 → 10 条，+4：代次递增/段序归并/故障隔离/命中映射）后
+#      （184 = G2 节流参数归位（25.6 搜索窗防抖 30 ms ×1）后
 #      （183 = P4 自有子树排除（33.x 锚定/传播/扫描期排除/未锚定/父链锚定/增量补标 ×5）后
 #      （178 = 缺口③ Drain 来源诊断（32.x 取证面 ×4）后（174 = 缺口①②（29.6 泵诊断 ×1
 #       + 31.x 结构化失败卷 ×3）后（170 = W3-c 有界化（29.x 增量补齐有界性 ×5）后（165 = W3-e-3 边界用例后（160 = W3-e-2 卷分类后：
@@ -470,7 +490,7 @@ names = [c["case"] for c in data["cases"]]
 #       + 10 Persister W3-a-4 + 25 W3-b（14 QueryEngine + 11 search.*）
 #       + 11 宿主接线 23.x（自举/热启动/换盘拒载/epoch 校验/ping 真卷）
 #       + 14 USN 同步层 24.x（解析器/应用器/对账判定表/补齐/静态快照）
-#       + 5 搜索会话 25.x（节流合并/过期闸/错误透传/空查询/exe 定位）
+#       + 10 启动器/搜索链路 25.x（节流合并/过期闸/错误分层/空查询/exe 定位/代次递增/段序归并/故障隔离/命中映射）
 #       + 6 资源控制 26.x（后台线程优先级/暂停不消费/恢复补齐/取消退出/协议幂等/暂停不降级查询）
 #       + 6 卷分类 27.x（五分支/计数守恒/文案非空/NTFS 不被跳过/归一排序/自举集成）
 #       + 5 边界 28.x（超长文件名/emoji 代理对/硬链接/符号链接/深层父链）
@@ -478,10 +498,10 @@ names = [c["case"] for c in data["cases"]]
 #       + 3 失败卷结构化 31.x（码映射/枚举失败结构化+守恒/序列号哨兵）
 #       + 4 Drain 来源诊断 32.x（自喂自证/不甩锅/Top-N 有界降序/无名归桶）
 #       + 5 自有子树排除 33.x（锚定+传播/扫描期排除+同名不误排/未锚定不排除/按父链锚定/USN 增量补标）
-#       + 1 G2 节流参数归位 25.6（搜索窗防抖 30 ms < 面板 150 ms，最短间隔在承重）））））））；
+#       + 1 G2 节流参数归位 25.6（搜索窗防抖 30 ms < 面板 150 ms，最短间隔在承重））））））））））））；
 #       低于它说明用例被删
-if len(names) < 184:
-    print(f"  [FAIL] 自检用例数 {len(names)} < 184（有用例被删？）")
+if len(names) < 281:
+    print(f"  [FAIL] 自检用例数 {len(names)} < 281（有用例被删？）")
     sys.exit(1)
 bus = [n for n in names if "事件" in n or "订阅" in n]
 if len(bus) < 4:
@@ -518,8 +538,24 @@ if len(usn) < 14:
     print(f"  [FAIL] USN 同步层 24.x 用例只有 {len(usn)} 条（应 >=14：解析器/复合 reason/三类变更/折叠/TTL/对账判定表/补齐/静态快照/ApplyUsn）")
     sys.exit(1)
 sess = [n for n in names if n.startswith("25.")]
-if len(sess) < 5:
-    print(f"  [FAIL] 搜索会话 25.x 用例只有 {len(sess)} 条（应 >=5：节流合并/过期闸/错误透传/空查询/exe 定位）")
+if len(sess) < 10:
+    print(f"  [FAIL] 启动器/搜索链路 25.x 用例只有 {len(sess)} 条（应 >=10：节流合并/过期闸/错误分层/空查询/exe 定位/代次/段序/故障隔离/映射）")
+    sys.exit(1)
+w7 = [n for n in names if n.startswith("W7-")]
+if len(w7) < 13:
+    print(f"  [FAIL] 启动器配置/匹配 W7-x 用例只有 {len(w7)} 条（应 >=13：providers 解析 8 + 模糊匹配 4 + Requery 1）")
+    sys.exit(1)
+calc = [n for n in names if n.startswith("34.")]
+if len(calc) < 17:
+    print(f"  [FAIL] 计算器 34.x 用例只有 {len(calc)} 条（应 >=17：精确值/幂与一元号/取模/科学记数/括号/格式化/除零/溢出/未定义/语法错/非法字符/两层门槛/长度上限/深度上限/结果行/注册表/provider）")
+    sys.exit(1)
+conv = [n for n in names if n.startswith("35.")]
+if len(conv) < 18:
+    print(f"  [FAIL] 单位换算/编码转换 35.x 用例只有 {len(conv)} 条（应 >=18：长度/重量/数据量两制式/温度仿射/触发词三态/单位记号/无触发词/制式标注/不做清单/分词/base64/URL/Unicode/encode 门槛/非法输入/结果行/注册表/calc 次动作）")
+    sys.exit(1)
+u36 = [n for n in names if n.startswith("36.")]
+if len(u36) < 10:
+    print(f"  [FAIL] 频次/别名 36.x 用例只有 {len(u36)} 条（应 >=10：Boost 单调上限/时间衰减/落盘回读/损坏文件/原子写无残留/开关关/usage 解析/alias 解析/AliasesOf/键格式）")
     sys.exit(1)
 rc = [n for n in names if n.startswith("26.")]
 if len(rc) < 6:
@@ -955,6 +991,102 @@ else
   fail "unset 未回落到默认值"
 fi
 
+# 8.5b 宿主 desktop 节 `launcher.providers`：**两层闭环**（CLI 写入 ↔ 应用解析/告警）。
+#     RI-3 教训：CLI 若按白名单式构造字段，新增键会被静默吞掉 ⇒ 必须"写进去、读回来、逐字比"。
+#     CLI 层管"写进去读得回来"；应用层管"未知值被拒 + 回落默认 + 告警可见"。
+#     应用层观测面 = `--probe-launcher config` 读**真实**配置中心（不是探针自造的假配置）。
+#     ★ CLI 对这个键**不做**取值校验（自由字符串）—— 取值合法性在应用层（LauncherPrefs 白名单），
+#       这是刻意的分工，不是缺验。
+LAUNCHER_DESK="$REPO/src/Eztools.Desktop/bin/Debug/net10.0-windows10.0.19041.0/Eztools.Desktop.exe"
+LAUNCHER_CFG_OUT="$WORK/desktop-launcher-cfg.json"
+V5="files,apps,calc,unit,encode"
+
+launcher_cfg_read() {
+  rm -f "$LAUNCHER_CFG_OUT"
+  "$LAUNCHER_DESK" --probe-launcher config --no-prompt --out "$LAUNCHER_CFG_OUT" \
+    --tools-dir "$REPO/tools" --install-root "$REPO" --config-root "$WORK/config" >/dev/null 2>&1
+  "$PY" - "$LAUNCHER_CFG_OUT" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))["config"]
+sys.stdout.write(
+    ",".join(d["providers"])
+    + "|" + ("Y" if d["hasError"] else "N")
+    + "|" + ("Y" if d["hasWarning"] else "N")
+    # W7-e：usage 开关与别名表的解析观测（两层闭环的应用层）
+    + "|" + ("Y" if d.get("usageEnabled") else "N")
+    + "|" + str(d.get("aliasCount", -1))
+    + "|" + ("Y" if d.get("hasAliasError") else "N"))
+PY
+}
+
+"$EZ" config set desktop launcher.providers "$V5" >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|Y|0|N" ]; then
+  pass "launcher.providers 五来源 CLI 写入 → 应用原样解析（CLI 没吞字段）；usage 默认开、别名默认空"
+else
+  fail "launcher.providers 两层闭环（合法值）不符: $R"
+fi
+
+"$EZ" config set desktop launcher.providers "files,foo" >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|Y|Y|Y|0|N" ]; then
+  pass "未知 provider 被拒（错误落盘）+ 回落默认 + 告警可见"
+else
+  fail "launcher.providers 两层闭环（未知值）不符: $R"
+fi
+
+"$EZ" config set desktop launcher.providers "   " >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|Y|Y|Y|0|N" ]; then
+  pass "空串被拒（拒绝「一个来源都不启用」）+ 回落默认 + 告警可见"
+else
+  fail "launcher.providers 两层闭环（空串）不符: $R"
+fi
+
+"$EZ" config unset desktop launcher.providers >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|Y|0|N" ]; then
+  pass "unset 后回落 schema 默认值（= 全部已实现来源）且无告警"
+else
+  fail "launcher.providers 两层闭环（unset）不符: $R"
+fi
+
+# 8.5c 宿主 desktop 节 `launcher.usage` / `launcher.alias`（W7-e）：**两层闭环**。
+#     开关关 ⇒ 应用层解析出 usageEnabled=false；别名合法 ⇒ aliasCount=1；
+#     别名缺等号 ⇒ aliasError 可见（回落空表）；unset ⇒ 全部回默认。
+"$EZ" config set desktop launcher.usage "false" >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|N|0|N" ]; then
+  pass "launcher.usage=false CLI 写入 → 应用解析出关闭（两层闭环）"
+else
+  fail "launcher.usage 两层闭环（false）不符: $R"
+fi
+
+"$EZ" config unset desktop launcher.usage >/dev/null 2>&1
+"$EZ" config set desktop launcher.alias "np=记事本" >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|Y|1|N" ]; then
+  pass "launcher.alias 合法条目 → 应用解析出 1 条（np=>记事本）"
+else
+  fail "launcher.alias 两层闭环（合法）不符: $R"
+fi
+
+"$EZ" config set desktop launcher.alias "没有等号" >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|Y|0|Y" ]; then
+  pass "launcher.alias 缺等号 → 应用层明确拒绝（回落空表 + 错误可见，不静默）"
+else
+  fail "launcher.alias 两层闭环（非法）不符: $R"
+fi
+
+"$EZ" config unset desktop launcher.alias >/dev/null 2>&1
+R=$(launcher_cfg_read)
+if [ "$R" = "$V5|N|N|Y|0|N" ]; then
+  pass "launcher.alias unset → 回落空表且无错误"
+else
+  fail "launcher.alias 两层闭环（unset）不符: $R"
+fi
+
 # 8.6 配置文件被手工改坏 → 不崩、不覆盖、留备份、用默认值继续。
 #     ⚠️ 这里不用 `ls | grep -q`：grep -q 命中即退出会让上游收 SIGPIPE，
 #     在 set -o pipefail 下整条管道被判为失败（结论与事实相反）。用 wc 计数。
@@ -1152,7 +1284,7 @@ source "$REPO/scripts/_step17_ocr.sh"
 source "$REPO/scripts/_step18_clip.sh"
 
 # 代码审查红线静态守卫（空 catch / 字符串 switch 缺 default / 验收脚本禁用模式 /
-#   幽灵代码候选 / 死产物目录）+ 元断言（--selftest 双向突变验证、豁免落数字）
+#   幽灵代码候选 / 死产物目录 / 跳过必须计数 / 分层守卫）+ 元断言（--selftest 双向突变验证、豁免落数字）
 source "$REPO/scripts/_step19_review_guards.sh"
 
 echo "=================================================================="

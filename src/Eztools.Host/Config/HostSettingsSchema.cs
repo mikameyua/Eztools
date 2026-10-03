@@ -39,6 +39,20 @@ public static class HostSettingsSchema
     public const string KeyCaptureHotkey = "capture.hotkey";
     public const string KeyPickHotkey = "pick.hotkey";
     public const string KeyColorFormat = "color.format";
+    public const string KeyLauncherProviders = "launcher.providers";
+    public const string KeyLauncherUsage = "launcher.usage";
+    public const string KeyLauncherAlias = "launcher.alias";
+
+    /// <summary>
+    /// 启动器结果来源的默认值（W7-b）。
+    ///
+    /// <para><b>★ 必须与 <c>LauncherProviderRegistry.DefaultEnabled</c> 一致</b>（把当前**已实现**的
+    /// provider 全列上）。两处同值是刻意的重复 —— schema 是字符串字面量而注册表是代码常量，
+    /// 无法在编译期合一；改成字面量 + **selftest 交叉断言**（`LauncherPrefs.Parse(默认值).Error == null`
+    /// 且集合 == `KnownIds`）比"在 schema 里插值"更稳：漏改会在验收当场变红，而不是留下一个
+    /// "默认配置本身非法"的活雷。</para>
+    /// </summary>
+    public const string DefaultLauncherProviders = "files,apps,calc,unit,encode";
 
     /// <summary>剪贴板历史上限默认值（FR-4；可配 100~50000，schema 校验）。</summary>
     public const int DefaultClipMaxItems = 1000;
@@ -87,70 +101,80 @@ public static class HostSettingsSchema
               "title": "搜索文件热键",
               "description": "唤出搜索窗的全局热键，格式如 Ctrl+Alt+S。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+S",
-              "x-order": 1
+              "x-order": 1,
+              "x-group": "搜索"
             },
             "ocr.hotkey": {
               "type": "string",
               "title": "屏幕取字热键",
               "description": "唤出屏幕取字（OCR 框选）遮罩的全局热键，格式如 Ctrl+Alt+O。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+O",
-              "x-order": 2
+              "x-order": 2,
+              "x-group": "屏幕取字"
             },
             "ocr.language": {
               "type": "string",
               "title": "OCR 识别语言",
               "description": "BCP-47 标签（如 zh-Hans-CN / en-US），留空 = 自动（跟随系统首选语言）。可用清单跑 `ezt ocr langs` 查看；配置了未安装的语言时唤出会明确报错，不会静默回落。",
               "default": "",
-              "x-order": 3
+              "x-order": 3,
+              "x-group": "屏幕取字"
             },
             "clip.enabled": {
               "type": "boolean",
               "title": "剪贴板历史总开关",
               "description": "关闭后：不监听剪贴板、不注册面板热键、托盘菜单隐藏（已有历史保留在库里不删除）。",
               "default": true,
-              "x-order": 4
+              "x-order": 4,
+              "x-group": "剪贴板历史"
             },
             "clip.hotkey": {
               "type": "string",
               "title": "剪贴板历史热键",
               "description": "唤出剪贴板历史面板的全局热键，格式如 Ctrl+Alt+V（刻意避开 Win+V / Win+Shift+V）。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+V",
-              "x-order": 5
+              "x-order": 5,
+              "x-group": "剪贴板历史"
             },
             "clip.max-items": {
               "type": "integer",
               "title": "历史上限（条）",
               "description": "超出后自动删除最旧的未置顶条目（置顶条目永不删除）。范围 100~50000。",
               "default": 1000,
-              "x-order": 6
+              "x-order": 6,
+              "x-group": "剪贴板历史"
             },
             "clip.image-retention-days": {
               "type": "integer",
               "title": "图片保留天数",
               "description": "图片条目超过该天数自动清理（置顶豁免）；文本/文件条目只受条数上限管。",
               "default": 30,
-              "x-order": 7
+              "x-order": 7,
+              "x-group": "剪贴板历史"
             },
             "clip.blacklist": {
               "type": "string",
               "title": "隐私黑名单（进程名）",
               "description": "这些进程里复制的内容不入库。分号分隔进程名（如 1password.exe;Bitwarden;keepassxc.exe），.exe 后缀可省略。",
               "default": "",
-              "x-order": 8
+              "x-order": 8,
+              "x-group": "剪贴板历史"
             },
             "capture.hotkey": {
               "type": "string",
               "title": "区域截图热键",
               "description": "唤出区域截图遮罩的全局热键，格式如 Ctrl+Alt+X。拖拽框选，松开鼠标即把所选区域位图复制进剪贴板。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+X",
-              "x-order": 9
+              "x-order": 9,
+              "x-group": "截图与取色"
             },
             "pick.hotkey": {
               "type": "string",
               "title": "屏幕取色热键",
               "description": "唤出屏幕取色遮罩的全局热键，格式如 Ctrl+Alt+C。移动放大镜预览，左键单击即复制色值。保存后立即生效（自动重注册）；被其它程序占用时会气泡提示。",
               "default": "Ctrl+Alt+C",
-              "x-order": 10
+              "x-order": 10,
+              "x-group": "截图与取色"
             },
             "color.format": {
               "type": "string",
@@ -158,7 +182,32 @@ public static class HostSettingsSchema
               "title": "取色色值格式",
               "description": "单击取色后复制进剪贴板的色值格式：hex = #rrggbb，rgb = rgb(r, g, b)，hsl = hsl(h, s%, l%)。下次唤出取色时生效。",
               "default": "hex",
-              "x-order": 11
+              "x-order": 11,
+              "x-group": "截图与取色"
+            },
+            "launcher.providers": {
+              "type": "string",
+              "title": "启动器结果来源",
+              "description": "逗号分隔的结果来源：files = 文件搜索、apps = 应用启动（开始菜单/桌面快捷键/App Paths）、calc = 计算器（输入算式直接出结果）、unit = 单位换算（如 10km to mi）、encode = 编码转换（前缀 b64: / b64d: / url: / urld: / u: / ud:）。★ 文案只列**已实现**的来源：未实现的取值会被明确拒绝（不静默忽略），在描述里预先许愿会让用户得到「配置里写了、功能却不存在」。保存后下次唤出搜索窗生效。",
+              "default": "files,apps,calc,unit,encode",
+              "x-order": 12,
+              "x-group": "搜索"
+            },
+            "launcher.usage": {
+              "type": "boolean",
+              "title": "启动器频次记忆",
+              "description": "记住你常启动的应用，把它的排序提前（只作用于应用结果）。关闭后完全不读也不写（已有记录保留在文件里，重新打开即恢复）。",
+              "default": true,
+              "x-order": 13,
+              "x-group": "搜索"
+            },
+            "launcher.alias": {
+              "type": "string",
+              "title": "启动器应用别名",
+              "description": "给应用起小名：格式「别名=应用标题或路径」，分号分隔多个（如 notepad=记事本）。输入别名即可命中该应用并获得排序加成。写错的条目会被明确拒绝（不静默忽略）。",
+              "default": "",
+              "x-order": 14,
+              "x-group": "搜索"
             }
           }
         }

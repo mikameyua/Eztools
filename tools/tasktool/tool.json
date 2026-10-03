@@ -20,9 +20,5 @@
         "description": "写标记文件（EZTOOLS_TASKTOOL_MARKER 指定路径），证明启动钩子执行过"
       }
     ]
-  },
-  "config": {
-    "type": "object",
-    "properties": {}
   }
 }

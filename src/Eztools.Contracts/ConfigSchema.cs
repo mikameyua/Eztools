@@ -52,6 +52,19 @@ public sealed class ConfigField
     /// <summary>`x-order`：设置页里的排序权重，越小越靠前。</summary>
     public int SortOrder { get; init; }
 
+    /// <summary>
+    /// `x-group`：设置页里的功能域组名（方案 B，2026-09-30）。
+    /// null = 不分组（渲染在无组区）。设置窗口按它把宿主节 11 字段切成功能域子页；
+    /// 它只是**展示层元数据**，ConfigStore 校验与 CLI 完全不消费。
+    /// </summary>
+    public string? Group { get; init; }
+
+    /// <summary>
+    /// `x-advanced`：技术参数标记（方案 C5）——渲染为默认折叠的「高级」Expander，
+    /// 与用户决策类选项分层。同样是展示层元数据，校验/CLI 不消费。
+    /// </summary>
+    public bool IsAdvanced { get; init; }
+
     /// <summary>`x-secret`：标记敏感值。**P1a 只识别不处理**（加密留给 P1b，那时才有 UI）。</summary>
     public bool IsSecret { get; init; }
 
@@ -160,6 +173,10 @@ public sealed class ConfigSchema
             Maximum = AsDouble(spec["maximum"]),
             Format = spec["format"]?.GetValue<string>(),
             SortOrder = sortOrder,
+            Group = spec["x-group"] is JsonValue gv && gv.TryGetValue(out string? groupName)
+                ? groupName
+                : null,
+            IsAdvanced = spec["x-advanced"] is JsonValue adv && adv.TryGetValue(out bool isAdv) && isAdv,
             IsSecret = spec["x-secret"] is JsonValue sv && sv.TryGetValue(out bool secret) && secret,
             ItemType = spec["items"] is JsonObject items
                 ? ParseType(items["type"]?.GetValue<string>())

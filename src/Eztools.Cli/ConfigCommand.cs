@@ -440,6 +440,10 @@ internal static class ConfigCommand
                 ["format"] = field.Format,
                 ["minimum"] = field.Minimum,
                 ["maximum"] = field.Maximum,
+                // C3（2026-09-30）：x-group / x-advanced 进 CLI 展示面 —— 与设置窗口渲染
+                // 同源可见（1.8 双展示面纪律：模型新增字段必须显式暴露或显式决策不暴露）。
+                ["group"] = field.Group,
+                ["isAdvanced"] = field.IsAdvanced,
             });
         }
 

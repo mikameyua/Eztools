@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
+using Eztools.Host.Launcher;
 using Eztools.Host.Search;
 
 namespace Eztools.Desktop;
@@ -246,7 +247,11 @@ internal static class SearchUiProbe
     public static JsonObject Run()
     {
         var transport = new ProbeSearchUiTransport();
-        var window = new SearchWindow(new SearchIndexClient(transport))
+        // ★ W7-a 探针装配纪律（设计方案 §5）：显式传"仅 files"集合 —— 探针断言**一行不改**，
+        //   只换装配参数。真机上开始菜单可能含中文名应用，放进 apps provider 会让
+        //   `itemsCount == 200` 这类断言被环境命中打破（假红，与"墙钟断言配置感知"同族）。
+        var client = new SearchIndexClient(transport);
+        var window = new SearchWindow(client, LauncherProviderSet.FilesOnly(client))
         {
             ProbeSuppressDrift = true,   // 假传输卷清单 vs 真实盘符 → 环境依赖提示；drift 由纯函数直测断言
         };
@@ -256,7 +261,7 @@ internal static class SearchUiProbe
             // 真窗口、屏幕外、不抢焦点（虚拟化需要呈现源建立的真实视口）
             window.ShowForProbe();
 
-            // 真链路：TextChanged → SearchSession（节流 + 单在途 + 过期闸）→ OnResults → 渲染。
+            // 真链路：TextChanged → QueryRouter（节流 + 单在途 + 代次闸）→ OnRender → 渲染。
             // 同时等卷清单行落地（走真 search.status 协议，见 ProbeSearchUiTransport）。
             window.SubmitForProbe("报");
             PumpUntil(

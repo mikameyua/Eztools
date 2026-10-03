@@ -12,7 +12,7 @@ using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Threading;
-using Eztools.Contracts;
+using Eztools.Host.Launcher;
 using Eztools.Host.Search;
 using InputCmd = Eztools.Desktop.NativeInputBox.InputCommand;
 
@@ -28,7 +28,13 @@ namespace Eztools.Desktop;
 /// 匹配、打分、高亮区间**全部由索引进程回传**（<see cref="SearchHitDto.Highlights"/>，
 /// UTF-16 code unit 口径），本窗口只做渲染 —— Run 分段着色按回传区间切，不重算匹配位置。
 ///
-/// <b>线程模型</b>：查询回调在线程池线程上到（<see cref="SearchSession"/> 不 marshal），
+/// <b>W7-a 起本条链路多了一跳</b>：`TextChanged → QueryRouter（扇出 provider + 归并 + 代次闸）
+/// → LauncherRenderModel → 渲染`。files 段的结果逐字段映射回 <see cref="SearchHitDto"/>
+/// （装在 <see cref="LauncherItem.FileHit"/> 里），渲染仍走**既有的** <see cref="HitText"/>
+/// —— 这就是"文件项渲染零变化"（设计方案 FR-10）的实现手段。**文件项的 `Children[0]` 必须
+/// 仍然是名字 TextBlock**（探针的 <c>firstSegments</c> 读它）：给文件项加徽标/图标会毁掉这条证据。
+///
+/// <b>线程模型</b>：查询回调在线程池线程上到（<see cref="QueryRouter"/> 不 marshal），
 /// 必须 <see cref="System.Windows.Threading.Dispatcher"/> 回 UI 线程再碰控件；BeginInvoke 是
 /// 非阻塞投递，不会形成"UI 等 UI"死锁环（托盘气泡的教训只适用于"同步等待"，两处条件不同）。
 ///
@@ -57,8 +63,16 @@ public sealed class SearchWindow : Window
         </ControlTemplate>
         """;
 
-    private readonly SearchSession _session;
+    private readonly QueryRouter _router;
     private readonly SearchIndexClient _client;
+
+    /// <summary>
+    /// 核心服务可达性来源（W8·B1）。与 files provider 用的是**同一个探测实例**
+    /// （见 TrayApplication 装配）—— 两处各探一次会得到两个时间点的结论，
+    /// 状态行与卷清单行就可能互相矛盾。
+    /// 未注入（探针路径）⇒ <see cref="CoreAvailability.Unknown"/> ⇒ 两个显示面都退化为既有文案。
+    /// </summary>
+    private readonly Func<CoreAvailability> _coreAvailability;
 
     private readonly NativeInputBox _input;
     private readonly ListBox _results;
@@ -67,19 +81,68 @@ public sealed class SearchWindow : Window
     private readonly TextBlock _volumesLine;
 
     private bool _suppressQueryEvents;   // 程序化设值不得反过来触发查询（21.6 同族）
-    private bool _sessionDisposed;
+    private bool _disposed;              // 会话已释放（原 _sessionDisposed）
     private bool _pauseBusy;             // 暂停/恢复往返中（防连点发出并发请求）
     private bool _realClose;             // 仅托盘退出/探针收尾置位：绕过"X=隐藏"拦截真关闭
+    private bool _launchBusy;            // 启动核心服务往返中（防连点弹出多个 UAC 框）
+    private bool _statusLaunchable;      // 状态行当前是否为可点出口（W8·B1）
 
     // ── 渲染观测（W3-d-2 断言面：--probe-search-ui 读这些值落盘）──
-    private SearchQueryResponse? _lastResponse;
     private double _lastBuildMs;
     private double _lastRenderMs;
 
-    public SearchWindow(SearchIndexClient client)
+    /// <summary>最近一次渲染所用的查询文本（延迟就绪补发的"文本未变"判据）。</summary>
+    private string _lastRenderedQuery = "";
+
+    /// <summary>
+    /// 配置告警文案的**单点出处**。null = 没有要报的（正常运行态）。
+    ///
+    /// <para><b>为什么抽成纯函数</b>：托盘装配与探针都必须从这里取 —— 两处各写一份，
+    /// 早晚漂移成两种说法（而"配置无效"这句是用户唯一能看到的解释）。
+    /// 探针据此断言"有错 ⇒ 有告警、无错 ⇒ 无告警"，把 W7-b 的 `startupWarning` 接线钉在机器上。</para>
+    /// </summary>
+    internal static string? StartupWarningFor(string? configError) =>
+        configError is null ? null : $"启动器配置无效（已回落默认来源）：{configError}";
+
+    /// <summary>配置告警文案（非空 ⇒ 首次显示时报一次；见 <see cref="ShowStartupWarningOnce"/>）。</summary>
+    private readonly string? _startupWarning;
+
+    private bool _startupWarningShown;
+
+    /// <param name="client">索引客户端（files provider 的唯一数据来源）。</param>
+    /// <param name="providers">
+    /// 结果来源集合（W7-a）。**生产与探针走同一个装配入口**：探针显式传
+    /// <see cref="LauncherProviderSet.FilesOnly"/> —— 真机上开始菜单可能含中文名应用，
+    /// 探针若放进 apps provider，<c>itemsCount == 200</c> 这类断言会被环境命中打破（假红）。
+    /// </param>
+    /// <param name="startupWarning">
+    /// 启动期配置告警（如 <c>launcher.providers</c> 非法已回落默认）。非空 ⇒ **首次唤出时**在状态行
+    /// 报一次（设计方案 §5 的可见出口）。探针传 null ⇒ 与 W7 之前逐字一致（FR-10）。
+    /// </param>
+    /// <param name="coreAvailability">
+    /// 核心服务可达性（W8·B1）。用于把"索引未就绪"的两个显示面分流成三态
+    /// （真在建 / 核心服务未运行 / 未提权）。**必须与 files provider 用同一个探测实例**。
+    /// 不传 ⇒ <see cref="CoreAvailability.Unknown"/> ⇒ 两个显示面都退化为既有文案（探针路径）。
+    /// </param>
+    public SearchWindow(
+        SearchIndexClient client,
+        IReadOnlyList<ILauncherProvider> providers,
+        string? startupWarning = null,
+        Func<CoreAvailability>? coreAvailability = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
-        _session = new SearchSession(client, schedule: ScheduleThrottleFire);
+        _startupWarning = startupWarning;
+        _coreAvailability = coreAvailability ?? (static () => CoreAvailability.Unknown);
+        _router = new QueryRouter(providers, schedule: ScheduleThrottleFire);
+
+        // W7-b：延迟就绪的来源（apps 首扫）完成后补发一次 —— 否则用户要再敲一个字符才看见应用结果（R10）
+        foreach (var provider in providers)
+        {
+            if (provider is ILauncherReadyNotifier notifier)
+            {
+                notifier.BecameReady += OnProviderBecameReady;
+            }
+        }
 
         Title = "Eztools 搜索";
         Width = 660;
@@ -101,7 +164,7 @@ public sealed class SearchWindow : Window
         {
             if (!_suppressQueryEvents)
             {
-                _session.Submit(_input.Text);
+                _router.Submit(_input.Text);
             }
         };
         _input.Command = OnInputCommand;
@@ -110,7 +173,10 @@ public sealed class SearchWindow : Window
         {
             Margin = new Thickness(12, 0, 12, 6),
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            ItemTemplate = MakeHitTemplate(),
+            // W7-b：模板按来源分流 —— 文件走既有 HitText（零改动），其余走 LauncherRowText。
+            // ★ 用 ItemTemplateSelector 而不是 ItemTemplate：分流是结构性的（Kind + FileHit 是否非空），
+            //   写成单个模板要在里面塞条件分支，而 FEF 构造的模板不方便多分支。
+            ItemTemplateSelector = LauncherRowTemplateSelector.Instance,
         };
 
         // ★ 焦点常驻输入框（Everything 模式）⇒ 列表必然失焦，默认"失焦选中色"太淡看不见
@@ -152,6 +218,11 @@ public sealed class SearchWindow : Window
             Text = "输入以搜索（Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径）",
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
+        // W8·B1：状态行在"核心服务不可达"时是可点出口（正常态下 _statusLaunchable=false，点了没反应）。
+        // ★ 出口态是**显式**开启的：每条改 _status.Text 的路径都要自己决定，默认不可点 ——
+        //   否则"文案已换成提示语、可点性还留着"会造出一个点了会启动进程的假提示。
+        //   （TextBlock 没有 TextChanged 事件可挂，所以这里只能靠各处显式声明 + 探针断言兜住。）
+        _status.MouseLeftButtonUp += (_, _) => OnStatusClick();
         _statusRight = new TextBlock
         {
             FontSize = 11,
@@ -223,14 +294,19 @@ public sealed class SearchWindow : Window
         //   文本栈不再参与，观测前提消失。若真机上仍出现吞键（DiagPath 里 KEY 行缺失可判），
         //   再按"单入口 + 去重闸"的方式补一条定向兜底 —— 而不是先把兜底堆回去。
 
-        _session.OnResults = response =>
+        _router.OnRender = model =>
         {
             // 线程池回调 → 回 UI 线程（非阻塞投递，见类头线程模型）
-            _ = Dispatcher.BeginInvoke(() => RenderResults(response));
+            _ = Dispatcher.BeginInvoke(() => RenderResults(model));
         };
-        _session.OnError = ex =>
+        _router.OnError = error =>
         {
-            _ = Dispatcher.BeginInvoke(() => RenderError(ex));
+            // 批次级失败（provider 级失败走模型里的 Errors，不从这里过）
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                SetStatusLaunchable(false);
+                _status.Text = error.UserText;
+            });
         };
 
         Closed += (_, _) => DisposeSession();
@@ -255,6 +331,7 @@ public sealed class SearchWindow : Window
             _input.SelectAll();
             RestoreImeAssociation();  // ★ 抢焦点副作用修复：见方法注释（英文直通字符不进框）
             RefreshVolumeSummary();   // ★ 每次唤出都重拉：首帧可能撞上自举未完成（否则停在旧快照）
+            ShowStartupWarningOnce(); // ★ 启动期配置告警的可见出口（只报一次，见方法注释）
 
             // ★ 前台完全建立后再钉一次焦点：ForceForeground 的激活消息可能在 Summon 返回、
             //   消息泵恢复后才落地；Win32 焦点真正落位后再 Focus 一次，双保险。
@@ -273,6 +350,26 @@ public sealed class SearchWindow : Window
     }
 
     private bool _summoning;
+
+    /// <summary>
+    /// 首次显示时把"启动期配置告警"投到状态行（设计方案 §5：非法配置必须可见，且**出口必须可达**）。
+    ///
+    /// <para><b>为什么不能只写日志</b>：`launcher.providers` 写错 ⇒ 用户看到的现象是"某个来源没了"，
+    /// 而日志对普通用户不可达（审查规范 §3.3⑤：先问"写到哪、谁收得到"）。状态行是用户**正在看**的
+    /// 地方，所以这里补一次；**只报一次** —— 之后的查询结果正常覆盖它，不形成常驻噪音。</para>
+    /// </summary>
+    private void ShowStartupWarningOnce()
+    {
+        if (_startupWarning is null || _startupWarningShown)
+        {
+            return;
+        }
+
+        _startupWarningShown = true;
+        SetStatusLaunchable(false);
+        _status.Text = _startupWarning;
+        _statusRight.Text = "";
+    }
 
     /// <summary>
     /// 强制本窗口到前台并拿到键盘焦点（**三级降级**，2026-09-25 手工实测迭代）。
@@ -492,6 +589,23 @@ public sealed class SearchWindow : Window
         KnownPaused = status.Paused;
         if (!status.Ready)
         {
+            // ★ W8·B1：未就绪有两种成因，必须分开说 —— 否则用户对着"后台自举进行中"
+            //   等一个永远不会来的结果（核心服务缺席时索引自举必然失败且不重试）。
+            var availability = _coreAvailability();
+            if (availability is CoreAvailability.CoreNotRunning or CoreAvailability.CoreNotElevated)
+            {
+                _volumesLine.Text = availability == CoreAvailability.CoreNotRunning
+                    ? "索引不可用：核心服务未运行（点上方状态行启动）"
+                    : "索引不可用：核心服务未提权（点上方状态行以管理员身份重启）";
+                _volumesLine.Opacity = 1.0;
+                _volumesLine.Cursor = Cursors.Arrow;
+                _volumesLine.ToolTip = null;   // 动作入口归上方状态行，这一行不再兼任（避免两个出口说两套话）
+
+                // ★ 不排轮询：核心服务没起来时索引状态**永远不会变好** ——
+                //   500 ms 一次只会制造"正在努力"的假象（而"看起来在转"正是本缺陷的一部分）。
+                return;
+            }
+
             _volumesLine.Text = "索引准备中…（后台自举进行中，结果暂不可搜）";
             ScheduleVolumePoll();
             return;
@@ -596,6 +710,97 @@ public sealed class SearchWindow : Window
         });
     }
 
+    // ── W8·B1：核心服务不可达时的可点出口 ───────────────────────────────────
+
+    /// <summary>
+    /// 点击"启动核心服务"出口时的宿主动作。**由托盘注入**：启动 + 重建窗口是宿主级编排
+    /// （要过 UAC、要让索引进程重新自举），窗口只负责"显示出口 + 回显结果"。
+    /// 未注入 ⇒ 状态行不做成可点（探针路径就是这样，见 RenderResults ②）。
+    /// </summary>
+    internal Func<Task<(CoreLaunchOutcome Outcome, string Message)>>? CoreLaunchRequested { get; set; }
+
+    /// <summary>状态行当前是否可点（探针断言面 —— 与 <see cref="ProbeVolumesLineClickable"/> 同族）。</summary>
+    internal bool ProbeStatusLaunchable => _statusLaunchable;
+
+    /// <summary>
+    /// 探针：模拟点击状态行出口。验的是"出口真的接到了宿主动作"——
+    /// 但注入的宿主动作是探针自己给的假实现（不会启动任何进程、不会弹 UAC）。
+    /// </summary>
+    internal void ProbeInvokeStatusClick() => OnStatusClick();
+
+    private void OnStatusClick()
+    {
+        if (_launchBusy || !_statusLaunchable || CoreLaunchRequested is null)
+        {
+            return;
+        }
+
+        _ = LaunchCoreAsync();
+    }
+
+    /// <summary>
+    /// 启动核心服务（W8·B1）。**失败也要把出口留着** —— 用户取消一次 UAC 之后按钮就消失的话，
+    /// 他只能去命令行解决，而那条路正是这个修复想替他省掉的。
+    /// </summary>
+    private async Task LaunchCoreAsync()
+    {
+        if (_launchBusy || CoreLaunchRequested is null)
+        {
+            return;
+        }
+
+        _launchBusy = true;
+        try
+        {
+            // ★ 先给即时反馈再等：UAC 弹窗可能 1~2 秒才出现，或被别的窗口遮住 ——
+            //   没有反馈用户会连点，进而可能弹出多个 UAC 框。
+            SetStatusLaunchable(false);
+            _status.Text = "正在启动核心服务（请在系统弹窗中允许）…";
+
+            var (outcome, message) = await CoreLaunchRequested().ConfigureAwait(true);
+
+            // ★ 成功路径会在回调里**重建窗口** ⇒ 本实例已被关闭（DisposeSession 已跑过）。
+            //   往废弃窗口上写字没有意义，也会给事后调试留假证据。
+            if (_disposed)
+            {
+                return;
+            }
+
+            _status.Text = message;
+
+            if (outcome is CoreLaunchOutcome.Launched or CoreLaunchOutcome.AlreadyRunning)
+            {
+                // 成功 ⇒ 托盘随即重建窗口（顺带重启索引进程 ⇒ 重新自举），这里不再轮询。
+                _statusRight.Text = "";
+            }
+            else
+            {
+                SetStatusLaunchable(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"启动核心服务失败：{ex.Message}";
+            SetStatusLaunchable(true);
+        }
+        finally
+        {
+            _launchBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 状态行的"可点"外观开关。**可点性必须看得见** —— 只改文字的话用户不知道该点哪里；
+    /// 手型光标 + 悬停提示是最低成本的可发现性（而文案里的"点此启动"已在文字层说清了）。
+    /// </summary>
+    private void SetStatusLaunchable(bool on)
+    {
+        _statusLaunchable = on;
+        _status.Cursor = on ? Cursors.Hand : Cursors.Arrow;
+        _status.ToolTip = on ? "点击启动核心服务（会弹出系统授权窗口）" : null;
+        _status.Opacity = on ? 0.9 : 0.65;
+    }
+
     /// <summary>
     /// 点卷清单行 = 恢复索引（**只在暂停时可点**）。
     /// 刻意不做"未暂停时点击即暂停"：那会让误点变成一个**静默**的停更操作 ——
@@ -628,6 +833,7 @@ public sealed class SearchWindow : Window
 
             await Dispatcher.BeginInvoke(() =>
             {
+                SetStatusLaunchable(false);
                 _status.Text = now
                     ? "索引更新已暂停（结果可能过时；点底部状态行或托盘菜单可恢复）"
                     : "索引更新已恢复";
@@ -636,7 +842,11 @@ public sealed class SearchWindow : Window
         }
         catch (Exception ex)
         {
-            await Dispatcher.BeginInvoke(() => _status.Text = $"{(pause ? "暂停" : "恢复")}索引失败：{ex.Message}");
+            await Dispatcher.BeginInvoke(() =>
+            {
+                SetStatusLaunchable(false);
+                _status.Text = $"{(pause ? "暂停" : "恢复")}索引失败：{ex.Message}";
+            });
         }
         finally
         {
@@ -737,15 +947,32 @@ public sealed class SearchWindow : Window
 
             // Ctrl+C：只在"有选中结果"时接管（复制路径）；否则返回 false，
             // 让原生控件执行普通的"复制我选中的文字"。
-            case InputCmd.CtrlC when SelectedHit() is { } copyHit:
+            case InputCmd.CtrlC when SelectedItem() is { } copyItem:
+                // 复制内容按来源取（设计方案 §4.2 动作矩阵）：
+                //   文件 ⇒ 索引回传的**全路径**（与 W7 之前逐字相同）
+                //   应用 ⇒ 目标全路径（快捷方式/exe 自身）
+                //   其余 ⇒ 结果值（主行即结果，副行是"原式 = 结果"的说明，不该被复制走）
+                var copyText = copyItem.Kind switch
+                {
+                    LauncherKind.File => copyItem.FileHit?.Path ?? copyItem.Subtitle,
+                    LauncherKind.App => copyItem.Subtitle,
+                    _ => copyItem.Title,
+                };
+
                 try
                 {
-                    Clipboard.SetText(copyHit.Path);
-                    _status.Text = $"已复制路径：{copyHit.Path}";
+                    Clipboard.SetText(copyText);
+                    // 文件项的文案**逐字保留**（既有断言面）；其余来源说"已复制"更诚实
+                    //（对计算结果说"已复制路径"是错的 —— 它没有路径）
+                    SetStatusLaunchable(false);
+                    _status.Text = copyItem.Kind == LauncherKind.File
+                        ? $"已复制路径：{copyText}"
+                        : $"已复制：{copyText}";
                 }
                 catch (Exception ex)
                 {
                     // 剪贴板被其它进程占用是真实场景（尤其远程桌面），明示而非静默
+                    SetStatusLaunchable(false);
                     _status.Text = $"复制失败：{ex.Message}";
                 }
 
@@ -767,13 +994,13 @@ public sealed class SearchWindow : Window
         LogInputDiag("NAV", $"sel={target}");
     }
 
-    private SearchHitDto? SelectedHit() => _results.SelectedItem as SearchHitDto;
+    private LauncherItem? SelectedItem() => _results.SelectedItem as LauncherItem;
 
     /// <summary>
     /// Enter / Ctrl+Enter 的动作：选中项优先，无选中项取第一条（打完字直接回车是最高频路径）。
-    /// <paramref name="reveal"/>=true 走资源管理器定位，false 走打开 —— 这个分流**由输入框
-    /// 上报的命令直接给出**（Enter vs Ctrl+Enter），不再靠"读 Keyboard.Modifiers 猜"：
-    /// 原生控件在子窗口里，WPF 的 Keyboard.Modifiers 未必反映真实修饰键状态。
+    /// <paramref name="reveal"/>=true 走次动作（资源管理器定位），false 走主动作（打开）——
+    /// 这个分流**由输入框上报的命令直接给出**（Enter vs Ctrl+Enter），不再靠"读
+    /// Keyboard.Modifiers 猜"：原生控件在子窗口里，WPF 的 Keyboard.Modifiers 未必反映真实修饰键状态。
     /// </summary>
     private void OpenFirstOrSelected(bool reveal)
     {
@@ -783,80 +1010,155 @@ public sealed class SearchWindow : Window
             return;
         }
 
-        var hit = SelectedHit() ?? _results.Items[0] as SearchHitDto;
-        if (hit is null)
+        var item = SelectedItem() ?? _results.Items[0] as LauncherItem;
+        if (item is null)
         {
-            LogInputDiag("OPEN", "skip: hit null");
+            LogInputDiag("OPEN", "skip: item null");
             return;
         }
 
-        LogInputDiag("OPEN", $"hit={hit.Path} reveal={reveal}");
-        if (reveal)
-        {
-            RevealInExplorer(hit);
-        }
-        else
-        {
-            OpenFile(hit);
-        }
+        var action = reveal ? item.SecondaryAction ?? item.PrimaryAction : item.PrimaryAction;
+        LogInputDiag("OPEN", $"kind={item.Kind} arg={action?.Argument} reveal={reveal}");
+        ExecuteAction(action, item);
     }
 
     // ── 动作（打开 / 定位 / 复制）─────────────────────────────────────────
 
-    private void OpenFile(SearchHitDto hit)
+    // ── 动作（打开 / 定位 / 启动 / 复制）────────────────────────────────────
+    //
+    // 实现已搬到 LauncherActionRunner（W7-b：动作从 2 种变成 5 种，再散在窗口里就是一坨 switch）。
+    // 本窗只关心"成功 ⇒ 收窗 / 失败 ⇒ 状态行给可读原因"。
+
+    /// <summary>
+    /// 执行一个动作。**动作实现全在 <see cref="LauncherActionRunner"/>**：
+    /// Open（文件）· Launch（应用，带工作目录）· Reveal / RevealApp（资源管理器定位）· CopyText（计算结果）。
+    /// <para><paramref name="item"/> 非空且动作成功 ⇒ 通知 <see cref="UsageRecorder"/> 记频次
+    /// （W7-e：**只在动作真的执行成功时** count+1 —— 失败的启动不该被记住）。</para>
+    /// </summary>
+    private void ExecuteAction(LauncherAction? action, LauncherItem? item = null)
     {
-        try
+        if (action is null)
         {
-            // 路径由索引进程返回（设计方案 §6.4 红线：UI 不拼路径 —— 盘符映射/UNC 只有索引侧知道）
-            using var _ = Process.Start(BuildOpenStartInfo(hit));
-            Hide();   // 打开成功 = 搜索完成，收窗（Everything 同款）
+            // 无动作不静默：状态行明示 + 不吞键（M2 同族纪律）
+            SetStatusLaunchable(false);
+            _status.Text = "该结果不可执行";
+            return;
         }
-        catch (Exception ex)
+
+        var failure = LauncherActionRunner.Execute(action);
+        if (failure is null)
         {
-            _status.Text = DescribeOpenFailure(hit, ex);
+            if (item is not null)
+            {
+                try
+                {
+                    UsageRecorder?.Invoke(item, action);
+                }
+                catch (Exception ex)
+                {
+                    // ★ 记频次失败绝不能影响动作本身（§10.11），但也不能静默 —— 状态行是用户在看的地方
+                    SetStatusLaunchable(false);
+                    _status.Text = $"已执行（频次记录失败：{ex.Message}）";
+                }
+            }
+
+            Hide();   // 动作成功 = 一次操作完成，收窗（Everything / PowerToys Run 同款）
+            return;
         }
+
+        SetStatusLaunchable(false);
+        _status.Text = failure;
     }
 
-    private void RevealInExplorer(SearchHitDto hit)
-    {
-        try
-        {
-            using var _ = Process.Start(BuildRevealStartInfo(hit));
-            Hide();
-        }
-        catch (Exception ex)
-        {
-            _status.Text = $"定位失败：{ex.Message}";
-        }
-    }
+    /// <summary>
+    /// 频次记录出口（W7-e，设计方案 §10.11）。**生产由托盘装配注入；探针默认 null ⇒ 零写入**
+    /// （FR-10：探针装配纪律 —— 探针窗口不该有生产副作用）。调用时机 = Enter/Ctrl+Enter 且动作成功。
+    /// </summary>
+    internal Action<LauncherItem, LauncherAction>? UsageRecorder { get; set; }
 
     // ── 动作构造器（W3-d-3 断言面：抽出为纯函数，探针可断言"传给进程的到底是什么"，
     //    不真起进程 —— 验收能钉住全路径 / 反斜杠归一，而"真的 ShellExecute 成功"
     //    依赖桌面环境，属手工项）────────────────────────────────────────────────
+    //
+    // W7-b：实现移居 LauncherActionRunner（五种动作共用一处），这里保留**原签名**做委托
+    // —— 探针的 `actions` 断言块因此一行未改。
 
-    /// <summary>打开动作的进程参数。<b>FileName = 全路径</b>（索引回传，UI 不拼）。</summary>
+    /// <summary>打开动作的进程参数（<see cref="SearchHitDto"/> 重载 —— 探针断言面，签名不改）。</summary>
     internal static ProcessStartInfo BuildOpenStartInfo(SearchHitDto hit) =>
-        new(hit.Path) { UseShellExecute = true };
+        LauncherActionRunner.BuildOpenStartInfo(hit.Path);
 
-    /// <summary>
-    /// 资源管理器定位的进程参数。`explorer /select` **只认反斜杠** —— 正斜杠是静默 no-op
-    ///（托盘选中项断言三重根因之一，2026-09-24 实锤），这里必须归一。
-    /// </summary>
+    /// <summary>资源管理器定位的进程参数（<see cref="SearchHitDto"/> 重载 —— 探针断言面，签名不改）。</summary>
     internal static ProcessStartInfo BuildRevealStartInfo(SearchHitDto hit) =>
-        new("explorer.exe", $"/select,\"{hit.Path.Replace('/', '\\')}\"");
+        LauncherActionRunner.BuildRevealStartInfo(hit.Path);
 
-    /// <summary>
-    /// 打开失败文案。**区分原因**（§30.6：只断"出了错"不够）——
-    /// 文件不存在（索引尚未同步到删除，或用户手删）与其它异常给不同文案。
-    /// </summary>
+    /// <summary>打开失败文案（<see cref="SearchHitDto"/> 重载 —— 探针断言面，签名与文案不改）。</summary>
     internal static string DescribeOpenFailure(SearchHitDto hit, Exception ex) =>
-        File.Exists(hit.Path)
-            ? $"打开失败：{ex.Message}"
-            : $"打开失败：文件不存在（索引尚未同步到删除？）—— {hit.Path}";
+        LauncherActionRunner.DescribeOpenFailure(hit, ex);
 
     // ── 渲染 ────────────────────────────────────────────────────────────────
 
-    private void RenderResults(SearchQueryResponse response)
+    private void RenderResults(LauncherRenderModel model)
+    {
+        // ① 空查询（清空输入框）：**清列表** + 占位文案（与 W3 起的行为一致）
+        if (model.IsEmptyQuery)
+        {
+            ClearAndFill(model);
+            SetStatusLaunchable(false);
+            _status.Text = "输入以搜索（Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径）";
+            _statusRight.Text = "";
+            return;
+        }
+
+        // ② 索引侧错误：**只改状态行，列表与选中态不动**（原 RenderError 语义，逐字保留）
+        //    ★ W8·B1：-32001 的两种成因（真在建 / 核心服务缺席）已在 FilesProvider.MapError 分流，
+        //      可点击的出口由 CanLaunch 表达。**还必须真注入了宿主动作才做成可点** ——
+        //      探针没注入 ⇒ 保持不可点 ⇒ W7 的"文件项渲染零变化"证据链不受影响。
+        if (model.Errors.TryGetValue(LauncherProviderRegistry.Files, out var filesError))
+        {
+            _status.Text = filesError.UserText;
+            _statusRight.Text = "";
+            SetStatusLaunchable(filesError.CanLaunch && CoreLaunchRequested is not null);
+            return;
+        }
+
+        // ③ 全部段本轮都未被接受（过期丢弃）⇒ 什么都不变（等价于"回调根本不触发"）
+        if (!model.AnyAccepted && model.Errors.Count == 0)
+        {
+            return;
+        }
+
+        ClearAndFill(model);
+
+        var otherErrors = string.Join("；", model.Errors
+            .Where(kv => !string.Equals(kv.Key, LauncherProviderRegistry.Files, StringComparison.Ordinal))
+            .Select(kv => kv.Value.UserText));
+
+        if (otherErrors.Length > 0)
+        {
+            // FR-9：段位故障必须可见且带原因（不弹窗、不只写日志）
+            SetStatusLaunchable(false);
+            _status.Text = otherErrors;
+            return;
+        }
+
+        if (!model.FilesAccepted)
+        {
+            // files 段本轮未接受（且无错误）⇒ 状态行的 files 部分**保持原值不动**
+            //（多 provider 之后：apps 有新鲜结果要重绘，但 files 的计数不该被写成 0 —— 那是"没变"显示成"没结果"）
+            return;
+        }
+
+        SetStatusLaunchable(false);
+        _statusRight.Text = $"显示 {model.FilesHitCount} / 共 {model.FilesTotal} 条";
+        _status.Text = model.FilesHitCount == 0
+            ? $"没有匹配“{_input.Text}”的文件"
+            : $"{model.FilesElapsedMs} ms";
+    }
+
+    /// <summary>
+    /// 清列表并灌入归并结果（含 <c>_lastBuildMs</c> 与首屏耗时的测量 —— 与 W3-d-2 同口径）。
+    /// </summary>
+    private void ClearAndFill(LauncherRenderModel model)
     {
         _suppressQueryEvents = true;
         var build = Stopwatch.StartNew();
@@ -864,9 +1166,9 @@ public sealed class SearchWindow : Window
         try
         {
             _results.Items.Clear();
-            foreach (var hit in response.Hits)
+            foreach (var item in model.Items)
             {
-                _results.Items.Add(hit);
+                _results.Items.Add(item);
             }
         }
         finally
@@ -874,41 +1176,22 @@ public sealed class SearchWindow : Window
             _suppressQueryEvents = false;
         }
 
+        _lastRenderedQuery = model.QueryText;
+
+        if (_captureRenders)
+        {
+            // 记在**写进列表之后**：代次闸丢弃的批次提前 return（RenderResults ③），走不到这里。
+            // 所以"日志里有没有这一条"= "这一批到底有没有铺到用户眼前"（R3 的上屏级证据）。
+            _renderLog.Add($"{model.Generation}|{model.Items.Count}|"
+                + (model.Items.Count > 0 ? model.Items[0].Title : ""));
+        }
+
         build.Stop();
         _lastBuildMs = build.Elapsed.TotalMilliseconds;   // 数据层渲染耗时（W3-d-2 数字）
-        _lastResponse = response;
 
         // "首屏渲染耗时"：从开始灌数据到**布局/渲染完成**。Loaded 优先级低于 Render，
         // 所以回调跑到时渲染已落地 —— 这才是用户能看见第一屏的时刻。
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => _lastRenderMs = render.Elapsed.TotalMilliseconds);
-
-        // Epoch==0 = 会话的"空查询本地回调"（未签发请求）；真查询的 epoch ≥ 1 且 elapsedMs 有值。
-        if (response.Epoch == 0 && response.ElapsedMs == 0)
-        {
-            _status.Text = "输入以搜索（Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径）";
-            _statusRight.Text = "";
-            return;
-        }
-
-        _statusRight.Text = $"显示 {response.Hits.Count} / 共 {response.Total} 条";
-
-        _status.Text = response.Hits.Count == 0
-            ? $"没有匹配“{_input.Text}”的文件"
-            : $"{response.ElapsedMs} ms";
-    }
-
-    private void RenderError(SearchIndexException ex)
-    {
-        if (ex.Code == RpcErrorCodes.SearchNotReady)
-        {
-            // W3-d-1 风险🟡对策：索引未就绪显示"正在建索引"，**不是空列表**（空列表 = "坏了吗？"）
-            _status.Text = "正在建索引（首次全量约 10 秒级，取决于文件数）—— 打字会自动重试";
-            _statusRight.Text = "";
-            return;
-        }
-
-        _status.Text = $"搜索出错（{ex.Code}）：{ex.Message}";
-        _statusRight.Text = "";
     }
 
     /// <summary>节流到点回调：单发 DispatcherTimer（InputThrottle 的 schedule 适配）。</summary>
@@ -918,20 +1201,20 @@ public sealed class SearchWindow : Window
         timer.Tick += (_, _) =>
         {
             timer.Stop();
-            _session.Fire();
+            _router.Fire();
         };
         timer.Start();
     }
 
     private void DisposeSession()
     {
-        if (_sessionDisposed)
+        if (_disposed)
         {
             return;
         }
 
-        _sessionDisposed = true;
-        _session.Dispose();
+        _disposed = true;
+        _router.Dispose();
     }
 
     /// <summary>探针收尾：释放会话（未 <c>Show()</c> 的窗口 <c>Close()</c> 不触发 <c>Closed</c>）。</summary>
@@ -944,7 +1227,88 @@ public sealed class SearchWindow : Window
     // 高亮分段是否落在回传区间上。这些用"直接对内容根做 Measure/Arrange"就能验 ——
     // 不 Show()、不弹窗、不抢焦点（自动化友好），也不需要消息循环。
 
-    /// <summary>探针入口：设输入文本 —— 走真 <c>TextChanged</c> → 真 <c>SearchSession</c> → 真渲染。</summary>
+    /// <summary>
+    /// 某个 provider 刚刚就绪（W7-b，设计方案 R10）：**补发一次查询**。
+    ///
+    /// <para><b>两个前置条件缺一不可</b>：① 窗口可见（后台补发没有观众，只是白烧一次查询）；
+    /// ② 输入框文本与上次渲染的查询**一致**（用户已经改了词 ⇒ 那一轮会自己带出新结果，
+    /// 补偿发反而可能拿旧文本覆盖新结果）。</para>
+    ///
+    /// <para>事件来自线程池（扫描线程）⇒ 先 marshal 回 UI 线程再动控件（类头线程纪律）。</para>
+    /// </summary>
+    internal void OnProviderBecameReady()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(() =>
+        {
+            if (_disposed || Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            if (!string.Equals(_input.Text, _lastRenderedQuery, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            RequeryCount++;   // 探针观测面：证明补偿发真的发生了
+            _router.Requery();
+        });
+    }
+
+    /// <summary>补发次数（探针断言"首扫就绪确实补了一枪"）。</summary>
+    internal int RequeryCount { get; private set; }
+
+    /// <summary>
+    /// 探针入口：直接跑一次命令键处理（不经过原生控件 —— W7-b 起动作分派有五种，
+    /// 真键注入在自动化里代价高且不稳定，这里只验"分派与副作用"）。
+    /// 返回值 = 该命令是否被本窗处理（不吞键的既有契约）。
+    /// </summary>
+    internal bool ProbeCommand(InputCmd cmd) => OnInputCommand(cmd);
+
+    /// <summary>探针入口：指定"动作作用在哪一行"（-1 = 无选中）。</summary>
+    internal void ProbeSelectIndex(int index) =>
+        _results.SelectedIndex = Math.Clamp(index, -1, _results.Items.Count - 1);
+
+    /// <summary>
+    /// 探针入口：取**非文件行**的渲染读数（W7-b）。走可视化树 —— 数据模板生成的内容不在逻辑树上
+    /// （与 <c>FindHitText</c> 同一条理由）。文件行走 <see cref="HitText"/>，因此**不会**出现在这里。
+    /// </summary>
+    internal IReadOnlyList<LauncherRowSnapshot> SnapshotRows()
+    {
+        UpdateLayout();
+        var list = new List<LauncherRowSnapshot>();
+        CollectRows(_results, list);
+        return list;
+    }
+
+    private static void CollectRows(DependencyObject root, List<LauncherRowSnapshot> list)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is LauncherRowText row)
+            {
+                list.Add(new LauncherRowSnapshot(
+                    Kind: row.Item?.Kind.ToString() ?? "(null)",
+                    Badge: row.RenderedBadge,
+                    Title: row.RenderedTitle,
+                    Subtitle: row.RenderedSubtitle,
+                    IconShown: row.RenderedIconShown,
+                    Segments: row.RenderedSegments()));
+                continue;
+            }
+
+            CollectRows(child, list);
+        }
+    }
+
+    /// <summary>探针入口：设输入文本 —— 走真 <c>TextChanged</c> → 真 <c>QueryRouter</c> → 真渲染。</summary>
     internal void SubmitForProbe(string text) => _input.Text = text;
 
     /// <summary>
@@ -963,6 +1327,7 @@ public sealed class SearchWindow : Window
         Topmost = false;
         Show();
         RefreshVolumeSummary();   // 探针也要覆盖卷清单行（W3-e-2 的 UI 可见性）
+        ShowStartupWarningOnce(); // 与生产 Summon 同路径（否则"配置告警可见"就没有观测面）
     }
 
     /// <summary>当前卷清单行文本（探针用）。</summary>
@@ -1000,6 +1365,41 @@ public sealed class SearchWindow : Window
 
     /// <summary>当前列表项数（探针轮询渲染落地用）。</summary>
     internal int ProbeItemCount => _results.Items.Count;
+
+    /// <summary>
+    /// 探针入口：列表**前 <paramref name="take"/> 条的来源类型**（`Kind` 名）。
+    /// 断言"置顶段真的在最前"用 —— 只读 <see cref="SnapshotRows"/> 拿不到"第几条"（它只收集非文件行）。
+    /// </summary>
+    internal IReadOnlyList<string> ProbeLeadingKinds(int take)
+    {
+        var n = Math.Min(Math.Max(take, 0), _results.Items.Count);
+        var list = new List<string>(n);
+        for (var i = 0; i < n; i++)
+        {
+            list.Add(_results.Items[i] is LauncherItem item ? item.Kind.ToString() : "(other)");
+        }
+
+        return list;
+    }
+
+    // ── 探针：渲染日志（仅 `--probe-launcher --router` 打开；生产路径零分配）────────
+    //
+    // 记的是"**真正写进列表**的渲染"（记在 ClearAndFill 尾部），不是"router 发布了什么"。
+    // 这个区别是全部价值所在：代次闸丢弃的批次根本走不到 ClearAndFill ⇒ 日志里不出现，
+    // 反面则是"陈旧结果铺上了屏"。所以它是 R3「陈旧结果不得覆盖新结果」的**上屏级**证据。
+
+    private readonly List<string> _renderLog = [];
+    private bool _captureRenders;
+
+    /// <summary>探针入口：开始记录渲染（清空历史）。</summary>
+    internal void ProbeStartRenderLog()
+    {
+        _renderLog.Clear();
+        _captureRenders = true;
+    }
+
+    /// <summary>探针读数：渲染日志，每条 = <c>代次|条数|首项标题</c>。</summary>
+    internal IReadOnlyList<string> ProbeRenderLog => _renderLog;
 
     /// <summary>当前状态行右文本（探针用）。</summary>
     internal string ProbeStatusRight => _statusRight.Text;
@@ -1160,17 +1560,10 @@ public sealed class SearchWindow : Window
     }
 
     /// <summary>
-    /// 结果项模板：文件名（含高亮分段）+ 右侧灰色目录。高亮区间**直接按索引回传切**
-    ///（UTF-16 code unit），UI 不重算匹配位置（W3-d-2 职责边界；R9 中文错位由索引侧保证）。
+    /// 单条命中的渲染控件（名字高亮 + 目录路径灰色尾注）。FEF 要求可无参构造。
+    /// <b>W7-b 起模板由 <see cref="LauncherRowTemplateSelector"/> 提供，本类一行未改</b>
+    /// —— FR-10「文件项渲染零变化」正是靠"不给它加任何东西"实现的。
     /// </summary>
-    private static DataTemplate MakeHitTemplate()
-    {
-        var factory = new FrameworkElementFactory(typeof(HitText));
-        factory.SetBinding(HitText.HitProperty, new Binding());   // 绑定数据项自身
-        return new DataTemplate { VisualTree = factory };
-    }
-
-    /// <summary>单条命中的渲染控件（名字高亮 + 目录路径灰色尾注）。FEF 要求可无参构造。</summary>
     internal sealed class HitText : StackPanel
     {
         public static readonly DependencyProperty HitProperty = DependencyProperty.Register(
@@ -1350,3 +1743,16 @@ internal sealed record SearchUiSnapshot(
     double ViewportHeight,
     double ExtentHeight,
     string VolumesLine);
+
+/// <summary>
+/// 非文件行的渲染读数（W7-b 断言面）：徽标 / 主副行 / 是否有图标 / 实际高亮分段。
+/// <see cref="Kind"/> 只可能是 App / Calc / Unit / Encode —— 文件行由 <c>HitText</c> 渲染，
+/// 根本不会产出一条 <c>LauncherRowSnapshot</c>（这正是"文件项零行为"的反向断言）。
+/// </summary>
+internal sealed record LauncherRowSnapshot(
+    string Kind,
+    string Badge,
+    string Title,
+    string Subtitle,
+    bool IconShown,
+    IReadOnlyList<(string Text, bool Bold)> Segments);

@@ -65,6 +65,9 @@ public sealed class EztoolsPaths
 
     public string ConfigDir => Path.Combine(ConfigRoot, "config");
 
+    /// <summary>启动器数据目录（W7-e D6=B：频次文件 <c>launcher/usage.json</c> 的父目录）。</summary>
+    public string LauncherDataDir => Path.Combine(ConfigRoot, "launcher");
+
     public string StateFile => Path.Combine(ConfigRoot, "state.json");
 
     /// <summary>宿主自身的日志文件（按日期分文件）。</summary>

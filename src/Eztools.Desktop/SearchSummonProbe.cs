@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
+using Eztools.Host.Launcher;
 using Eztools.Host.Search;
 
 namespace Eztools.Desktop;
@@ -25,7 +26,7 @@ namespace Eztools.Desktop;
 ///   ② <b>窗口在但打不进字</b>（前台锁定的残余形态）：判据 t1.queryFocused=False。
 ///
 /// <b>Phase B（真链路，--probe-search-live 选通）—— 大小写折叠 + "lei 无结果"诊断</b>：
-/// 真 ezt-index（与托盘同一 <see cref="SearchIndexProcess"/> 形态）→ 真 <see cref="SearchSession"/>
+/// 真 ezt-index（与托盘同一 <see cref="SearchIndexProcess"/> 形态）→ 真 <c>QueryRouter</c>
 /// （节流/单在途/过期闸全真）→ SubmitForProbe 输入 "lei" 与 "LEI"（CapsLock 态的等价物）
 /// → 各自等到渲染落地，落盘 total/状态行/卷清单行。判据：两查询 total 相等且 &gt; 0。
 /// 状态行/卷清单行原文一并落盘 —— "lei 无结果"时它就是诊断证据（-32001 准备中？
@@ -55,7 +56,9 @@ internal static class SearchSummonProbe
     private static JsonObject RunLifecycleCycles()
     {
         var transport = new ProbeSearchUiTransport();
-        var window = new SearchWindow(new SearchIndexClient(transport));
+        // ★ W7-a 探针装配纪律：显式传"仅 files"集合（真机上 apps 命中会打破 itemsCount 之类断言）
+        var probeClient = new SearchIndexClient(transport);
+        var window = new SearchWindow(probeClient, LauncherProviderSet.FilesOnly(probeClient));
         try
         {
             var cycles = new JsonArray();
@@ -241,7 +244,7 @@ internal static class SearchSummonProbe
         json["ready"] = ready;
         json["readyWaitMs"] = (int)sw.ElapsedMilliseconds;
 
-        var window = new SearchWindow(client);
+        var window = new SearchWindow(client, LauncherProviderSet.FilesOnly(client));
         try
         {
             window.ShowForProbe();   // 屏幕外 + 不激活（不抢焦点，查询路径不受影响）

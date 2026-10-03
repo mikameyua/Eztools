@@ -69,8 +69,27 @@ def hotkey_verdict(registered: int, expected: int, occupied):
                     f" ⇒ 是代码侧没注册，不是环境冲突")
 
 
+_OCCUPIED_CACHE = None
+_OCCUPIED_DONE = False
+
+
 def probe_occupied_hotkeys(repo: str):
-    """跑 scripts/probe-hotkey-free.py，返回被占用的组合键；探针不可用时返回 None。"""
+    """跑 scripts/probe-hotkey-free.py，返回被占用的组合键；探针不可用时返回 None。
+
+    **结果做进程内缓存**：同一次验收里聚合断言（第 1b 段）与三条逐条探针（1c-5/6/7）
+    问的是同一个问题，重复采样反而会引入"采样时刻不同 → 结论不一致"的新噪声
+    （而且每次采样都要真实注册/注销九个组合键）。
+    """
+    global _OCCUPIED_CACHE, _OCCUPIED_DONE
+    if _OCCUPIED_DONE:
+        return _OCCUPIED_CACHE
+
+    _OCCUPIED_DONE = True
+    _OCCUPIED_CACHE = _probe_occupied_hotkeys_uncached(repo)
+    return _OCCUPIED_CACHE
+
+
+def _probe_occupied_hotkeys_uncached(repo: str):
     script = os.path.join(repo, "scripts", "probe-hotkey-free.py")
     if not os.path.exists(script):
         return None
@@ -95,6 +114,14 @@ def hotkey_selftest() -> int:
         ("注册不满且探针挂掉 → fail（不许静默放过）", (7, 8, None), "fail"),
         ("超额注册（>= 期望）→ pass", (9, 8, []), "pass"),
     ]
+    # 逐条探针的三态判定（W7-b 补全 —— 同一个环境原因在聚合与逐条两处必须同源）
+    probe_cases = [
+        ("逐条：rc=0 → pass", (0, [], "Ctrl+Alt+O"), "pass"),
+        ("逐条：rc≠0 且该键被占 → skip", (1, ["Ctrl+Alt+O"], "Ctrl+Alt+O"), "skip"),
+        ("逐条：rc≠0 且无占用 → fail（代码侧）", (1, [], "Ctrl+Alt+O"), "fail"),
+        ("逐条：rc≠0 且占用探针挂掉 → fail（不许静默放过）", (1, None, "Ctrl+Alt+O"), "fail"),
+        ("逐条：★ 占的是**别的键** ⇒ 不得当借口跳过", (1, ["Ctrl+Alt+X"], "Ctrl+Alt+O"), "fail"),
+    ]
     bad = 0
     for desc, args, want in cases:
         got = hotkey_verdict(*args)[0]
@@ -102,7 +129,14 @@ def hotkey_selftest() -> int:
         bad += 0 if ok else 1
         print(f"  [{'PASS' if ok else 'FAIL'}] {desc}"
               + ("" if ok else f"（期望 {want}，实际 {got}）"))
-    print(f"\nverify-desktop-hotkey-selftest: PASS={len(cases) - bad} FAIL={bad}")
+    for desc, args, want in probe_cases:
+        got = hotkey_probe_verdict(*args)[0]
+        ok = got == want
+        bad += 0 if ok else 1
+        print(f"  [{'PASS' if ok else 'FAIL'}] {desc}"
+              + ("" if ok else f"（期望 {want}，实际 {got}）"))
+    total = len(cases) + len(probe_cases)
+    print(f"\nverify-desktop-hotkey-selftest: PASS={total - bad} FAIL={bad}")
     return 1 if bad else 0
 
 
@@ -115,6 +149,33 @@ def ck(name: str, cond: bool, detail: str = "") -> None:
     else:
         FAIL += 1
         print(f"[FAIL] {name}   {detail}")
+
+
+def ck_skip(name: str, why: str) -> None:
+    """记一条**跳过**（落 SKIPPED 数字，绝不静默少跑）—— 见 §3.2 2.4 的纪律。
+
+    为什么必须有：`「通过 N」` 如果会在特定环境变小且不说明，就等于把断言面变成了
+    环境依赖的随机变量（2026-09-28 断言语审抓到的 2 条「假绿通道」正是这个形态）。
+    """
+    global SKIPPED
+    SKIPPED += 1
+    print(f"[跳过] {name}   {why}")
+
+
+def hotkey_probe_verdict(rc, occupied, hotkey):
+    """**逐条**热键探针的三态判定：返回 (verdict, detail)，verdict ∈ {"pass","skip","fail"}。
+
+    为什么要逐条也做（而不只是聚合那条）：同一个环境原因（热键被别的进程占用）在
+    聚合断言上走 skip、在逐条探针上却硬失败 —— 于是"关掉那个软件就全绿"的结论要靠人
+    重新推一遍。两处判定必须同源，否则三态判定只做了一半（2026-10-01 W7-a 实测踩到）。
+    """
+    if rc == 0:
+        return "pass", ""
+    if occupied is None:
+        return "fail", ("占用探针跑不起来 ⇒ 无法区分环境与代码，按失败处理（不许静默放过）")
+    if hotkey in occupied:
+        return "skip", f"组合键 {hotkey} 已被别的进程占用（probe-hotkey-free 确认）"
+    return "fail", f"rc={rc} 且 {hotkey} 未被占用 ⇒ 代码侧问题，不是环境冲突"
 
 
 def write_tiny_png(path: str, width: int = 8, height: int = 8) -> str:
@@ -400,28 +461,35 @@ def main() -> int:
 
     # ── 1b. P1b 设置窗口：schema → 控件映射清单（自检附带输出）────────────────
     # 期望映射（§7）：boolean→CheckBox · string+enum→ComboBox · integer→TextBox
-    # preview 起加入了第 5 个有 schema 的工具（3 个 integer 字段）—— 共 11 个字段
-    # W4-c：宿主设置节 desktop（search.hotkey / ocr.hotkey / ocr.language，3 个 string 字段）
-    # 也以同格式进清单 —— 宿主设置接 P1a 的落地证据。
     # W4-c：宿主设置节 desktop（search/ocr/clip 热键等）以同格式进清单；
-    # W6-b：capture.hotkey；W6-c：pick.hotkey + color.format（enum→ComboBox，11 个字段）。
+    # W6-b：capture.hotkey；W6-c：pick.hotkey + color.format（enum→ComboBox，11 个字段）；
+    # W7-b：launcher.providers（string→TextBox，12 个字段）。
+    # C1/C2（2026-09-30）：keepalive/tasktool 删空 config（解析容忍缺省）、echo/pinfo
+    #   加 configHidden=true —— 两者都不再出现在设置窗口 ⇒ 从 expected 移出。
+    #   `ezt list --json` 的 configHidden 双展示面断言在 acceptance.sh step 3。
+    # C5（2026-09-30）：preview/filehash 的 3 个技术参数标 x-advanced，渲染进折叠
+    #   Expander —— InventoryForSelfCheck 递归枚举编辑器，键=控件类型集合不变。
+    # B-2（2026-09-30）：热键中心聚合页以 `desktop.热键中心` 进清单 —— 宿主 5 热键
+    #   + 工具 3 热键（preview.show / filehash.hash / wordcount.count）全走 TextBox。
     expected = {
         "desktop": {"search.hotkey=TextBox", "ocr.hotkey=TextBox", "ocr.language=TextBox",
                      "clip.enabled=CheckBox", "clip.hotkey=TextBox", "clip.max-items=TextBox",
                      "clip.image-retention-days=TextBox", "clip.blacklist=TextBox",
-                     "capture.hotkey=TextBox", "pick.hotkey=TextBox", "color.format=ComboBox"},
-        "echo": {"uppercase=CheckBox"},
+                     "capture.hotkey=TextBox", "pick.hotkey=TextBox", "color.format=ComboBox",
+                     "launcher.providers=TextBox", "launcher.usage=CheckBox", "launcher.alias=TextBox"},
         "wordcount": {"countWhitespace=CheckBox", "language=ComboBox", "maxFileSizeMb=TextBox"},
         "filehash": {"algorithm=ComboBox", "uppercase=CheckBox", "chunkSizeKb=TextBox"},
-        "pinfo": {"limit=TextBox"},
         "preview": {"maxTextBytes=TextBox", "maxLines=TextBox", "binaryProbeBytes=TextBox"},
+        "desktop.热键中心": {"search.hotkey=TextBox", "ocr.hotkey=TextBox", "clip.hotkey=TextBox",
+                              "capture.hotkey=TextBox", "pick.hotkey=TextBox",
+                              "preview.show=TextBox", "filehash.hash=TextBox", "wordcount.count=TextBox"},
     }
     got = {}
     for ln in lines[1:]:
         mm = re.match(r"设置清单 (\S+): (.+)$", ln)
         if mm:
             got[mm.group(1)] = set(x.strip() for x in mm.group(2).split(","))
-    ck(f"设置清单覆盖全部 {len(expected)} 个有 schema 的工具",
+    ck(f"设置清单覆盖全部 {len(expected)} 个可配置目标（3 工具 + desktop 全量/热键中心）",
        set(got) == set(expected), f"实际 {sorted(got)}")
     for tool in sorted(expected):
         ck(f"映射正确：{tool}（{len(expected[tool])} 个字段）",
@@ -978,8 +1046,19 @@ def main() -> int:
     r = run(["--probe-host-settings", "--no-prompt", "--out", host_file,
              "--tools-dir", tools_dir, "--install-root", install_root,
              "--config-root", config_root], timeout=120)
-    ck("宿主设置探针退出码 0（改键→保存→生效→恢复整条链）", r.returncode == 0,
-       f"code={r.returncode} err={r.stderr[:200]}")
+    #     ★ 三态判定（2026-10-03）：这条链的**最后一步是"恢复默认热键 Ctrl+Alt+O"**，
+    #     也就是**重新注册**它 —— 该组合键被外部进程占用时前置不成立。
+    #     helper 注释原话："两处判定必须同源，否则三态判定只做了一半"。
+    host_verdict, host_why = hotkey_probe_verdict(
+        r.returncode, probe_occupied_hotkeys(repo), "Ctrl+Alt+O")
+    if host_verdict == "pass":
+        ck("宿主设置探针退出码 0（改键→保存→生效→恢复整条链）", True)
+    elif host_verdict == "skip":
+        ck_skip("宿主设置探针退出码 0（改键→保存→生效→恢复整条链）",
+                f"{host_why} —— 该链末步 = 重新注册 Ctrl+Alt+O")
+    else:
+        ck("宿主设置探针退出码 0（改键→保存→生效→恢复整条链）", False,
+           f"code={r.returncode} {host_why} err={r.stderr[:160]}")
     host = {}
     if os.path.isfile(host_file):
         try:
@@ -994,9 +1073,16 @@ def main() -> int:
     ck("★★ 保存回调链立即生效（生效热键重合成 + 热键真重注册）",
        str(after.get("effectiveHotkey", "")).upper() == "CTRL+ALT+K"
        and after.get("registered") is True, f"after={after}")
-    ck("★★ unset 恢复默认后回落 Ctrl+Alt+O 且重注册成功",
-       str(restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+O"
-       and restored.get("registered") is True, f"restored={restored}")
+    #     ★ 拆两半（2026-10-03）："**回落**到默认值"与热键占用无关 ⇒ 永远真验；
+    #     只有"**重注册**成功"那半依赖组合键可用（被外部占用时跳过并计数）。
+    ck("★★ unset 恢复默认后**回落** Ctrl+Alt+O（回到默认值 —— 与注册能力无关的那半）",
+       str(restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+O", f"restored={restored}")
+    if "Ctrl+Alt+O" in (probe_occupied_hotkeys(repo) or []):
+        ck_skip("★★ unset 恢复默认后重注册成功",
+                "组合键 Ctrl+Alt+O 已被别的进程占用（probe-hotkey-free 确认）")
+    else:
+        ck("★★ unset 恢复默认后重注册成功", restored.get("registered") is True,
+           f"restored={restored}")
 
     # W6-d：pick.hotkey 同一条 UI 保存链（滚动修复后字段可达）；右栏滚动结构回归。
     pick_part = host.get("pick") or {}
@@ -1006,9 +1092,15 @@ def main() -> int:
        and str(pick_part.get("savedValue", "")).upper() == "CTRL+ALT+K"
        and str(pick_part.get("effectiveHotkey", "")).upper() == "CTRL+ALT+K"
        and pick_part.get("registered") is True, f"pick={pick_part}")
-    ck("★★ 取色热键恢复默认回落 Ctrl+Alt+C 且重注册成功",
-       str(pick_restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+C"
-       and pick_restored.get("registered") is True, f"pickRestored={pick_restored}")
+    ck("★★ 取色热键恢复默认后**回落** Ctrl+Alt+C（回到默认值 —— 与注册能力无关的那半）",
+       str(pick_restored.get("effectiveHotkey", "")).upper() == "CTRL+ALT+C",
+       f"pickRestored={pick_restored}")
+    if "Ctrl+Alt+C" in (probe_occupied_hotkeys(repo) or []):
+        ck_skip("★★ 取色热键恢复默认后重注册成功",
+                "组合键 Ctrl+Alt+C 已被别的进程占用（probe-hotkey-free 确认）")
+    else:
+        ck("★★ 取色热键恢复默认后重注册成功", pick_restored.get("registered") is True,
+           f"pickRestored={pick_restored}")
     scroll_line = next((ln for ln in lines if ln.startswith("设置窗右栏滚动")), None)
     ck("★★ 设置窗右栏可滚（字段内容高度 > 视口 ⇒ 滚动条必出现，底部字段可达；"
        "StackPanel 包裹回归即此处红）",
@@ -1021,8 +1113,14 @@ def main() -> int:
     r = run(["--probe-ocr-hotkey", "--no-prompt", "--out", hotkey_file,
              "--tools-dir", tools_dir, "--install-root", install_root,
              "--config-root", config_root], timeout=120)
-    ck("OCR 热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", r.returncode == 0,
-       f"code={r.returncode} err={r.stderr[:200]}")
+    ocr_verdict, ocr_why = hotkey_probe_verdict(r.returncode, probe_occupied_hotkeys(repo), "Ctrl+Alt+O")
+    if ocr_verdict == "pass":
+        ck("OCR 热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", True)
+    elif ocr_verdict == "skip":
+        ck_skip("OCR 热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", ocr_why)
+    else:
+        ck("OCR 热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", False,
+           f"code={r.returncode} {ocr_why} err={r.stderr[:160]}")
     ocr_hotkey = {}
     if os.path.isfile(hotkey_file):
         try:
@@ -1030,10 +1128,14 @@ def main() -> int:
                 ocr_hotkey = json.load(f)
         except (OSError, json.JSONDecodeError) as ex:
             info(f"OCR 热键探针输出不可解析：{ex}")
-    ck("★★ 真按键 Ctrl+Alt+O 触发遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
-       ocr_hotkey.get("overlayShown") is True, str(ocr_hotkey)[:200])
-    ck("★★ Esc 真按键收窗（键盘消息→PreviewKeyDown→Cancel 链）",
-       ocr_hotkey.get("escClosed") is True, str(ocr_hotkey)[:200])
+    if ocr_verdict == "skip":
+        ck_skip("★★ 真按键 Ctrl+Alt+O 触发遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）", ocr_why)
+        ck_skip("★★ Esc 真按键收窗（键盘消息→PreviewKeyDown→Cancel 链）", ocr_why)
+    else:
+        ck("★★ 真按键 Ctrl+Alt+O 触发遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
+           ocr_hotkey.get("overlayShown") is True, str(ocr_hotkey)[:200])
+        ck("★★ Esc 真按键收窗（键盘消息→PreviewKeyDown→Cancel 链）",
+           ocr_hotkey.get("escClosed") is True, str(ocr_hotkey)[:200])
 
     # ── 1c-6b. W6-b：截图热键真按键探针（--probe-capture-hotkey，--probe-ocr-hotkey 同款）──
     #     真注入 Ctrl+Alt+X → WM_HOTKEY → 截图遮罩唤出 → Esc 真键收窗。
@@ -1044,8 +1146,14 @@ def main() -> int:
     r = run(["--probe-capture-hotkey", "--no-prompt", "--out", cap_file,
              "--tools-dir", tools_dir, "--install-root", install_root,
              "--config-root", config_root], timeout=120)
-    ck("截图热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", r.returncode == 0,
-       f"code={r.returncode} err={r.stderr[:200]}")
+    cap_verdict, cap_why = hotkey_probe_verdict(r.returncode, probe_occupied_hotkeys(repo), "Ctrl+Alt+X")
+    if cap_verdict == "pass":
+        ck("截图热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", True)
+    elif cap_verdict == "skip":
+        ck_skip("截图热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", cap_why)
+    else:
+        ck("截图热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", False,
+           f"code={r.returncode} {cap_why} err={r.stderr[:160]}")
     cap_hotkey = {}
     if os.path.isfile(cap_file):
         try:
@@ -1053,10 +1161,14 @@ def main() -> int:
                 cap_hotkey = json.load(f)
         except (OSError, json.JSONDecodeError) as ex:
             info(f"截图热键探针输出不可解析：{ex}")
-    ck("★★ 真按键 Ctrl+Alt+X 触发截图遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
-       cap_hotkey.get("overlayShown") is True, str(cap_hotkey)[:200])
-    ck("★★ Esc 真按键收窗（截图遮罩 PreviewKeyDown→Cancel 链）",
-       cap_hotkey.get("escClosed") is True, str(cap_hotkey)[:200])
+    if cap_verdict == "skip":
+        ck_skip("★★ 真按键 Ctrl+Alt+X 触发截图遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）", cap_why)
+        ck_skip("★★ Esc 真按键收窗（截图遮罩 PreviewKeyDown→Cancel 链）", cap_why)
+    else:
+        ck("★★ 真按键 Ctrl+Alt+X 触发截图遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
+           cap_hotkey.get("overlayShown") is True, str(cap_hotkey)[:200])
+        ck("★★ Esc 真按键收窗（截图遮罩 PreviewKeyDown→Cancel 链）",
+           cap_hotkey.get("escClosed") is True, str(cap_hotkey)[:200])
 
     # ── 1c-6c. W6-b：截图端到端（真鼠标拖拽 → 剪贴板位图尺寸对账 → 单击取消契约）────
     #     断言三层：① 拖拽复制后遮罩全收 + 剪贴板真拿到位图（FR-2）；
@@ -1100,8 +1212,14 @@ def main() -> int:
     r = run(["--probe-pick-hotkey", "--no-prompt", "--out", pick_file,
              "--tools-dir", tools_dir, "--install-root", install_root,
              "--config-root", config_root], timeout=120)
-    ck("取色热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", r.returncode == 0,
-       f"code={r.returncode} err={r.stderr[:200]}")
+    pick_verdict, pick_why = hotkey_probe_verdict(r.returncode, probe_occupied_hotkeys(repo), "Ctrl+Alt+C")
+    if pick_verdict == "pass":
+        ck("取色热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", True)
+    elif pick_verdict == "skip":
+        ck_skip("取色热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", pick_why)
+    else:
+        ck("取色热键真按键探针退出码 0（真注入组合键→遮罩→Esc 收窗）", False,
+           f"code={r.returncode} {pick_why} err={r.stderr[:160]}")
     pick_hotkey = {}
     if os.path.isfile(pick_file):
         try:
@@ -1109,10 +1227,21 @@ def main() -> int:
                 pick_hotkey = json.load(f)
         except (OSError, json.JSONDecodeError) as ex:
             info(f"取色热键探针输出不可解析：{ex}")
-    ck("★★ 真按键 Ctrl+Alt+C 触发取色遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
-       pick_hotkey.get("overlayShown") is True, str(pick_hotkey)[:200])
-    ck("★★ Esc 真按键收窗（取色遮罩 PreviewKeyDown→Cancel 链）",
-       pick_hotkey.get("escClosed") is True, str(pick_hotkey)[:200])
+    #     ★ 这个探针在"热键未注册"时**返回 0**（它认为自己已如实报告失败）⇒ 单看 rc 判不出来，
+    #     必须同时看组合键占用（与 1c-5/6/7 同源判定，2026-10-03）。
+    pick_occupied = "Ctrl+Alt+C" in (probe_occupied_hotkeys(repo) or [])
+    if pick_verdict == "skip" or pick_occupied:
+        why = pick_why or "组合键 Ctrl+Alt+C 已被别的进程占用（probe-hotkey-free 确认）"
+        ck_skip("★★ 真按键 Ctrl+Alt+C 触发取色遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）", why)
+        ck_skip("★★ Esc 真按键收窗（取色遮罩 PreviewKeyDown→Cancel 链）", why)
+    else:
+        ck("★★ 真按键 Ctrl+Alt+C 触发取色遮罩全屏出现（RegisterHotKey→WM_HOTKEY 链）",
+           pick_hotkey.get("overlayShown") is True, str(pick_hotkey)[:200])
+        # ★ 两条断言**必须都在 else 里**（2026-10-03 修）：原先这条写在了 if/else 之外，
+        #   于是"热键被占 ⇒ ck_skip 记一次"之后**还会被硬判一次** ⇒ 环境冲突时必红。
+        #   对照 1c-5（OCR）那两个 ck 都在 else 内，此处是同一个模式漏了一半。
+        ck("★★ Esc 真按键收窗（取色遮罩 PreviewKeyDown→Cancel 链）",
+           pick_hotkey.get("escClosed") is True, str(pick_hotkey)[:200])
 
     # ── 1c-6e. W6-c：取色端到端（确定性三格式 + 真移动单击 → 剪贴板对账）────────────
     #     ① 确定性面：已知纯色（255,0,0）走 SampleCenter+ColorFormatter 同一条链，
@@ -1284,6 +1413,340 @@ def main() -> int:
        mon.get("listenerStarted") is True and mon.get("captured") is True
        and mon.get("storeHits") == 1,
        f"mon={ {k: mon.get(k) for k in ('listenerStarted', 'captured', 'elapsedMs', 'storeHits')} }")
+
+    # ── 1c-9. W7-b：启动器（非文件来源）行渲染 / 动作分派 / 段位隔离 / 真 apps 扫描 ──
+    #     为什么单独一个探针：搜索窗渲染探针（1c-4）的**每条断言**都是"文件项零变化"的
+    #     机器证据（FR-10），一行都不许动。新来源的行为必须有自己的观测面。
+    #     无副作用：应用动作只断言"构造出来的参数"，不真启动应用、不真弹 Explorer。
+    lnch_file = os.path.join(repo, "_scratch", "desktop-launcher.json")
+    if os.path.exists(lnch_file):
+        os.remove(lnch_file)
+    r = run(["--probe-launcher", "all", "--no-prompt", "--out", lnch_file,
+             "--tools-dir", tools_dir, "--install-root", install_root,
+             "--config-root", config_root], timeout=180)
+    ck("启动器探针退出码 0（rows/actions/isolation/router/calc/unit/encode/config/apps/usage/corestatus 十一模式）", r.returncode == 0,
+       f"code={r.returncode} err={r.stderr[:200]}")
+    lnch = {}
+    if os.path.isfile(lnch_file):
+        try:
+            with open(lnch_file, encoding="utf-8") as f:
+                lnch = json.load(f)
+        except (OSError, json.JSONDecodeError) as ex:
+            info(f"启动器探针输出不可解析：{ex}")
+
+    rows = lnch.get("rows") or {}
+    ck("★ 启动器行渲染：段序 pin→apps（Calc/Unit/Encode/App 四条非文件行）",
+       rows.get("kinds") == ["Calc", "Unit", "Encode", "App"], str(rows.get("kinds"))[:200])
+    ck("★ 启动器行渲染：类型徽标逐项正确（= / ⇄ / {} / ▸）",
+       rows.get("badges") == ["=", "⇄", "{}", "▸"], str(rows.get("badges"))[:200])
+    ck("★ 启动器行渲染：主行/副行都落到控件上（不是空行）",
+       all(t for t in (rows.get("titles") or [])) and all(s for s in (rows.get("subtitles") or [])),
+       f"titles={rows.get('titles')} subs={rows.get('subtitles')}")
+    ck("★★ 启动器行渲染：文件行**不走**新控件（LauncherRowText 里一条 File 都没有 —— FR-10 反向断言）",
+       rows.get("fileRowLeaked") is False, str(rows.get("fileRowLeaked")))
+    ck("★★ 启动器行渲染：文件段计数不受新来源影响（显示 200 / 共 12345 条）",
+       rows.get("statusRight") == "显示 200 / 共 12345 条", repr(rows.get("statusRight")))
+    ck("★★ 启动器行渲染：文件行仍由 HitText 渲染并读出名字（既有断言面未迁移）",
+       rows.get("firstNameFromHitText") == "季报2026年度.pdf", repr(rows.get("firstNameFromHitText")))
+    ck("★ 启动器行渲染：204 条仍只生成少量容器（虚拟化未被新模板破坏）",
+       0 < (rows.get("realizedContainers") or 0) < 60, str(rows.get("realizedContainers")))
+    ck("★ 启动器行渲染：应用行取到真图标，其余来源不显示图标",
+       (rows.get("icons") or [])[3:] == [True] and (rows.get("icons") or [])[:3] == [False, False, False],
+       str(rows.get("icons")))
+    ck("★ 启动器行渲染：主行高亮区间来自 provider（apps 匹配给出）",
+       (rows.get("segmentCounts") or [0])[3] >= 1, str(rows.get("segmentCounts")))
+
+    acts = lnch.get("actions") or {}
+    ck("★★ 动作分派：Ctrl+C 在 calc 行复制**结果值**且**不收窗**",
+       acts.get("ctrlCHandled") is True and acts.get("ctrlCText") == "96"
+       and acts.get("visibleAfterCtrlC") is True, str(acts)[:260])
+    ck("★★ 动作分派：Enter 在 calc 行 = 复制结果值 + 收窗",
+       acts.get("enterHandled") is True and acts.get("enterText") == "96"
+       and acts.get("hiddenAfterEnter") is True, str(acts)[:260])
+    ck("★★ 动作分派：文件行 Ctrl+C 复制索引回传的**全路径**（与 W7 之前逐字一致）",
+       acts.get("fileCopyLooksLikePath") is True
+       and str(acts.get("fileCopyText", "")).endswith(".txt"), str(acts.get("fileCopyText")))
+    ck("★ 动作分派：应用动作只构造参数（FileName=快捷方式全路径 + 工作目录=所在目录，不真起进程）",
+       str(acts.get("launchFileName", "")).endswith(".exe")
+       and str(acts.get("launchWorkingDir", "")).replace("/", "\\")
+       == str(acts.get("launchFileName", "")).rsplit("\\", 1)[0].replace("/", "\\"),
+       f"file={acts.get('launchFileName')} cwd={acts.get('launchWorkingDir')}")
+    ck("★ 动作分派：reveal 参数反斜杠归一（正斜杠是静默 no-op）+ 引号只包路径",
+       acts.get("revealPathHasForwardSlash") is False
+       and str(acts.get("revealArgs", "")).startswith('/select,"'),
+       repr(acts.get("revealArgs"))[:200])
+    ck("★ 动作失败文案：目标不存在与其它异常给**不同**文案",
+       "目标不存在" in str(acts.get("failureMissing", ""))
+       and "文件不存在" in str(acts.get("openFailureLegacy", "")),
+       f"{acts.get('failureMissing')} / {acts.get('openFailureLegacy')}")
+
+    iso = lnch.get("isolation") or {}
+    ck("★★ 段位隔离：apps 段故障在状态行**可见且带原因**，files 段照常渲染",
+       iso.get("hasReason") is True and (iso.get("itemsCount") or 0) > 0, str(iso)[:260])
+    # 同一族的第二条出口：启动期配置告警（只写日志 = 出口不可达，审查规范 §3.3⑤）
+    ck("★★ 配置告警出口可达：非法 launcher.providers ⇒ 状态行**首次唤出可见**",
+       iso.get("configWarningShown") is True, str(iso)[:200])
+    ck("★ 配置告警只报一次：查询结果到达后正常覆盖它（不形成常驻噪音）",
+       iso.get("configWarningOverwrittenByResults") is True, str(iso)[:200])
+
+    # ── calc（W7-c）：真链路 —— 该静默的真静默 · 该出行的真出行 · 动作语义正确 ──
+    calc = lnch.get("calc") or {}
+
+    def _calc_pair(key):
+        d = calc.get(key) or {}
+        return d.get("calcRows"), d.get("fileRows")
+
+    ok_leads = (calc.get("okLeadingKinds") or [])[:1]
+    ck("★★ calc 真链路：`128 * 3/4` 出结果行且**置顶在第一条**（pin 段），值/副行/徽标逐字正确",
+       calc.get("okRowShown") is True and calc.get("okRowCount") == 1
+       and calc.get("okKind") == "Calc" and calc.get("okTitle") == "96"
+       and calc.get("okSubtitle") == "= 128*3/4" and calc.get("okBadge") == "="
+       and ok_leads == ["Calc"],
+       f"row={calc.get('okKind')}/{calc.get('okTitle')}/{calc.get('okSubtitle')}/{calc.get('okBadge')} "
+       f"leading={calc.get('okLeadingKinds')}")
+    ck("★ calc 真链路：文件段不受影响（200 条 + 计算行 = 201，且渲染日志首条就是它）",
+       calc.get("okItemsCount") == 201 and (calc.get("okRenderLog") or "").startswith("1|201|96"),
+       f"items={calc.get('okItemsCount')} log={calc.get('okRenderLog')!r}")
+    ck("★★ calc 动作：Enter 复制**格式化结果值**并收窗（不是复制表达式、不是留窗）",
+       calc.get("enterHandled") is True and calc.get("okClipboard") == "96"
+       and calc.get("okWindowHidden") is True,
+       f"handled={calc.get('enterHandled')} clip={calc.get('okClipboard')!r} hidden={calc.get('okWindowHidden')}")
+
+    # ★ 静默类：判据是"没有 calc 行"**且**"文件段照常渲染"—— 只断前者的话，
+    #   "整轮查询压根没跑"也满足它（弱断言）。
+    for key, label, text in (("plainNumber", "纯数字 `2026`", "2026"),
+                             ("letterText", "含字母 `report-2026.txt`", "report-2026.txt"),
+                             ("halfDone", "半成品 `1+`", "1+")):
+        cr, fr = _calc_pair(key)
+        ck(f"★★ calc 静默：{label} 完全不出行（0 条 calc 行），而文件段照常渲染 200 条（证明这轮查询真跑了）",
+           cr == 0 and fr == 200, f"calcRows={cr} fileRows={fr}")
+
+    ck("★★ calc 求值错：`1/0` **出行**且副标题是显式文案「除零」（不是静默、不是空串）",
+       calc.get("divRows") == 1 and calc.get("divTitle") == "1/0"
+       and calc.get("divSubtitle") == "除零",
+       f"rows={calc.get('divRows')} title={calc.get('divTitle')!r} sub={calc.get('divSubtitle')!r}")
+    ck("★★ calc 求值错：Enter **不复制、不收窗**，只把「该结果不可执行」写进状态行（动作禁用 ≠ 复制空串）",
+       calc.get("clipboardBeforeEnter") == calc.get("clipboardAfterEnter")
+       and calc.get("errorWindowStillVisible") is True
+       and "不可执行" in str(calc.get("errorStatusText", "")),
+       f"clip {calc.get('clipboardBeforeEnter')!r}→{calc.get('clipboardAfterEnter')!r} "
+       f"visible={calc.get('errorWindowStillVisible')} status={calc.get('errorStatusText')!r}")
+    # §4.2 的 Ctrl+Enter 语义（W7-d 回填：W7-c 曾错写成"回落主动作"）
+    ck("★★ calc 次动作：Ctrl+Enter 复制「表达式 = 结果」整串并收窗（不是只复制值）",
+       calc.get("ctrlEnterClipboard") == "1+2 = 3" and calc.get("ctrlEnterWindowHidden") is True,
+       f"clip={calc.get('ctrlEnterClipboard')!r} hidden={calc.get('ctrlEnterWindowHidden')}")
+
+    # ── unit（W7-d）：真链路 —— 触发词三态 / 仿射温度 / 两制式标注 / 无触发词列常用单位 ──
+    unit = lnch.get("unit") or {}
+    ck("★★ unit 真链路：`10 km to mi` 出结果行且**置顶**，值/副行/徽标逐字正确",
+       unit.get("okShown") is True and unit.get("okRowCount") == 1
+       and unit.get("okKind") == "Unit" and unit.get("okTitle") == "6.2137119224 mi"
+       and unit.get("okSubtitle") == "10 km to mi = 6.2137119224 mi"
+       and unit.get("okBadge") == "⇄"
+       and (unit.get("okLeadingKinds") or [])[:1] == ["Unit"]
+       and unit.get("okItemsCount") == 201,
+       f"{unit.get('okKind')}/{unit.get('okTitle')!r}/{unit.get('okSubtitle')!r}/{unit.get('okBadge')!r} "
+       f"leading={unit.get('okLeadingKinds')} items={unit.get('okItemsCount')}")
+    ck("★ unit 动作：Enter 复制结果值（含单位）并收窗",
+       unit.get("enterHandled") is True and unit.get("okClipboard") == "6.2137119224 mi"
+       and unit.get("okWindowHidden") is True,
+       f"clip={unit.get('okClipboard')!r} hidden={unit.get('okWindowHidden')}")
+    ck("★★ unit 温度仿射：`-40C to F` = `-40 °F`（经典恒等式 —— 乘系数实现在这里必错）",
+       unit.get("negTitle") == "-40 °F" and unit.get("negSubtitle") == "-40C to F = -40 °F",
+       f"title={unit.get('negTitle')!r} sub={unit.get('negSubtitle')!r}")
+    ck("★★ unit 数据量两制式：副行必须带「1000 进制 → 1024 进制」（否则 953MiB 会被当成 bug）",
+       unit.get("dataTitle") == "953.6743164063 MiB"
+       and "（1000 进制 → 1024 进制）" in str(unit.get("dataSubtitle", "")),
+       f"title={unit.get('dataTitle')!r} sub={unit.get('dataSubtitle')!r}")
+    _unit_titles = unit.get("listTitles") or []
+    ck("★★ unit 无触发词：列同类常用单位 4 行、**不含源单位**（恒等行是噪声）、首行与显式换算一致",
+       unit.get("listRowCount") == 4 and _unit_titles[:1] == ["6.2137119224 mi"]
+       and not any(str(t).endswith(" km") for t in _unit_titles),
+       f"rows={unit.get('listRowCount')} titles={_unit_titles}")
+    ck("★★ unit 不做清单：单位混算 / 未知单位 ⇒ 0 行，但文件段照常 200 条且**本轮确实渲染过**",
+       unit.get("mixedRows") == 0 and unit.get("mixedFileRows") == 200
+       and unit.get("mixedRendered") is True
+       and unit.get("unknownRows") == 0 and unit.get("unknownFileRows") == 200
+       and unit.get("unknownRendered") is True,
+       f"mixed={unit.get('mixedRows')}/{unit.get('mixedFileRows')}/{unit.get('mixedRendered')} "
+       f"unknown={unit.get('unknownRows')}/{unit.get('unknownFileRows')}/{unit.get('unknownRendered')}")
+
+    # ── encode（W7-d）：真链路 —— 六前缀 / 非法输入显式错误行 / 无前缀静默 ──
+    enc = lnch.get("encode") or {}
+    ck("★★ encode 真链路：`b64:你好` 出结果行且**置顶**，值/副行/徽标逐字正确",
+       enc.get("okShown") is True and enc.get("okRowCount") == 1
+       and enc.get("okKind") == "Encode" and enc.get("okTitle") == "5L2g5aW9"
+       and enc.get("okSubtitle") == "base64 编码" and enc.get("okBadge") == "{}"
+       and (enc.get("okLeadingKinds") or [])[:1] == ["Encode"]
+       and enc.get("okItemsCount") == 201,
+       f"{enc.get('okKind')}/{enc.get('okTitle')!r}/{enc.get('okSubtitle')!r}/{enc.get('okBadge')!r} "
+       f"leading={enc.get('okLeadingKinds')} items={enc.get('okItemsCount')}")
+    ck("★ encode 动作：Enter 复制转换结果并收窗",
+       enc.get("enterHandled") is True and enc.get("okClipboard") == "5L2g5aW9"
+       and enc.get("okWindowHidden") is True,
+       f"clip={enc.get('okClipboard')!r} hidden={enc.get('okWindowHidden')}")
+    ck("★★ encode 六前缀全覆盖：b64d / u: / ud: / url: 逐字正确（按码点走，emoji 不给半截码位）",
+       enc.get("decodeTitle") == "你好" and enc.get("codePointTitle") == "U+4E2D U+0041"
+       and enc.get("fromCodePointTitle") == "中A" and enc.get("urlTitle") == "a%20b%26c",
+       f"b64d={enc.get('decodeTitle')!r} u:={enc.get('codePointTitle')!r} "
+       f"ud:={enc.get('fromCodePointTitle')!r} url:={enc.get('urlTitle')!r}")
+    ck("★★ encode 非法输入：**显式错误行**（不是静默）+ 动作禁用 ⇒ Enter 不复制、不收窗、状态行明示",
+       enc.get("badRows") == 1 and enc.get("badTitle") == "无效的 base64 输入"
+       and enc.get("badSubtitle") == "base64 解码"
+       and enc.get("badClipboardBefore") == enc.get("badClipboardAfter")
+       and enc.get("badWindowStillVisible") is True
+       and "不可执行" in str(enc.get("badStatusText", "")),
+       f"rows={enc.get('badRows')} title={enc.get('badTitle')!r} clip="
+       f"{enc.get('badClipboardBefore')!r}→{enc.get('badClipboardAfter')!r} "
+       f"visible={enc.get('badWindowStillVisible')} status={enc.get('badStatusText')!r}")
+    ck("★ encode 残缺转义：`urld:a%ZZ` 同样显式报错（`Uri.UnescapeDataString` 自己不会报）",
+       enc.get("badUrlTitle") == "无效的 URL 编码", f"title={enc.get('badUrlTitle')!r}")
+    ck("★★ encode 无前缀 ⇒ 完全静默（D9=A：弱特征自动嗅探必然污染文件搜索结果）",
+       enc.get("bareRows") == 0 and enc.get("bareFileRows") == 200 and enc.get("bareRendered") is True,
+       f"rows={enc.get('bareRows')} files={enc.get('bareFileRows')} rendered={enc.get('bareRendered')}")
+
+    # ── config（W7-d）：协议层观测面 —— 这里是"键缺失 ⇒ 默认集合"这一态；
+    #     其余三态（合法/未知/空）由 acceptance 步骤 8 的两层闭环（真 CLI 写入）配对断言。
+    cfg = lnch.get("config") or {}
+    _cfg_all = ["files", "apps", "calc", "unit", "encode"]
+    ck("★★ launcher.providers 协议层：键缺失 ⇒ 解析出全部已实现来源且无错误、无告警",
+       (cfg.get("providers") or []) == _cfg_all
+       and cfg.get("hasError") is False and cfg.get("hasWarning") is False,
+       f"providers={cfg.get('providers')} err={cfg.get('hasError')} warn={cfg.get('hasWarning')}")
+
+    # ── usage（W7-e）：频次记忆真链路 —— 排序提前 · 落盘回读 · 开关关 · 损坏文件 ──
+    usg = lnch.get("usage") or {}
+    ck("★★ usage 真链路：记录两次的应用在**同分对手之前**（频次加成真的进了排序）",
+       usg.get("recordedFirst") is True and usg.get("firstAppTitle") == "TwoApp",
+       f"first={usg.get('firstAppTitle')!r} second={usg.get('secondAppTitle')!r}")
+    ck("★ usage 落盘回读：Flush 后新实例读同一文件 ⇒ count==2 且加成 >0（持久化真的发生了）",
+       usg.get("flushed") is True and usg.get("roundtripCount") == 2
+       and (usg.get("roundtripBoost") or 0) > 0 and usg.get("usageFileExists") is True,
+       f"count={usg.get('roundtripCount')} boost={usg.get('roundtripBoost')} file={usg.get('usageFileExists')}")
+    ck("★★ usage 开关关 ⇒ **彻底不读写**（Record 不落盘、BoostFor 恒 0 —— 不是「只写不读」）",
+       usg.get("disabledWroteFile") is False and usg.get("disabledBoost") == 0,
+       f"file={usg.get('disabledWroteFile')} boost={usg.get('disabledBoost')}")
+    ck("★ usage 文件损坏 ⇒ 空表继续服务 + LastError 非空（响亮但不崩、不阻塞查询）",
+       usg.get("corruptEntryCount") == 0 and usg.get("corruptHasError") is True,
+       f"entries={usg.get('corruptEntryCount')} hasError={usg.get('corruptHasError')}")
+
+    # ── 1c-9c. W8·B1：核心服务不可达 ⇒ 两个显示面都要说实话（--probe-launcher corestatus）──
+    #     为什么必须有这一段：B1 的原始症状是"界面说了假话"，而**这句话是窗口说的**。
+    #     selftest 37.x 覆盖的是分流**决策**（纯函数），窗口层"拿到结论后显示什么、能不能点"
+    #     只有这里能验 —— 而且"长得可点"与"点了真接到宿主动作"是两件事，后者要真点一下。
+    cs = {c.get("availability"): c for c in (lnch.get("corestatus") or {}).get("cases") or []}
+    ck("★ corestatus：四种可达性都跑到（四态穷举，缺一则是分支未覆盖而非全绿）",
+       set(cs) == {"CoreOk", "CoreNotRunning", "CoreNotElevated", "Unknown"},
+       str(sorted(cs)))
+
+    _ok = cs.get("CoreOk") or {}
+    ck("★★ corestatus：真在建 ⇒ 文案逐字不变且**不可点**（W7 FR-10 的文案面与交互面）",
+       _ok.get("statusText") == "正在建索引（首次全量约 10 秒级，取决于文件数）—— 打字会自动重试"
+       and _ok.get("statusLaunchable") is False and _ok.get("launchClicks") == 0,
+       f"text={_ok.get('statusText')!r} clickable={_ok.get('statusLaunchable')} clicks={_ok.get('launchClicks')}")
+
+    _run = cs.get("CoreNotRunning") or {}
+    ck("★★ corestatus：Core 未运行 ⇒ 状态行给「点此启动」出口，且**点击真的接到宿主动作**",
+       _run.get("statusText") == "搜索需要启动核心服务，点此启动"
+       and _run.get("statusLaunchable") is True
+       and _run.get("launchClicks") == 1,
+       f"text={_run.get('statusText')!r} clickable={_run.get('statusLaunchable')} clicks={_run.get('launchClicks')}")
+
+    _ele = cs.get("CoreNotElevated") or {}
+    ck("★ corestatus：Core 未提权 ⇒ 另一种说法与另一种动作（不把两件事混成一句）",
+       _ele.get("statusLaunchable") is True and _ele.get("launchClicks") == 1
+       and "未提权" in str(_ele.get("statusText")),
+       f"text={_ele.get('statusText')!r} clicks={_ele.get('launchClicks')}")
+
+    ck("★★ corestatus：★ 第二显示面也分流（卷清单行不再说「后台自举进行中」这个永不成立的进展）",
+       "核心服务未运行" in str(_run.get("volumesLine"))
+       and "核心服务未提权" in str(_ele.get("volumesLine"))
+       and "后台自举进行中" in str(_ok.get("volumesLine")),
+       f"未运行={_run.get('volumesLine')!r} 未提权={_ele.get('volumesLine')!r} CoreOk={_ok.get('volumesLine')!r}")
+
+    _unk = cs.get("Unknown") or {}
+    ck("★★ corestatus：探测无结论 ⇒ 保守回落（不说核心服务有问题、坚决不给按钮）",
+       _unk.get("statusText") == _ok.get("statusText")
+       and _unk.get("statusLaunchable") is False and _unk.get("launchClicks") == 0,
+       f"text={_unk.get('statusText')!r} clickable={_unk.get('statusLaunchable')}")
+
+    ck("★ corestatus：夹具真的走了协议（query 与 status 都被问过 —— 不是硬编码文案）",
+       (_run.get("queries") or 0) >= 1 and (_run.get("statuses") or 0) >= 1,
+       f"queries={_run.get('queries')} statuses={_run.get('statuses')}")
+
+    # ── 1c-9d. W8·B1：启动动作的**可判定面**（corestatus.launch / .echo）──
+    #     真起一个提权进程没法自动化，但"启动参数对不对 / 取消怎么识别 / 等到什么算成功"
+    #     全都能穷举 —— 而"是不是真的走了 UAC 提权"是 **NFR-1 红线**，不该只靠人眼看弹窗。
+    _cs = lnch.get("corestatus") or {}
+    cl = _cs.get("launch") or {}
+    ck("★★ 提权启动参数（NFR-1 红线）：UseShellExecute=true + Verb=runas —— 少任一个拉起来的都是同令牌进程",
+       cl.get("useShellExecute") is True and cl.get("verb") == "runas",
+       f"useShellExecute={cl.get('useShellExecute')} verb={cl.get('verb')!r}")
+    ck("★ 提权启动参数：不设任何重定向 + 隐藏窗口 + `--root` 指向安装根",
+       cl.get("redirected") is False and cl.get("windowStyle") == "Hidden"
+       and str(cl.get("arguments", "")).startswith('--root "'),
+       f"redirected={cl.get('redirected')} style={cl.get('windowStyle')} args={cl.get('arguments')!r}")
+    ck("★★ UAC 取消（Win32 1223）⇒ Cancelled，且文案**不带「失败」**（那是用户决策不是错误）",
+       cl.get("cancelOutcome") == "Cancelled"
+       and "失败" not in str(cl.get("cancelMessage", ""))
+       and "取消" in str(cl.get("cancelMessage", "")),
+       f"outcome={cl.get('cancelOutcome')} msg={cl.get('cancelMessage')!r}")
+    ck("★ 其它启动异常 ⇒ Failed（不冒充「用户取消」）",
+       cl.get("deniedOutcome") == "Failed" and cl.get("genericOutcome") == "Failed",
+       f"denied={cl.get('deniedOutcome')} generic={cl.get('genericOutcome')}")
+    _steps = {s.get("case"): s.get("decision") for s in cl.get("waitSteps") or []}
+    ck("★★ 就绪判定穷举：端点已登记⇒Launched · 未登记⇒继续等 · exit=3⇒AlreadyRunning · 其它退出码⇒Failed",
+       _steps.get("进程活着 + 端点已登记") == "Launched"
+       and _steps.get("进程活着 + 端点未登记") == "(继续等)"
+       and _steps.get("进程退出 exit=3（已有实例）") == "AlreadyRunning"
+       and _steps.get("进程退出 exit=1（异常退出）") == "Failed",
+       str(_steps))
+
+    _echo = {e.get("outcome"): e for e in _cs.get("echo") or []}
+    ck("★★ 回显：取消/失败后**出口必须还在**（取消一次按钮就消失 ⇒ 用户只能回命令行）",
+       all((_echo.get(o) or {}).get("launchableAfterClick") is True for o in ("Cancelled", "Failed"))
+       and all((_echo.get(o) or {}).get("clicks") == 1 for o in ("Cancelled", "Failed", "Launched")),
+       str({k: (v.get("launchableAfterClick"), v.get("clicks")) for k, v in _echo.items()}))
+    ck("★ 回显：三种结局各说各的话（不是一句「启动失败」套所有）",
+       all((_echo.get(o) or {}).get("messageMatched") is True for o in ("Cancelled", "Failed", "Launched")),
+       str({k: v.get("statusTextAfterClick") for k, v in _echo.items()}))
+    ck("★ 回显：启动成功后出口**不再保留**（窗口马上被托盘重建，留着会误导）",
+       (_echo.get("Launched") or {}).get("launchableAfterClick") is False,
+       str((_echo.get("Launched") or {}).get("launchableAfterClick")))
+
+    rt = lnch.get("router") or {}
+    # 前三态先钉住"用例真的跑到了被测路径"——否则下面那条"没上屏"就可能是因为压根没派发
+    ck("★ 代次闸用例起势：首发批次已派发且慢来源确被问过（否则「没上屏」无从谈起）",
+       rt.get("dispatchedFirstBatch") is True and (rt.get("slowCalls") or 0) >= 1
+       and rt.get("emptiedToPlaceholder") is True and (rt.get("rendersAfterEmpty") or 0) >= 1,
+       f"dispatched={rt.get('dispatchedFirstBatch')} slowCalls={rt.get('slowCalls')} "
+       f"emptied={rt.get('emptiedToPlaceholder')} renders={rt.get('rendersAfterEmpty')}")
+    ck("★★ 代次闸（R3）上屏级证据：过期批次放行后**一次新渲染都没发生**（陈旧条目从未铺到屏幕上）",
+       rt.get("staleEverRendered") is False
+       and (rt.get("rendersAfterRelease") or 0) == (rt.get("rendersAfterEmpty") or 0)
+       and (rt.get("itemsOnScreen") or 0) == 0
+       and "输入以搜索" in str(rt.get("statusText", "")),
+       f"log={rt.get('renderLog')} items={rt.get('itemsOnScreen')} status={rt.get('statusText')!r}")
+
+    apps = lnch.get("apps") or {}
+    ck("★ 真 apps 扫描：递归收录 .lnk / 收录 .url / 过滤「卸载」项",
+       apps.get("ready") is True and apps.get("recursiveIncluded") is True
+       and apps.get("urlIncluded") is True and apps.get("uninstallFiltered") is True,
+       f"entries={apps.get('entries')}")
+    ck("★★ 真 apps 扫描：图标句柄斜率 = 0（200 次提取后进程句柄数不增长）",
+       apps.get("iconHandleDelta") == 0,
+       f"before={apps.get('iconHandlesBefore')} after={apps.get('iconHandlesAfter')}")
+    ck("★ 图标缓存：受上限约束（520 次不同路径请求后 ≤ 512）且真的命中过缓存",
+       0 < (apps.get("iconCached") or 0) <= 512 and (apps.get("iconCacheHits") or 0) > 0,
+       f"cached={apps.get('iconCached')} hits={apps.get('iconCacheHits')} misses={apps.get('iconCacheMisses')}")
+    ck("★ 指纹失效：新增条目后 InvalidateIfChanged 触发重扫并看到新条目",
+       apps.get("rescanTriggered") is True and apps.get("seesNewEntry") is True,
+       f"rescanned={apps.get('rescanTriggered')} sees={apps.get('seesNewEntry')}")
+    ck("★★ 首扫就绪补发：应用结果**自己冒出来**（不用再敲一个字符）—— R10",
+       apps.get("requeryCount") == 1
+       and (apps.get("itemsAfterReady") or 0) > (apps.get("itemsBeforeReady") or 0),
+       f"requery={apps.get('requeryCount')} before={apps.get('itemsBeforeReady')} "
+       f"after={apps.get('itemsAfterReady')}")
 
     # ── 2. ★ 核心链路：托盘进程 → 宿主 → 工具进程（真实剪贴板驱动）───────────
     readme = os.path.join(repo, "README.md").replace("\\", "/")

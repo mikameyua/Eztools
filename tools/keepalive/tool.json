@@ -27,9 +27,5 @@
         "description": "以退出码 3 结束进程，验证宿主自动重启与熔断"
       }
     ]
-  },
-  "config": {
-    "type": "object",
-    "properties": {}
   }
 }

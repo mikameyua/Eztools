@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Eztools.ClipboardLib;
 using Eztools.Contracts;
 using Eztools.Host;
+using Eztools.Host.Launcher;
 using Eztools.Host.Processes;
 using Eztools.Index;
 using Eztools.Ocr;
@@ -177,6 +178,14 @@ internal static class SelfTestCommand
 
         RunManifestLifecycleCases();
 
+        // 6D-2) configHidden / x-group / x-advanced 解析（方案 C2/C3，2026-09-30 设置面板）
+        if (!cli.GetBool("json"))
+        {
+            ConsoleUi.Section("清单解析：configHidden 与 x-group/x-advanced 元数据");
+        }
+
+        RunConfigMetadataCases();
+
         // 6E) 进程组（N2 补齐：设计方案 §5.1「独立进程的语义补齐」，W3-a-1 ④）
         if (!cli.GetBool("json"))
         {
@@ -247,7 +256,12 @@ internal static class SelfTestCommand
             ConsoleUi.Section("搜索会话编排（W3-d-1）");
         }
 
-        await RunSearchSessionCasesAsync().ConfigureAwait(false);
+        await RunLauncherCasesAsync().ConfigureAwait(false);
+        RunLauncherConfigCases();
+        RunCalcCases();
+        RunConvertCases();
+        RunUsageCases();
+        await RunCoreAvailabilityCasesAsync().ConfigureAwait(false);
 
         // 6N) 资源占用与暂停（W3-e-1：后台线程优先级 + 暂停索引开关）
         if (!cli.GetBool("json"))
@@ -1046,6 +1060,81 @@ internal static class SelfTestCommand
             Report("闸门防御：recover=\"true\"（字符串）⇒ 类型告警且 resident 仍被拦",
                 notBool && gated && !r.Ok,
                 $"类型告警={notBool}，闸门拦截={gated}");
+        }
+    }
+
+    /// <summary>
+    /// configHidden / x-group / x-advanced 解析用例（方案 C2/C3，2026-09-30 设置面板）。
+    ///
+    /// 为什么值得单列：解析器对未知字段**一律忽略**（前向兼容）—— 这三个标记若漏了模型
+    /// 落地，只会"无害但惰性"地静默失效，没有任何诊断。所以这里做**双向**断言：
+    /// 声明时字段真的进模型（正向），并靠 1.8 双展示面（list --json / config list --json）
+    /// 的 acceptance 断言守住暴露面（本用例钉契约层）。
+    /// </summary>
+    private static void RunConfigMetadataCases()
+    {
+        // 复用 lifecycle 用例的夹具目录（里面有真 main.py，entry 存在性 Error 不会污染判定）
+        var toolDir = Path.Combine(Path.GetTempPath(), "ezt-selftest-lifecycle");
+        Directory.CreateDirectory(toolDir);
+        var entryPath = Path.Combine(toolDir, "main.py");
+        if (!File.Exists(entryPath))
+        {
+            File.WriteAllText(entryPath, "# selftest fixture\n");
+        }
+
+        var manifestPath = Path.Combine(toolDir, "tool.json");
+
+        // ── ① configHidden 正向：true ⇒ 进模型 ──
+        {
+            const string json = @"{""id"": ""t1"", ""name"": ""t1"", ""version"": ""0.0.0"","
+                + @"""runtime"": ""python"", ""entry"": ""main.py"", ""configHidden"": true,"
+                + @"""config"": {""type"": ""object"", ""properties"": {""a"": {""type"": ""string""}}}}";
+            var r = ManifestParser.Parse(json, manifestPath, "selftest");
+
+            Report("configHidden=true ⇒ ToolManifest.ConfigHidden 进模型（不惰性）",
+                r.Ok && r.Manifest!.ConfigHidden,
+                $"Ok={r.Ok}，ConfigHidden={r.Manifest!.ConfigHidden}");
+        }
+
+        // ── ② configHidden 缺省 ⇒ false（正常写法零噪音）──
+        {
+            const string json = @"{""id"": ""t2"", ""name"": ""t2"", ""version"": ""0.0.0"","
+                + @"""runtime"": ""python"", ""entry"": ""main.py""}";
+            var r = ManifestParser.Parse(json, manifestPath, "selftest");
+
+            Report("configHidden 缺省 ⇒ false 且无诊断",
+                r.Ok && !r.Manifest!.ConfigHidden && r.Diagnostics.Count == 0,
+                $"ConfigHidden={r.Manifest!.ConfigHidden}，诊断数={r.Diagnostics.Count}");
+        }
+
+        // ── ③ configHidden 非布尔 ⇒ 警告 + 按 false（recover 同口径，不静默）──
+        {
+            const string json = @"{""id"": ""t3"", ""name"": ""t3"", ""version"": ""0.0.0"","
+                + @"""runtime"": ""python"", ""entry"": ""main.py"", ""configHidden"": ""true""}";
+            var r = ManifestParser.Parse(json, manifestPath, "selftest");
+
+            Report("configHidden=\"true\"（字符串）⇒ 警告且按未声明处理",
+                r.Ok && !r.Manifest!.ConfigHidden
+                    && r.Diagnostics.Any(d => d.Severity == DiagnosticSeverity.Warning && d.Code == "config.hidden-not-boolean"),
+                $"ConfigHidden={r.Manifest!.ConfigHidden}，诊断=[{string.Join(", ", r.Diagnostics.Select(d => $"{d.Severity}:{d.Code}"))}]");
+        }
+
+        // ── ④ x-group / x-advanced ⇒ ConfigField 进模型（C3）──
+        {
+            const string json = @"{""id"": ""t4"", ""name"": ""t4"", ""version"": ""0.0.0"","
+                + @"""runtime"": ""python"", ""entry"": ""main.py"","
+                + @"""config"": {""type"": ""object"", ""properties"": {"
+                + @"""a"": {""type"": ""string"", ""x-group"": ""组一"", ""x-order"": 1},"
+                + @"""b"": {""type"": ""integer"", ""x-advanced"": true, ""x-order"": 2}}}}";
+            var r = ManifestParser.Parse(json, manifestPath, "selftest");
+            var schema = ConfigSchema.FromJson(r.Manifest!.ConfigSchema);
+
+            Report("x-group/x-advanced ⇒ ConfigField.Group/IsAdvanced 进模型",
+                r.Ok
+                    && schema.Field("a")?.Group == "组一" && !schema.Field("a")!.IsAdvanced
+                    && schema.Field("b")?.Group is null && schema.Field("b")!.IsAdvanced,
+                $"a: group={schema.Field("a")?.Group} adv={schema.Field("a")!.IsAdvanced}；"
+                + $"b: group={schema.Field("b")?.Group} adv={schema.Field("b")!.IsAdvanced}");
         }
     }
 
@@ -2359,133 +2448,131 @@ internal static class SelfTestCommand
         }
     }
 
-    private static async Task RunSearchSessionCasesAsync()
+    /// <summary>
+    /// 启动器/搜索链路用例组（W7-a 重命名；原 <c>RunSearchSessionCasesAsync</c>）。
+    ///
+    /// <para><b>为什么整组重指向而不是加一组并行用例</b>：W7-a 把原 <c>SearchSession</c> 的三层收敛
+    /// （节流 / 单在途+trailing / 代次）**平移**进了 <c>QueryPump</c>，把"一次查询 + 过期闸 +
+    /// 错误分层"平移进了 <c>FilesProvider</c> —— 旧类已无生产调用者。留一个只被测试引用的壳
+    /// 就是幽灵代码（审查规范 §3.9 G4 家族），所以**用例随逻辑一起走**：同一批断言、同一个
+    /// 判据，只是被测类型变了。新增 25.7~25.10 把设计方案 §10.4 的 I2/I7/I8/I5 与 §10.5 的
+    /// 映射表变成可机器判定的东西。</para>
+    /// </summary>
+    private static async Task RunLauncherCasesAsync()
     {
-        // 25.1 节流合并（21.7 同判据搬进会话层）：5 次连打 → 真发 2 次（首发 + 防抖后的最末值）
+        // 25.1 节流合并（原 21.7 判据，迁到 QueryPump）：5 次连打 → 真发 2 次（首发 + 防抖后的最末值）
         {
             var clock = 0L;
-            var transport = new SessionSearchTransport();
-            var client = new Eztools.Host.Search.SearchIndexClient(transport);
-            var session = new Eztools.Host.Search.SearchSession(client, nowMs: () => clock);
-            var results = 0;
-            session.OnResults = _ => results++;
-
-            session.Submit("r");
-            clock += 10;
-            session.Submit("re");
-            clock += 10;
-            session.Submit("rep");
-            clock += 10;
-            session.Submit("repo");
-            clock += 10;
-            session.Submit("report");
-
-            var (requested, dispatched) = session.ThrottleCounters;
-            var immediateOk = transport.Queries.Count == 1 && transport.Queries[0] == "r"
-                && requested == 5 && dispatched == 1;
-
-            // 防抖窗口（150ms）走完 → Fire 放行最末值；首发还在途 ⇒ trailing，暂不发第二枪
-            clock += 200;
-            session.Fire();
-            var trailingQueued = transport.Queries.Count == 1;
-
-            transport.Complete();   // 首发响应到（无插队者 ⇒ 不过期，正常回调）；同时触发 trailing 补发 "report"
-            await WaitForAsync(() => transport.Queries.Count == 2).ConfigureAwait(false);
-            var trailingOk = transport.Queries.Count == 2 && transport.Queries[1] == "report"
-                && results == 1;    // 首发结果正常交付（trailing 不吞已到手的响应）
-
-            // ⚠️ 只在 trailing 确实补发了第二枪时才放行第二个响应 —— trailing 被删的突变下
-            // 第二个 gate 不存在，硬放行会重复 SetResult 崩掉整个 selftest（M-S2 实测：
-            // 突变必须以 [FAIL] 呈现，不能以崩溃呈现 —— 崩溃让后续用例失去验证机会）。
-            var finalOk = false;
-            if (transport.Gates.Count > 1 && transport.Queries.Count == 2)
+            var pump = new Eztools.Host.Launcher.QueryPump(nowMs: () => clock);
+            var sent = new List<string>();
+            var gates = new List<TaskCompletionSource<bool>>();
+            var completed = 0;
+            pump.Execute = async ticket =>
             {
-                transport.Complete();   // 补发的响应（epoch=2 == 最新）→ 第二次结果回调
-                await WaitForAsync(() => results == 2).ConfigureAwait(false);
-                finalOk = results == 2;
+                sent.Add(ticket.Text);
+                var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                gates.Add(gate);
+                await gate.Task.ConfigureAwait(false);
+                completed++;
+            };
+
+            pump.Submit("r");
+            clock += 10;
+            pump.Submit("re");
+            clock += 10;
+            pump.Submit("rep");
+            clock += 10;
+            pump.Submit("repo");
+            clock += 10;
+            pump.Submit("report");
+
+            var (requested, dispatched) = pump.ThrottleCounters;
+            var immediateOk = sent.Count == 1 && sent[0] == "r" && requested == 5 && dispatched == 1;
+
+            // 防抖窗口走完 → Fire 放行最末值；首发还在途 ⇒ trailing，暂不发第二枪
+            clock += 200;
+            pump.Fire();
+            var trailingQueued = sent.Count == 1;
+
+            gates[0].SetResult(true);   // 首发执行完 → 触发 trailing 补发 "report"
+            await WaitForAsync(() => sent.Count == 2).ConfigureAwait(false);
+            var trailingOk = sent.Count == 2 && sent[1] == "report"
+                && completed == 1;      // 首发正常完成（trailing 不吞已完成的批次）
+
+            // ⚠️ 只在 trailing 确实补发了第二枪时才放行第二个 gate —— trailing 被删的突变下
+            // 第二个 gate 不存在，硬放行会索引越界崩掉整个 selftest（突变必须以 [FAIL] 呈现，
+            // 不能以崩溃呈现 —— 崩溃让后续用例失去验证机会）。
+            var finalOk = false;
+            if (gates.Count > 1 && sent.Count == 2)
+            {
+                gates[1].SetResult(true);
+                await WaitForAsync(() => completed == 2).ConfigureAwait(false);
+                finalOk = completed == 2;
             }
 
             Report(
                 "25.1 节流合并：5 次连打真发 2 次（首发值 + 防抖后最末值），在途回来才补发",
                 immediateOk && trailingQueued && trailingOk && finalOk,
-                $"queries=[{string.Join(", ", transport.Queries)}] req={requested} disp={dispatched} results={results}");
+                $"sent=[{string.Join(", ", sent)}] req={requested} disp={dispatched} completed={completed}");
         }
 
-        await Task.CompletedTask.ConfigureAwait(false);
-
-        // 25.2 过期闸（W3-b-4 的第二道闸在消费层落地）：响应回来时已有更新的 epoch ⇒ 整体丢弃不回调
+        // 25.2 过期闸（★ 必须留着的那道闸）：响应回来时已有更新的 epoch ⇒ 该段作废（Dropped）
         {
             var transport = new SessionSearchTransport();
             var client = new Eztools.Host.Search.SearchIndexClient(transport);
-            var session = new Eztools.Host.Search.SearchSession(client, nowMs: () => 1000);
-            var results = 0;
-            var errors = 0;
-            session.OnResults = _ => results++;
-            session.OnError = _ => errors++;
+            var provider = new Eztools.Host.Launcher.FilesProvider(client);
 
-            session.Submit("rep");          // 在途（epoch=1）
-            _ = client.IssueEpoch();        // 模拟另一消费者插队（最新 epoch=2）
-            transport.Complete();           // epoch=1 的响应回来 —— 已过期
+            var task = provider.QueryAsync(new Eztools.Host.Launcher.LauncherQuery("rep", 1, 50, true), default);
+            _ = client.IssueEpoch();        // 模拟另一消费者插队（search.status / 暂停都会这样）
+            transport.Complete();           // 这一枪的响应回来 —— 已过期
 
-            // ⚠️ 给"泄漏的响应"留落地窗口再断言：没有这一步，过期闸被删的突变会假绿
-            //（响应确实回来了，但断言在续体落地前就跑完了 —— M-S1 实测抓到）。
-            await WaitForAsync(() => results > 0 || errors > 0, timeoutMs: 300).ConfigureAwait(false);
-
+            var set = await task.ConfigureAwait(false);
             Report(
-                "25.2 过期闸：响应 epoch ≠ 最新 ⇒ 整体丢弃（OnResults/OnError 都不触发）",
-                results == 0 && errors == 0 && transport.Queries.Count == 1,
-                $"results={results} errors={errors} queries={transport.Queries.Count}");
+                "25.2 过期闸：响应 epoch ≠ 最新 ⇒ 整段作废（Dropped，Items 空且无错误 ⇒ 界面不动）",
+                set.Dropped && set.Items.Count == 0 && set.Error is null && set.Generation == 1,
+                $"dropped={set.Dropped} items={set.Items.Count} err={set.Error?.Kind} gen={set.Generation}");
         }
 
-        // 25.3 错误透传：-32001 not-ready 走 OnError（"索引准备中"与"真坏了"的 UI 分层依据）
+        // 25.3 错误分层：-32001 not-ready 与"真的坏了"必须给不同文案（只断"出了错"不够）
         {
             var transport = new SessionSearchTransport();
             var client = new Eztools.Host.Search.SearchIndexClient(transport);
-            var session = new Eztools.Host.Search.SearchSession(client, nowMs: () => 1000);
-            var results = 0;
-            Eztools.Host.Search.SearchIndexException? error = null;
-            session.OnResults = _ => results++;
-            session.OnError = ex => error = ex;
+            var provider = new Eztools.Host.Launcher.FilesProvider(client);
 
-            session.Submit("rep");
-
-            var lastGate = transport.Gates[^1];
-            lastGate.SetResult(new JsonObject
+            var task = provider.QueryAsync(new Eztools.Host.Launcher.LauncherQuery("rep", 2, 50, true), default);
+            transport.Gates[^1].SetResult(new JsonObject
             {
                 ["jsonrpc"] = "2.0",
                 ["id"] = transport.Requests[^1]["id"]!.DeepClone(),
                 ["error"] = new JsonObject { ["code"] = -32001, ["message"] = "索引准备中（ready=false）" },
             });
 
-            // 响应投递在 await 续体上（线程池）—— 轮询等它落地，不猜调度时机
-            await WaitForAsync(() => error is not null).ConfigureAwait(false);
-
+            var set = await task.ConfigureAwait(false);
+            var error = set.Error;
             Report(
-                "25.3 错误透传：-32001 走 OnError（结构化 code 可见），绝不静默",
-                results == 0 && error?.Code == -32001,
-                $"code={error?.Code} results={results}");
+                "25.3 错误分层：-32001 ⇒ IndexNotReady + 「正在建索引」文案（不是「搜索出错」）",
+                error is { Kind: Eztools.Host.Launcher.LauncherErrorKind.IndexNotReady, Code: -32001 }
+                    && error.UserText.Contains("正在建索引", StringComparison.Ordinal)
+                    && set.Items.Count == 0,
+                $"kind={error?.Kind} code={error?.Code} text={error?.UserText}");
         }
 
-        // 25.4 空查询零往返：清空输入框 = 本地空结果回调，不发请求
+        // 25.4 空查询零往返：清空输入框 = 本地空模型，不发请求
         {
-            var transport = new SessionSearchTransport();
-            var client = new Eztools.Host.Search.SearchIndexClient(transport);
-            var session = new Eztools.Host.Search.SearchSession(client, nowMs: () => 1000);
-            var results = 0;
-            var emptyTotal = -1;
-            session.OnResults = r =>
-            {
-                results++;
-                emptyTotal = r.Total;
-            };
+            var pump = new Eztools.Host.Launcher.QueryPump(nowMs: () => 1000);
+            var empties = 0;
+            var emptyGen = 0L;
+            var sent = 0;
+            pump.Execute = _ => { sent++; return Task.CompletedTask; };
+            pump.OnEmptyText = ticket => { empties++; emptyGen = ticket.Generation; };
 
-            session.Submit("");
+            pump.Submit("");
             await Task.Yield();
 
             Report(
-                "25.4 空查询零往返：本地回调空结果，不进管道",
-                results == 1 && emptyTotal == 0 && transport.Queries.Count == 0,
-                $"results={results} total={emptyTotal} queries={transport.Queries.Count}");
+                "25.4 空查询零往返：本地回调空模型，不进管道（Execute 零调用）",
+                empties == 1 && emptyGen == 1 && sent == 0,
+                $"empties={empties} gen={emptyGen} sent={sent}");
         }
 
         // 25.5 FindIndexExe 定位：EZTOOLS_INDEX_EXE 优先（S11 同族 —— 缺件必须是可判定的"找不到"）
@@ -2514,38 +2601,1435 @@ internal static class SelfTestCommand
         // 25.6 节流参数归位（G2 方案 C）：搜索窗防抖 = 30 ms（设计 §6.2），**不是**面板的 150 ms
         {
             var clock = 0L;
-            var transport = new SessionSearchTransport();
-            var client = new Eztools.Host.Search.SearchIndexClient(transport);
-            var session = new Eztools.Host.Search.SearchSession(client, nowMs: () => clock);
+            var pump = new Eztools.Host.Launcher.QueryPump(nowMs: () => clock);
+            var sent = new List<string>();
+            var gates = new List<TaskCompletionSource<bool>>();
+            pump.Execute = ticket =>
+            {
+                sent.Add(ticket.Text);
+                var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                gates.Add(gate);
+                return gate.Task;
+            };
 
-            session.Submit("a");        // t=0 首发立即（无「上次真发」⇒ 最短间隔自动满足）
+            pump.Submit("a");           // t=0 首发立即（无「上次真发」⇒ 最短间隔自动满足）
             clock = 70;
-            session.Submit("ab");       // t=70：距上次真发仅 70 ms < 80 ⇒ 排队（连打中）；pendingAt=70
+            pump.Submit("ab");          // t=70：距上次真发仅 70 ms < 80 ⇒ 排队（连打中）；pendingAt=70
             clock = 90;                 // t=90：**最短间隔已满足**（90≥80），唯一约束是防抖（90-70=20 < 30）
 
-            session.Fire();
-            var notYet = session.ThrottleCounters.Dispatched == 1;
+            pump.Fire();
+            var notYet = pump.ThrottleCounters.Dispatched == 1;
 
             clock = 105;                // t=105：距 pendingAt 35 ≥ 30 ⇒ 节流放行（首发仍在途 ⇒ 走 trailing）
-            session.Fire();
-            var dispatched = session.ThrottleCounters.Dispatched == 2;
+            pump.Fire();
+            var dispatched = pump.ThrottleCounters.Dispatched == 2;
 
-            transport.Complete();       // 首发响应到 ⇒ trailing 补发 "ab"（证明那个值真的到了管道上）
-            await WaitForAsync(() => transport.Queries.Count == 2).ConfigureAwait(false);
-            var onWire = transport.Queries.Count == 2 && transport.Queries[1] == "ab";
+            if (gates.Count > 0)
+            {
+                gates[0].SetResult(true);   // 首发完成 ⇒ trailing 补发 "ab"（证明那个值真的到了管道上）
+            }
+
+            await WaitForAsync(() => sent.Count == 2).ConfigureAwait(false);
+            var onWire = sent.Count == 2 && sent[1] == "ab";
 
             Report(
                 "25.6 节流参数归位：搜索窗防抖 30 ms（< 面板 150 ms），离窗口不放行、过窗口放行并上管道",
-                Eztools.Host.Search.SearchSession.DebounceMs == 30
-                && Eztools.Host.Search.SearchSession.DebounceMs < InputThrottle.DebounceMs
-                && Eztools.Host.Search.SearchSession.MinIntervalMs == InputThrottle.MinIntervalMs
+                Eztools.Host.Launcher.QueryPump.DebounceMs == 30
+                && Eztools.Host.Launcher.QueryPump.DebounceMs < InputThrottle.DebounceMs
+                && Eztools.Host.Launcher.QueryPump.MinIntervalMs == InputThrottle.MinIntervalMs
                 && notYet && dispatched && onWire,
-                $"debounce={Eztools.Host.Search.SearchSession.DebounceMs}（面板 {InputThrottle.DebounceMs}）"
-                + $" minInterval={Eztools.Host.Search.SearchSession.MinIntervalMs}"
-                + $" queries=[{string.Join(", ", transport.Queries)}] notYet={notYet} dispatched={dispatched} onWire={onWire}"
+                $"debounce={Eztools.Host.Launcher.QueryPump.DebounceMs}（面板 {InputThrottle.DebounceMs}）"
+                + $" minInterval={Eztools.Host.Launcher.QueryPump.MinIntervalMs}"
+                + $" sent=[{string.Join(", ", sent)}] notYet={notYet} dispatched={dispatched} onWire={onWire}"
                 + "（t=90 最短间隔已满足 ⇒ notYet 证明这条是防抖在承重，而不是最短间隔）");
         }
+
+        // 25.7 ★ 代次在「派发」时递增（设计方案 §10.4 注 1 —— 本模块最容易写错的一行）
+        {
+            var clock = 0L;
+            var pump = new Eztools.Host.Launcher.QueryPump(nowMs: () => clock);
+            var sent = new List<Eztools.Host.Launcher.QueryTicket>();
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pump.Execute = ticket => { sent.Add(ticket); return gate.Task; };
+
+            pump.Submit("a");                       // 派发 → 代次 1
+            var genAfterFirst = pump.Generation;
+
+            clock = 100;                            // 距上次真发 100 ≥ 80 ⇒ 节流器立即放行
+            pump.Submit("ab");                      // 但单在途 ⇒ 只置 trailing，**不派发**
+            var genAfterSecond = pump.Generation;   // ★ 必须仍是 1
+
+            gate.SetResult(true);
+            await WaitForAsync(() => sent.Count == 2).ConfigureAwait(false);
+
+            var gens = sent.Select(t => t.Generation).ToArray();
+            var texts = sent.Select(t => t.Text).ToArray();
+            Report(
+                "25.7 代次在「派发」时递增：Submit 不推进代次（否则在途批次被自己作废，界面白等一轮）",
+                genAfterFirst == 1 && genAfterSecond == 1
+                    && gens.SequenceEqual(new[] { 1L, 2L }) && texts[1] == "ab",
+                $"gen1={genAfterFirst} gen2={genAfterSecond} gens=[{string.Join(",", gens)}] texts=[{string.Join(",", texts)}]");
+        }
+
+        // 25.8 归并：段序 pin→apps→files；段内 Score 降序；**files 段原序透传不重排**
+        {
+            var (router, models) = NewRouter(
+                ("files", [LItem(LauncherKind.File, "z.txt", 0), LItem(LauncherKind.File, "a.txt", 0)]),
+                ("apps", [LItem(LauncherKind.App, "低分", 10), LItem(LauncherKind.App, "高分", 20)]),
+                ("calc", [LItem(LauncherKind.Calc, "= 96", 5)]));
+
+            router.Submit("x");
+            await WaitForAsync(() => { lock (models) { return models.Count == 1; } }).ConfigureAwait(false);
+
+            string order;
+            int filesHits;
+            lock (models)
+            {
+                order = string.Join("|", models[0].Items.Select(i => $"{i.Kind}:{i.Title}"));
+                filesHits = models[0].FilesHitCount;
+            }
+
+            router.Dispose();
+            Report(
+                "25.8 归并：段序 pin→apps→files · 段内 Score 降序 · files 段原序透传（不重排）",
+                order == "Calc:= 96|App:高分|App:低分|File:z.txt|File:a.txt" && filesHits == 2,
+                $"order={order} filesHits={filesHits}");
+        }
+
+        // 25.9 故障隔离（FR-9）：一个 provider 挂了，其余段照常；IsReady=false 静默缺席且不进错误面
+        {
+            var notReady = new FakeLauncherProvider { Id = "calc", IsReady = false };
+            var router = new QueryRouter(
+                [.. NewProviders(("files", [LItem(LauncherKind.File, "ok.txt", 0)]), ("apps", null)), notReady],
+                nowMs: () => 0);
+            var models = new List<LauncherRenderModel>();
+            router.OnRender = m => { lock (models) { models.Add(m); } };
+
+            router.Submit("x");
+            await WaitForAsync(() => { lock (models) { return models.Count == 1; } }).ConfigureAwait(false);
+
+            LauncherError? appsError = null;
+            var errCount = 0;
+            var itemCount = 0;
+            lock (models)
+            {
+                errCount = models[0].Errors.Count;
+                itemCount = models[0].Items.Count;
+                models[0].Errors.TryGetValue("apps", out appsError);
+            }
+
+            router.Dispose();
+            Report(
+                "25.9 故障隔离：apps 抛异常 ⇒ 进错误面且带原因，files 段照常渲染；未就绪的 calc 静默缺席（零调用）",
+                errCount == 1 && appsError is { Kind: LauncherErrorKind.ProviderFailed }
+                    && appsError.UserText.Contains("暂不可用", StringComparison.Ordinal)
+                    && itemCount == 1 && notReady.Calls == 0,
+                $"errs={errCount} apps={appsError?.UserText} items={itemCount} calcCalls={notReady.Calls}");
+        }
+
+        // 25.10 命中映射（设计方案 §10.5 映射表）：FileHit 必须带全（渲染层凭它走既有 HitText）
+        {
+            var transport = new SessionSearchTransport();
+            var client = new Eztools.Host.Search.SearchIndexClient(transport);
+            var provider = new Eztools.Host.Launcher.FilesProvider(client);
+
+            const string name = "季报2026年度.pdf";
+            const string path = @"C:\Users\ishe\Documents\季报2026年度.pdf";
+            var task = provider.QueryAsync(new Eztools.Host.Launcher.LauncherQuery("报", 7, 50, true), default);
+            transport.Gates[^1].SetResult(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = transport.Requests[^1]["id"]!.DeepClone(),
+                ["result"] = new JsonObject
+                {
+                    ["epoch"] = transport.Requests[^1]["params"]!["epoch"]!.GetValue<long>(),
+                    ["total"] = 12345,
+                    ["elapsedMs"] = 7,
+                    ["hits"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["name"] = name,
+                            ["dir"] = false,
+                            ["path"] = path,
+                            ["frn"] = 100L,
+                            ["highlights"] = new JsonArray
+                            {
+                                new JsonObject { ["start"] = 0, ["len"] = 2 },
+                                new JsonObject { ["start"] = 6, ["len"] = 2 },
+                            },
+                        },
+                    },
+                },
+            });
+
+            var set = await task.ConfigureAwait(false);
+            var item = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "25.10 映射：Name→Title / Path→Subtitle / Highlights 原样 / FileHit 非空 / Open+Reveal 动作 / Total·Elapsed 透传",
+                item is not null
+                    && set.Generation == 7 && set.Total == 12345 && set.ElapsedMs == 7
+                    && item.Kind == LauncherKind.File
+                    && item.Title == name && item.Subtitle == path
+                    && item.Highlights.Count == 2
+                    && item.FileHit is { } fileHit
+                    && ReferenceEquals(fileHit, set.Items[0].FileHit) && fileHit.Highlights.Count == 2
+                    && item.PrimaryAction is { Kind: LauncherActionKind.Open, Argument: var openArg } && openArg == path
+                    && item.SecondaryAction is { Kind: LauncherActionKind.Reveal, Argument: var revealArg } && revealArg == path,
+                $"items={set.Items.Count} gen={set.Generation} total={set.Total} "
+                    + $"title={item?.Title} subtitle={item?.Subtitle} hl={item?.Highlights.Count} "
+                    + $"primary={item?.PrimaryAction?.Kind} secondary={item?.SecondaryAction?.Kind}");
+        }
     }
+
+    // ── W7-b 启动器配置与匹配（纯函数，零进程）──────────────────────────────
+
+    /// <summary>
+    /// 配置解析（设计方案 §5 规格表逐行）+ 模糊匹配分档。全是纯函数，毫秒级。
+    ///
+    /// <para><b>为什么把这些做成断言而不是手测</b>：`launcher.providers` 写错的后果是
+    /// **静默少一个结果来源** —— 用户只会觉得"这软件搜不到应用"，看不出是配置问题。
+    /// 白名单与错误文案必须被钉死（静默失败登记册 S2 家族）。</para>
+    /// </summary>
+    private static void RunLauncherConfigCases()
+    {
+        var known = string.Join("、", Eztools.Host.Launcher.LauncherProviderRegistry.KnownIds);
+
+        // W7-1 合法值：顺序即段序优先级，必须原样保留
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse("apps,files");
+            Report(
+                "W7-1 launcher.providers 合法值：解析成功且**顺序原样保留**（顺序即段序优先级）",
+                error is null && prefs.Providers.SequenceEqual(new[] { "apps", "files" }),
+                $"providers=[{string.Join(",", prefs.Providers)}] err={error}");
+        }
+
+        // W7-2 空白与大小写：trim + 归一小写
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse("  FILES ,  Apps ");
+            Report(
+                "W7-2 launcher.providers 空白与大小写：trim + 归一小写",
+                error is null && prefs.Providers.SequenceEqual(new[] { "files", "apps" }),
+                $"providers=[{string.Join(",", prefs.Providers)}] err={error}");
+        }
+
+        // W7-3 重复项：去重且保留首次出现位置
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse("apps,files,apps");
+            Report(
+                "W7-3 launcher.providers 重复项：去重且保留首次出现位置",
+                error is null && prefs.Providers.SequenceEqual(new[] { "apps", "files" }),
+                $"providers=[{string.Join(",", prefs.Providers)}] err={error}");
+        }
+
+        // W7-4 未知值：必须报错（文案带已知集合），并回落默认
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse("files,foo");
+            Report(
+                "W7-4 launcher.providers 未知值：报错（文案含已知集合）且回落默认 —— 绝不静默忽略",
+                error is not null && error.Contains("foo", StringComparison.Ordinal)
+                    && error.Contains(known, StringComparison.Ordinal)
+                    && prefs.Providers.SequenceEqual(Eztools.Host.Launcher.LauncherPrefs.DefaultProviders),
+                $"err={error} providers=[{string.Join(",", prefs.Providers)}]");
+        }
+
+        // W7-5 空串 / 全空白：报错（"一个都不启用"是配置错误，不是"关掉全部"的合法表达）
+        {
+            var (_, emptyError) = Eztools.Host.Launcher.LauncherPrefs.Parse("");
+            var (_, blankError) = Eztools.Host.Launcher.LauncherPrefs.Parse("   ");
+            Report(
+                "W7-5 launcher.providers 空串/全空白：报错（拒绝「一个来源都不启用」）",
+                emptyError is not null && blankError is not null,
+                $"empty={emptyError} blank={blankError}");
+        }
+
+        // W7-6 类型不是字符串：必须与"键缺失"区分（TryGetString 对两者都返回 null，不能拿它判）
+        {
+            var typedError = Eztools.Host.Launcher.LauncherPrefs.ParseNode(JsonNode.Parse("[]")).Error;
+            var missingError = Eztools.Host.Launcher.LauncherPrefs.ParseNode(null).Error;
+            Report(
+                "W7-6 launcher.providers 类型错（[]）报错，而键缺失（null）不报错 —— 两者必须可区分",
+                typedError is not null && missingError is null,
+                $"typed={typedError} missing={missingError}");
+        }
+
+        // W7-7 键缺失：默认集合、无错误
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse(null);
+            Report(
+                "W7-7 launcher.providers 键缺失：回落默认集合且**不报错**（这是正常状态）",
+                error is null && prefs.Providers.SequenceEqual(Eztools.Host.Launcher.LauncherPrefs.DefaultProviders),
+                $"providers=[{string.Join(",", prefs.Providers)}] err={error}");
+        }
+
+        // W7-8 ★ 交叉断言：schema 的 default 文本必须能被解析且等于白名单
+        //   —— 防"默认配置本身非法"（KnonwIds 与 schema 默认值是两处字面量，无法编译期合一）
+        {
+            var (prefs, error) = Eztools.Host.Launcher.LauncherPrefs.Parse(
+                Eztools.Host.Config.HostSettingsSchema.DefaultLauncherProviders);
+            var same = prefs.Providers.SequenceEqual(
+                Eztools.Host.Launcher.LauncherProviderRegistry.KnownIds, StringComparer.Ordinal);
+            Report(
+                "W7-8 ★ 交叉断言：schema 默认值可解析且 == 白名单（防「默认配置本身非法」）",
+                error is null && same,
+                $"schema默认=\"{Eztools.Host.Config.HostSettingsSchema.DefaultLauncherProviders}\" "
+                + $"白名单=[{known}] err={error}");
+        }
+
+        // W7-9 匹配分档：完全相等 > 前缀 > 词边界前缀 > 子串 > 子序列
+        {
+            double S(string q, string t) => Eztools.Host.Launcher.FuzzyMatcher.MatchTokens(q, t).Score;
+            var exact = S("code", "code");
+            var prefix = S("cod", "code.exe");
+            var word = S("code", "Visual Studio Code");
+            var sub = S("ode", "Visual Studio Code");
+            var seq = S("vsc", "Visual Studio Code");
+            Report(
+                "W7-9 匹配分档：完全相等 > 前缀 > 词边界 > 子串 > 子序列（档位决定量级，不靠常数调参）",
+                exact > prefix && prefix > word && word > sub && sub > seq && seq > 0,
+                $"exact={exact:F0} prefix={prefix:F0} word={word:F0} sub={sub:F0} seq={seq:F0}");
+        }
+
+        // W7-10 分词 AND：任一段不命中即整体不命中；全命中取平均分
+        {
+            var both = Eztools.Host.Launcher.FuzzyMatcher.MatchTokens("vs code", "Visual Studio Code");
+            var missing = Eztools.Host.Launcher.FuzzyMatcher.MatchTokens("vs zzz", "Visual Studio Code");
+            var empty = Eztools.Host.Launcher.FuzzyMatcher.MatchTokens("   ", "Visual Studio Code");
+            Report(
+                "W7-10 匹配分词 AND：每段都必须命中（缺一段整体不命中）；空查询不命中",
+                both.Matched && !missing.Matched && !empty.Matched,
+                $"both={both.Matched}/{both.Score:F0} missing={missing.Matched} empty={empty.Matched}");
+        }
+
+        // W7-11 高亮区间：落在真实位置且分段合并（渲染层按区间着色，UI 不重算匹配）
+        {
+            var m = Eztools.Host.Launcher.FuzzyMatcher.MatchTokens("code", "Visual Studio Code");
+            var (start, len) = m.Highlights.Count == 1 ? m.Highlights[0] : (-1, -1);
+            var text = start >= 0 ? "Visual Studio Code".Substring(start, len) : "";
+            Report(
+                "W7-11 匹配高亮：区间落在真实子串位置上（渲染层据此着色，UI 不重算匹配）",
+                m.Matched && text == "Code",
+                $"span=({start},{len}) text=\"{text}\"");
+        }
+
+        // W7-12 中文：走同一套子序列逻辑（不做拼音，§2.3）
+        {
+            var m = Eztools.Host.Launcher.FuzzyMatcher.MatchTokens("记事", "记事本");
+            Report(
+                "W7-12 匹配中文：子序列命中（不做拼音转换，与 §2.3 一致）",
+                m.Matched && m.Score > 0,
+                $"matched={m.Matched} score={m.Score:F0} spans={m.Highlights.Count}");
+        }
+
+        // W7-13 Requery（W7-b 新增：延迟就绪来源的补发路径，设计方案 R10）
+        {
+            var clock = 0L;
+            var pump = new Eztools.Host.Launcher.QueryPump(nowMs: () => clock);
+            var texts = new List<string>();
+            pump.Execute = t =>
+            {
+                lock (texts)
+                {
+                    texts.Add($"{t.Generation}:{t.Text}");
+                }
+
+                return Task.CompletedTask;
+            };
+
+            // ① 空文本（从未输入）：什么都不做 —— 空态已是终态，补发它毫无意义
+            pump.Requery();
+            var emptyNoop = pump.Generation == 0 && texts.Count == 0;
+
+            // ② 有文本：补发走**同一套节流/单在途**，不新造路径（首发 t=0 立即派发）
+            //    假 Execute 返回已完成 Task ⇒ 派发在调用栈上同步落地，无需等待（不引入调度不确定性）
+            pump.Submit("ab");
+            clock += 200;               // 越过节流窗口
+            pump.Requery();             // 同一文本再来一次 ⇒ 排队
+            clock += 200;
+            pump.Fire();                // 到点放行
+
+            string got;
+            lock (texts)
+            {
+                got = string.Join(", ", texts);
+            }
+
+            Report(
+                "W7-13 Requery：空文本零动作；有文本时用**最新文本**再派发一次（延迟就绪来源的补发路径）",
+                emptyNoop && pump.Generation == 2 && got == "1:ab, 2:ab",
+                $"emptyNoop={emptyNoop} gen={pump.Generation} tickets=[{got}]");
+        }
+    }
+
+    // ── 34.x 计算器（W7-c）：期望值**人工手算**，禁"算完跟自己比"
+    //
+    // 纪律（`验收断言审视清单.md` §2.17③）：每一条的期望值都是从表达式**手推**出来的常数
+    // （96 / 512 / -4 / 0.5 …），不是"先跑一遍把输出抄回来" —— 后者只能证明代码没变，
+    // 证明不了它是对的。格式化期望值同理，逐字符写死（`1.15292E+18`）。
+    private static void RunCalcCases()
+    {
+
+        // 34.1 四则与优先级（期望值手算）
+        {
+            var table = new (string Expr, double Want)[]
+            {
+                ("1+2", 3), ("2*3+4", 10), ("4+2*3", 10), ("(1+2)*3", 9),
+                ("10-3-2", 5), ("100/4/5", 5), ("7%3", 1), ("2+3*4-5", 9),
+                ("1.5+2.5", 4), ("0.1+0.2", 0.30000000000000004),
+            };
+
+            var bad = new List<string>();
+            foreach (var (expr, want) in table)
+            {
+                var got = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate(expr);
+                if (got.Status != Eztools.Host.Launcher.CalcStatus.Ok || got.Value != want)
+                {
+                    bad.Add($"{expr}→{got.Status}/{got.Value}（期望 {want}）");
+                }
+            }
+
+            Report(
+                "34.1 四则与优先级：10 例手算精确值（含 % 取模与浮点加法）",
+                bad.Count == 0,
+                bad.Count == 0 ? $"全部 {table.Length} 例相符" : string.Join("；", bad));
+        }
+
+        // 34.2 幂与一元号：右结合 + 一元号弱于幂 + 指数可带一元号
+        {
+            var pow = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("2^3^2");
+            var negPow = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("-2^2");
+            var negExp = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("2^-1");
+            var negParen = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("(-2)^2");
+
+            Report(
+                "34.2 幂与一元号：2^3^2=512（右结合）· -2^2=-4（一元号弱于幂）· 2^-1=0.5 · (-2)^2=4",
+                pow.Value == 512 && negPow.Value == -4 && negExp.Value == 0.5 && negParen.Value == 4,
+                $"2^3^2={pow.Value} -2^2={negPow.Value} 2^-1={negExp.Value} (-2)^2={negParen.Value}");
+        }
+
+        // 34.3 % 的语义写死为 C 的 fmod（符号跟随**被除数**）
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("-5%3");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("5%-3");
+            var c = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("5.5%2");
+
+            Report(
+                "34.3 取模语义 = C 的 fmod（符号跟随被除数）：-5%3=-2 · 5%-3=2 · 5.5%2=1.5",
+                a.Value == -2 && b.Value == 2 && c.Value == 1.5,
+                $"-5%3={a.Value} 5%-3={b.Value} 5.5%2={c.Value}");
+        }
+
+        // 34.4 科学记数（R5 的唯一字母例外）：解析层必须接受
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1e5");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1E-5");
+            var c = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("2e3+1");
+
+            Report(
+                "34.4 科学记数：解析层接受 1e5=100000 · 1E-5=0.00001 · 2e3+1=2001（R5 唯一字母例外）",
+                a.Value == 100000 && b.Value == 0.00001 && c.Value == 2001
+                    && a.Status == Eztools.Host.Launcher.CalcStatus.Ok,
+                $"1e5={a.Value}/{a.Status} 1E-5={b.Value} 2e3+1={c.Value}");
+        }
+
+        // 34.5 括号与深层嵌套
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("((1+2)*(3+4))");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1+(2+(3+(4+5)))");
+
+            Report(
+                "34.5 括号：((1+2)*(3+4))=21 · 1+(2+(3+(4+5)))=15",
+                a.Value == 21 && b.Value == 15,
+                $"嵌套乘法={a.Value} 嵌套加法={b.Value}");
+        }
+
+        // 34.6 数值格式化（逐字符写死期望；含科学记数与去尾随零）
+        {
+            var table = new (double Value, string Want)[]
+            {
+                (96, "96"),
+                (0.125, "0.125"),
+                (1.0 / 3.0, "0.3333333333"),
+                (0.0001, "0.0001"),
+                (1.152921504606847e18, "1.15292E+18"),
+                (0, "0"),
+                (-4, "-4"),
+                (2.5, "2.5"),
+            };
+
+            var bad = new List<string>();
+            foreach (var (value, want) in table)
+            {
+                var got = Eztools.Host.Launcher.CalcExpression.Format(value);
+                if (got != want)
+                {
+                    bad.Add($"{value}→\"{got}\"（期望 \"{want}\"）");
+                }
+            }
+
+            // 1/3 走的是同一个 Format（顺带把"表达式→显示"整条链钉住）
+            var third = Eztools.Host.Launcher.CalcExpression.Evaluate("1/3");
+
+            Report(
+                "34.6 格式化：整数无小数 · 10 位小数去尾随零（1/3）· 大数转科学记数（2^60 形态）· 小数点恒为 '.'",
+                bad.Count == 0 && third.Status == Eztools.Host.Launcher.CalcStatus.Ok
+                    && Eztools.Host.Launcher.CalcExpression.Format(third.Value) == "0.3333333333",
+                bad.Count == 0 ? $"8 例相符；1/3 端到端={Eztools.Host.Launcher.CalcExpression.Format(third.Value)}"
+                               : string.Join("；", bad));
+        }
+
+        // 34.7 除零：1/0 与 5%0 都给 DivideByZero（**必须显式判零**：IEEE 的 / 给 ∞、% 给 NaN，都不抛）
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1/0");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("5%0");
+            var item = CalcRow("1/0");
+
+            Report(
+                "34.7 除零：1/0 与 5%0 都判 DivideByZero（IEEE 下 / 给 ∞、% 给 NaN，不显式判零就会静默成别的错）",
+                a.Status == Eztools.Host.Launcher.CalcStatus.DivideByZero
+                    && b.Status == Eztools.Host.Launcher.CalcStatus.DivideByZero
+                    && a.ErrorText == "除零" && item is not null && item.Subtitle == "除零"
+                    && item.PrimaryAction is null,
+                $"1/0={a.Status}/{a.ErrorText} 5%0={b.Status} 行副标题=\"{item?.Subtitle}\" 动作={item?.PrimaryAction?.Kind.ToString() ?? "(禁用)"}");
+        }
+
+        // 34.8 溢出：超出双精度范围 ⇒ Overflow + 显式文案
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1e308*10");
+            var item = CalcRow("1e308*10");
+
+            Report(
+                "34.8 溢出：1e308*10 ⇒ Overflow，行上显示「溢出（超出双精度范围）」且动作禁用",
+                a.Status == Eztools.Host.Launcher.CalcStatus.Overflow
+                    && a.ErrorText == "溢出（超出双精度范围）"
+                    && item is not null && item.Subtitle == a.ErrorText && item.PrimaryAction is null,
+                $"{a.Status}/{a.ErrorText} 行副标题=\"{item?.Subtitle}\" 动作={item?.PrimaryAction?.Kind.ToString() ?? "(禁用)"}");
+        }
+
+        // 34.9 未定义：复数结果与 0 的负次幂（★ 0^-1 在 IEEE 下是 +∞，语义却是未定义 —— 错误码必须说实话）
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("(-8)^0.5");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("0^-1");
+
+            Report(
+                "34.9 未定义：(-8)^0.5 与 0^-1 都判 Undefined（0^-1 的 IEEE 结果是 +∞，不能记成溢出）",
+                a.Status == Eztools.Host.Launcher.CalcStatus.Undefined
+                    && b.Status == Eztools.Host.Launcher.CalcStatus.Undefined
+                    && a.ErrorText == "结果未定义",
+                $"(-8)^0.5={a.Status} 0^-1={b.Status}/{b.ErrorText}");
+        }
+
+        // 34.10 语法错：错误码 + **位置**都必须可达（UI 静默 ≠ 错误不存在）
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1+");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("(1+2");
+            var c = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1.2.3");
+            var d = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1+2)");
+
+            Report(
+                "34.10 语法错：1+ / (1+2 / 1.2.3 / 1+2) 全判 Syntax 且带位置（UI 静默但错误码可达）",
+                a.Status == Eztools.Host.Launcher.CalcStatus.Syntax
+                    && b.Status == Eztools.Host.Launcher.CalcStatus.Syntax
+                    && c.Status == Eztools.Host.Launcher.CalcStatus.Syntax
+                    && d.Status == Eztools.Host.Launcher.CalcStatus.Syntax
+                    && a.Position == 2 && c.Position == 3,
+                $"1+={a.Status}@{a.Position} (1+2={b.Status}@{b.Position} 1.2.3={c.Status}@{c.Position} 1+2)={d.Status}@{d.Position}");
+        }
+
+        // 34.11 非法字符 ⇒ InvalidChar（L0 已挡；本码由无门槛入口直测）
+        {
+            var a = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1+中");
+            var b = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate("1+a");
+
+            Report(
+                "34.11 非法字符：1+中 / 1+a 判 InvalidChar（有位置）—— 与语法错可区分",
+                a.Status == Eztools.Host.Launcher.CalcStatus.InvalidChar
+                    && b.Status == Eztools.Host.Launcher.CalcStatus.InvalidChar
+                    && a.Position == 2,
+                $"1+中={a.Status}@{a.Position} 1+a={b.Status}@{b.Position}");
+        }
+
+        // 34.12 L0 门槛：该进的真进、该静默的真静默 —— **两层静默必须分开断言**
+        //
+        //   ★ 这是本 provider 最容易含糊的一处：UI 上"不出行"有**两个来源** ——
+        //     ① L0 字符层不认为它是算式（`2026` / `report-2026.txt`）⇒ NotAnExpression；
+        //     ② L0 通过但语法不成立（`1+` 半成品）⇒ Syntax。
+        //     两者对用户同样是静默，但语义完全不同（"我没打算算" vs "你还没打完"）。
+        //     只断言"不出行"会把这两件事混成一件 —— 将来把 L0 写坏（比如放行 `1+`）也照样绿。
+        {
+            // ★ `-5` / `-5+0` 会出行：一元号本身算"运算符"（门槛口径见 §10.7 A 的"至少一个运算符/括号"），
+            //   所以"纯数字"只挡 **不带任何运算符** 的输入（`2026` / `1e5` / `1e+5`）。
+            var pass = new[] { "1+2", "128*3/4", "(1+2)*3", "-2^2", "0.5+0.5", "2e3+1", "-5", "-5+0" };
+
+            // ① L0 未过 ⇒ NotAnExpression（`2026`/`1e5`/`1e+5` 同判：都是**纯数字**，C-2 一条口径）
+            //    ★ `1.2.3` 也在这组：它**没有运算符** ⇒ 字符层就挡掉了。
+            //      解析器层的裁决是 Syntax（34.10 直测 ParseAndEvaluate 断言），两层各说各的真话 ——
+            //      `Evaluate` 先过 L0，所以对外的可观状态是 NotAnExpression。
+            var gateSilent = new[] { "2026", "1e5", "1e+5", "report-2026.txt", "报告-1.txt", "abc", "", "   ", ".5", "1.2.3" };
+
+            // ② L0 过了但语法不成立 ⇒ Syntax（对用户同样静默，但错误码不同）
+            var syntaxSilent = new[] { "1+", "(1+2", "(1+2)*", "1+(2*" };
+
+            var bad = new List<string>();
+            foreach (var s in pass)
+            {
+                if (!Eztools.Host.Launcher.CalcExpression.Evaluate(s).HasRow)
+                {
+                    bad.Add($"「{s}」应当出结果行却没有");
+                }
+            }
+
+            foreach (var s in gateSilent)
+            {
+                var st = Eztools.Host.Launcher.CalcExpression.Evaluate(s).Status;
+                if (st != Eztools.Host.Launcher.CalcStatus.NotAnExpression)
+                {
+                    bad.Add($"「{s}」应判 NotAnExpression，实际 {st}");
+                }
+            }
+
+            foreach (var s in syntaxSilent)
+            {
+                var o = Eztools.Host.Launcher.CalcExpression.Evaluate(s);
+                if (o.Status != Eztools.Host.Launcher.CalcStatus.Syntax || o.HasRow)
+                {
+                    bad.Add($"「{s}」应判 Syntax 且不出行，实际 {o.Status}/HasRow={o.HasRow}");
+                }
+            }
+
+            Report(
+                "34.12 L0 门槛分层：算式放行；纯数字/含字母汉字 ⇒ NotAnExpression；半成品 ⇒ Syntax 且两者都不出行",
+                bad.Count == 0,
+                bad.Count == 0
+                    ? $"{pass.Length} 例放行 + {gateSilent.Length} 例门槛静默 + {syntaxSilent.Length} 例语法静默，全部相符"
+                    : string.Join("；", bad));
+        }
+
+        // 34.13 长度上限（C-11）：超长输入 ⇒ 静默，绝不进解析器
+        {
+            var huge = new string('1', 600) + "+1";
+            var atLimit = new string('1', 254) + "+" + new string('1', 254);   // 509 字符（含 '+'）
+            var over = Eztools.Host.Launcher.CalcExpression.Evaluate(huge);
+
+            Report(
+                "34.13 长度上限：超 512 字符 ⇒ NotAnExpression 静默（防 UI 卡住）；限内正常求值",
+                over.Status == Eztools.Host.Launcher.CalcStatus.NotAnExpression
+                    && huge.Length > Eztools.Host.Launcher.CalcExpression.MaxInputLength
+                    && atLimit.Length <= Eztools.Host.Launcher.CalcExpression.MaxInputLength
+                    && Eztools.Host.Launcher.CalcExpression.Evaluate(atLimit).Status
+                        == Eztools.Host.Launcher.CalcStatus.Ok,
+                $"超长({huge.Length})={over.Status} 限内({atLimit.Length})={Eztools.Host.Launcher.CalcExpression.Evaluate(atLimit).Status}");
+        }
+
+        // 34.14 深度上限（C-12）：200 层括号 ⇒ Syntax，**且不崩**
+        //   ★ 崩溃是 StackOverflowException，本进程内不可捕获 —— 所以"返回 Syntax"本身就是"没爆栈"的证据。
+        {
+            var deep = new string('(', 200) + "1" + new string(')', 200);
+            var boundary = new string('(', 60) + "1" + new string(')', 60);
+            var deepOutcome = Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate(deep);
+
+            Report(
+                "34.14 深度上限：200 层括号 ⇒ Syntax（返回而非崩 = 没爆栈）；60 层仍在限内可求值",
+                deepOutcome.Status == Eztools.Host.Launcher.CalcStatus.Syntax
+                    && Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate(boundary).Value == 1,
+                $"200 层={deepOutcome.Status}（上限 {Eztools.Host.Launcher.CalcExpression.MaxDepth}）"
+                + $" 60 层={Eztools.Host.Launcher.CalcExpression.ParseAndEvaluate(boundary).Value}");
+        }
+
+        // 34.15 结果行构成：值当主行、表达式当副行、复制的是**格式化值**、Score 置顶
+        {
+            var item = CalcRow("128 * 3/4");
+
+            Report(
+                "34.15 结果行：主行=格式化值 · 副行=\"= 去空白表达式\" · 主动作=复制格式化值 · Score 置顶",
+                item is not null
+                    && item.Kind == Eztools.Host.Launcher.LauncherKind.Calc
+                    && item.Title == "96" && item.Subtitle == "= 128*3/4"
+                    && item.PrimaryAction is { Kind: Eztools.Host.Launcher.LauncherActionKind.CopyText, Argument: "96" }
+                    && item.Score == Eztools.Host.Launcher.CalcProvider.PinScore
+                    && item.FileHit is null,
+                $"title=\"{item?.Title}\" sub=\"{item?.Subtitle}\" action={item?.PrimaryAction?.Kind}/{item?.PrimaryAction?.Argument} score={item?.Score}");
+        }
+
+        // 34.16 段位归属：calc 属 pin 段（段间置顶），且非 files（不参与"原序透传"那条） —— 白名单同步进注册表
+        {
+            var seg = Eztools.Host.Launcher.LauncherProviderRegistry.SegmentOf(
+                Eztools.Host.Launcher.LauncherProviderRegistry.Calc);
+            var known = Eztools.Host.Launcher.LauncherProviderRegistry.KnownIds;
+
+            Report(
+                "34.16 注册表：calc 进白名单且属 pin 段（段间置顶）；白名单 == 默认启用集合",
+                seg == Eztools.Host.Launcher.LauncherSegment.Pin
+                    && known.Contains(Eztools.Host.Launcher.LauncherProviderRegistry.Calc)
+                    && Eztools.Host.Launcher.LauncherProviderRegistry.DefaultEnabled.SequenceEqual(known),
+                $"seg={seg} known=[{string.Join(",", known)}]");
+        }
+
+        // 34.17 provider 行为：静默类返回**空段且无错误**（不是错误面 —— "没结果"≠"坏了"）
+        {
+            var provider = new Eztools.Host.Launcher.CalcProvider();
+            var silent = provider
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery("2026", 7, 50, Substr: false), default)
+                .GetAwaiter().GetResult();
+            var row = provider
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery("1+2", 8, 50, Substr: false), default)
+                .GetAwaiter().GetResult();
+
+            Report(
+                "34.17 provider：静默类给空段且 Error==null（\"没结果\"不是故障）；命中类给 1 行且 Generation 原样回传",
+                silent.Items.Count == 0 && silent.Error is null && silent.Accepted && silent.Generation == 7
+                    && row.Items.Count == 1 && row.Total == 1 && row.Generation == 8 && row.Accepted
+                    && row.Items[0].Title == "3",
+                $"silent: items={silent.Items.Count} err={silent.Error?.UserText ?? "(无)"} gen={silent.Generation}"
+                + $" | hit: items={row.Items.Count} total={row.Total} gen={row.Generation} title={row.Items[0].Title}");
+        }
+    }
+
+    /// <summary>
+    /// 走**真 provider 路径**取结果行（不是直调内部的 <c>ToItem</c>）：顺带证明
+    /// "门槛 → 解析 → 组行"整条链是通的；返回 null = 该输入没有产出行（断言里显式判它）。
+    /// </summary>
+    private static Eztools.Host.Launcher.LauncherItem? CalcRow(string text)
+    {
+        var provider = new Eztools.Host.Launcher.CalcProvider();
+        var set = provider
+            .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(text, 1, 50, Substr: false), default)
+            .GetAwaiter().GetResult();
+        return set.Items.Count > 0 ? set.Items[0] : null;
+    }
+
+    /// <summary>
+    /// 取单位换算的**显示值**（= 用户真正看到/复制的那串，走的是与 UI 同一条格式化）。
+    ///
+    /// <para><b>★ 为什么断言显示值而不是裸 double</b>：跨系数的除法会带 1~2 ULP 误差 ——
+    /// `1 ft to in` 的裸 double 是 <c>12.000000000000002</c>（0.3048/0.0254），
+    /// `1 g to mg` 是 <c>1000.0000000000001</c>。**用户看不到这些尾巴**（10 位小数格式化把它们抹平），
+    /// 所以"显示值"才是本功能的真契约；拿裸 double 做精确相等断言会把**正确的实现判成错的**
+    /// （2026-10-01 实测：第一版期望值写成 `12` 与 `1000`，两条当场变红）。</para>
+    ///
+    /// <para>null = 没解析出来或没有触发词。</para>
+    /// </summary>
+    private static string? UnitText(string text)
+    {
+        if (!Eztools.Host.Launcher.UnitTable.TryParse(text, out var request) || request.To is null)
+        {
+            return null;
+        }
+
+        return Eztools.Host.Launcher.CalcExpression.Format(
+            Eztools.Host.Launcher.UnitTable.Convert(request.From, request.To, request.Value));
+    }
+
+    /// <summary>取编码转换的结果串（null = 没被前缀识别，或转换失败）。</summary>
+    private static string? EncodeResult(string text)
+    {
+        if (!Eztools.Host.Launcher.EncodeProvider.TryParse(text, out var request))
+        {
+            return null;
+        }
+
+        var outcome = Eztools.Host.Launcher.EncodeProvider.Transform(request);
+        return outcome.Ok ? outcome.Result : null;
+    }
+
+    /// <summary>走真 provider 取第一行（单位换算）。</summary>
+    private static Eztools.Host.Launcher.LauncherItem? UnitRow(string text, int index = 0)
+    {
+        var set = new Eztools.Host.Launcher.UnitProvider()
+            .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(text, 1, 50, Substr: false), default)
+            .GetAwaiter().GetResult();
+        return index < set.Items.Count ? set.Items[index] : null;
+    }
+
+    /// <summary>走真 provider 取第一行（编码转换）。</summary>
+    private static Eztools.Host.Launcher.LauncherItem? EncodeRow(string text)
+    {
+        var set = new Eztools.Host.Launcher.EncodeProvider()
+            .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(text, 1, 50, Substr: false), default)
+            .GetAwaiter().GetResult();
+        return set.Items.Count > 0 ? set.Items[0] : null;
+    }
+
+    // ── 35.x 单位换算 / 编码转换（W7-d）：期望值人工手算，禁"算完跟自己比"
+    private static void RunConvertCases()
+    {
+        // 35.1 长度：**乘法方向**（×系数 / 1）取精确值，避免把"除法的舍入"混进判据
+        {
+            var table = new (string Expr, string Want)[]
+            {
+                ("1 km to m", "1000"), ("1 m to cm", "100"), ("1 m to mm", "1000"),
+                ("10 km to m", "10000"), ("1 mi to m", "1609.344"), ("1 mi to km", "1.609344"),
+                ("1 in to cm", "2.54"), ("1 ft to in", "12"), ("1 yd to ft", "3"),
+            };
+
+            var bad = new List<string>();
+            foreach (var (expr, want) in table)
+            {
+                var got = UnitText(expr);
+                if (got != want)
+                {
+                    bad.Add($"{expr}→{got}（期望 {want}）");
+                }
+            }
+
+            Report(
+                "35.1 长度换算：9 例手算精确值（十进制 + 英制精确系数）",
+                bad.Count == 0,
+                bad.Count == 0 ? $"全部 {table.Length} 例相符" : string.Join("；", bad));
+        }
+
+        // 35.2 重量
+        {
+            var table = new (string Expr, string Want)[]
+            {
+                ("1 kg to g", "1000"), ("1 g to mg", "1000"), ("1 t to kg", "1000"),
+                ("1 lb to g", "453.59237"), ("1 oz to g", "28.349523125"),
+            };
+
+            var bad = new List<string>();
+            foreach (var (expr, want) in table)
+            {
+                var got = UnitText(expr);
+                if (got != want)
+                {
+                    bad.Add($"{expr}→{got}（期望 {want}）");
+                }
+            }
+
+            Report(
+                "35.2 重量换算：5 例手算精确值（kg/g/mg/t + 英制 lb/oz）",
+                bad.Count == 0,
+                bad.Count == 0 ? $"全部 {table.Length} 例相符" : string.Join("；", bad));
+        }
+
+        // 35.3 数据量：**两制式必须并存**（KB=1000 / KiB=1024）—— 这是最常被误解的一处
+        {
+            var table = new (string Expr, string Want)[]
+            {
+                ("1 KB to B", "1000"), ("1 KiB to B", "1024"), ("1 MB to KB", "1000"),
+                ("1 GB to B", "1000000000"), ("1 GiB to B", "1073741824"),
+                ("1 MiB to KiB", "1024"), ("1 GB to MiB", "953.6743164063"),
+            };
+
+            var bad = new List<string>();
+            foreach (var (expr, want) in table)
+            {
+                var got = UnitText(expr);
+                if (got != want)
+                {
+                    bad.Add($"{expr}→{got}（期望 {want}）");
+                }
+            }
+
+            Report(
+                "35.3 数据量两制式：KB=1000 与 KiB=1024 并存（1GB→MiB = 953.6743164063，两数都对只是进制不同）",
+                bad.Count == 0,
+                bad.Count == 0 ? $"全部 {table.Length} 例相符" : string.Join("；", bad));
+        }
+
+        // 35.4 温度：**仿射**（不是乘系数）—— 含经典恒等式 -40C == -40F
+        {
+            var table = new (string Expr, string Want)[]
+            {
+                ("0C to F", "32"), ("100C to F", "212"), ("-40C to F", "-40"),
+                ("32F to C", "0"), ("0C to K", "273.15"), ("273.15K to C", "0"),
+            };
+
+            var bad = new List<string>();
+            foreach (var (expr, want) in table)
+            {
+                var got = UnitText(expr);
+                if (got != want)
+                {
+                    bad.Add($"{expr}→{got}（期望 {want}）");
+                }
+            }
+
+            Report(
+                "35.4 温度仿射：0C=32F · 100C=212F · **-40C=-40F（经典恒等式）** · 32F=0C · 0C=273.15K",
+                bad.Count == 0,
+                bad.Count == 0 ? $"全部 {table.Length} 例相符" : string.Join("；", bad));
+        }
+
+        // 35.5 触发词三态等价（D10）：`to` / `->` / `转`
+        {
+            var a = UnitText("10km to mi");
+            var b = UnitText("10km -> mi");
+            var c = UnitText("10km转mi");
+            var d = UnitText("10KM TO MI");
+
+            Report(
+                "35.5 触发词三态等价：`to` / `->` / `转` 结果相同（且大小写不敏感）",
+                a is not null && a == b && b == c && c == d,
+                $"to={a} ->={b} 转={c} 大写={d}（四者必须逐位相同）");
+        }
+
+        // 35.6 单位记号：大小写不敏感 + 显式接受 ° / ℃ / ℉（真机输入法常打出符号形态）
+        {
+            var a = UnitText("1KM to M");
+            var b = UnitText("100°C to °F");
+            var c = UnitText("100℃ to ℉");
+            var d = UnitText("100°C to F");
+            var e = UnitText("1 MiB to KiB");
+
+            Report(
+                "35.6 单位记号：大小写不敏感（1KM to M=1000）· °C/℃/°F/℉ 与 C/F 等价",
+                a == "1000" && b == "212" && c == "212" && d == "212" && e == "1024",
+                $"1KM to M={a} 100°C={b} 100℃={c} 100°C to F={d} 1MiB={e}");
+        }
+
+        // 35.7 无触发词 ⇒ 列该类别常用单位（D10=A）：多行、**不含源单位**、Score 递减
+        {
+            var set = new Eztools.Host.Launcher.UnitProvider()
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery("10km", 1, 50, Substr: false), default)
+                .GetAwaiter().GetResult();
+
+            var titles = string.Join(" | ", set.Items.Select(i => i.Title));
+            var decreasing = true;
+            for (var i = 1; i < set.Items.Count; i++)
+            {
+                decreasing &= set.Items[i].Score < set.Items[i - 1].Score;
+            }
+
+            var noSource = !set.Items.Any(i => i.Title.EndsWith(" km", StringComparison.Ordinal));
+
+            Report(
+                "35.7 无触发词：列同类常用单位（4 行）· **不含源单位**（恒等行是噪声）· Score 严格递减",
+                set.Items.Count == 4 && decreasing && noSource && set.Items[0].Title == "6.2137119224 mi",
+                $"{set.Items.Count} 行 [{titles}] 递减={decreasing} 无源单位={noSource}");
+        }
+
+        // 35.8 制式标注必须可见（同制式 / 跨制式两种文案）
+        {
+            var cross = UnitRow("1GB to MiB");
+            var same = UnitRow("1GB to MB");
+
+            Report(
+                "35.8 制式标注：跨制式显示「1000 进制 → 1024 进制」· 同制式只显示「1000 进制」（否则 953MiB 会被当 bug）",
+                cross?.Subtitle == "1GB to MiB = 953.6743164063 MiB（1000 进制 → 1024 进制）"
+                    && same?.Subtitle == "1GB to MB = 1000 MB（1000 进制）",
+                $"cross=\"{cross?.Subtitle}\" same=\"{same?.Subtitle}\"");
+        }
+
+        // 35.9 不做的换算 ⇒ **静默**（不是"尽力猜"）：单位混算 / 跨类别 / 未知单位 / 无数字
+        {
+            var silent = new[] { "10km + 5mi", "10km to kg", "10xyz to m", "km", "10", "", "10km to" };
+            var leaked = silent
+                .Where(s => Eztools.Host.Launcher.UnitTable.TryParse(s, out _))
+                .ToList();
+
+            Report(
+                "35.9 不做清单：单位混算 / 跨类别（km→kg）/ 未知单位 / 无数字 ⇒ 一律 TryParse=false 静默",
+                leaked.Count == 0,
+                leaked.Count == 0 ? $"{silent.Length} 例全部静默" : $"误放行：{string.Join("、", leaked)}");
+        }
+
+        // 35.10 数字与单位之间的空格可选 + **整串必须被吃完**
+        {
+            var spaced = UnitText("10 m to cm");
+            var tight = UnitText("10m to cm");
+            var trailing = Eztools.Host.Launcher.UnitTable.TryParse("10km to mi 剩余", out _);
+
+            Report(
+                "35.10 分词：`10 m` 与 `10m` 等价（=1000 cm）；目标单位之后还有内容 ⇒ 不解析",
+                spaced == "1000" && tight == "1000" && !trailing,
+                $"10 m={spaced} 10m={tight} 尾随内容={trailing}");
+        }
+
+        // 35.11 base64 双向（含中文载荷 ⇒ UTF-8 字节序必须对）
+        {
+            var enc = EncodeResult("b64:你好");
+            var dec = EncodeResult("b64d:5L2g5aW9");
+            var emoji = EncodeResult("b64:😀");
+            var back = EncodeResult("b64d:8J+YgA==");
+
+            Report(
+                "35.11 base64 双向：b64:你好=5L2g5aW9 · b64d:5L2g5aW9=你好 · 含 emoji 载荷往返一致",
+                enc == "5L2g5aW9" && dec == "你好" && emoji == "8J+YgA==" && back == "😀",
+                $"enc={enc} dec={dec} emoji={emoji} back={back}");
+        }
+
+        // 35.12 URL 双向 + **`+` 不视作空格**（写死，Uri.UnescapeDataString 语义）
+        {
+            var enc = EncodeResult("url:a b&c");
+            var dec = EncodeResult("urld:a%20b");
+            var plus = EncodeResult("urld:a+b");
+
+            Report(
+                "35.12 URL 双向：url:a b&c=a%20b%26c · urld:a%20b=a b · **`+` 不视作空格**（否则吃掉 base64 结果的 +）",
+                enc == "a%20b%26c" && dec == "a b" && plus == "a+b",
+                $"enc={enc} dec={dec} plus={plus}");
+        }
+
+        // 35.13 Unicode 双向，**按码点走**（emoji 是代理对，逐码元会吐出半截码位）
+        {
+            var toCp = EncodeResult("u:中A");
+            var emojiCp = EncodeResult("u:😀");
+            var fromCp = EncodeResult("ud:U+4E2D U+0041");
+            var emojiBack = EncodeResult("ud:U+1F600");
+            var slashForm = EncodeResult("ud:\\u4E2D");
+
+            Report(
+                "35.13 Unicode 双向：u:中A=U+4E2D U+0041 · u:😀=U+1F600（按码点非码元）· ud 支持 U+ / \\u 两种写法与代理对",
+                toCp == "U+4E2D U+0041" && emojiCp == "U+1F600" && fromCp == "中A"
+                    && emojiBack == "😀" && slashForm == "中",
+                $"u:中A={toCp} u:😀={emojiCp} ud={fromCp} ud emoji={emojiBack} \\u4E2D={slashForm}");
+        }
+
+        // 35.14 前缀大小写不敏感 + 前缀后允许一个空格；**无前缀 / 空载荷 ⇒ 静默**（D9=A）
+        {
+            var upper = EncodeResult("B64:你好");
+            var spaced = EncodeResult("b64: 你好");
+            var bare = Eztools.Host.Launcher.EncodeProvider.TryParse("test", out _);
+            var emptyPayload = Eztools.Host.Launcher.EncodeProvider.TryParse("b64:", out _);
+            var abc = Eztools.Host.Launcher.EncodeProvider.TryParse("abcd", out _);
+
+            Report(
+                "35.14 encode 门槛：前缀大小写不敏感（B64:）· 前缀后一个空格 · 无前缀/空载荷 ⇒ 静默（`abcd` 不被当成 base64）",
+                upper == "5L2g5aW9" && spaced == "5L2g5aW9" && !bare && !emptyPayload && !abc,
+                $"B64={upper} 空格={spaced} test={bare} b64:={emptyPayload} abcd={abc}");
+        }
+
+        // 35.15 非法输入 ⇒ **显式错误行 + 动作禁用**（不是静默；用户已明确表达意图）
+        {
+            var bad64 = EncodeRow("b64d:!!!!");
+            var badUrl = EncodeRow("urld:a%ZZ");
+
+            Report(
+                "35.15 非法输入：b64d:!!!! ⇒「无效的 base64 输入」· urld:a%ZZ ⇒「无效的 URL 编码」（Uri 自己不会报，须自查）",
+                bad64?.Title == "无效的 base64 输入" && bad64.Subtitle == "base64 解码"
+                    && bad64.PrimaryAction is null && bad64.SecondaryAction is null
+                    && badUrl?.Title == "无效的 URL 编码" && badUrl.PrimaryAction is null,
+                $"b64=\"{bad64?.Title}\"/{bad64?.Subtitle} 动作={bad64?.PrimaryAction?.Kind.ToString() ?? "(禁用)"}"
+                + $" url=\"{badUrl?.Title}\"");
+        }
+
+        // 35.16 结果行构成：主行=结果 · 副行=方向/原式 · 徽标 · 主动作=复制结果 · 次动作=复制「原式 = 结果」
+        {
+            var unit = UnitRow("10 km to mi");
+            var enc = EncodeRow("b64:你好");
+
+            Report(
+                "35.16 结果行：Unit 徽标⇄ / Encode 徽标{} · 主行=结果 · 副行=原式或方向 · 主动作复制结果 · 次动作复制整串",
+                unit is { Kind: Eztools.Host.Launcher.LauncherKind.Unit }
+                    && enc is { Kind: Eztools.Host.Launcher.LauncherKind.Encode }
+                    && unit.PrimaryAction is { Kind: Eztools.Host.Launcher.LauncherActionKind.CopyText, Argument: "6.2137119224 mi" }
+                    && unit.SecondaryAction is { Argument: "10 km to mi = 6.2137119224 mi" }
+                    && enc.PrimaryAction is { Argument: "5L2g5aW9" }
+                    && enc.SecondaryAction is { Argument: "b64:你好 = 5L2g5aW9" }
+                    && unit.Score == Eztools.Host.Launcher.UnitProvider.PinScore
+                    && enc.Score == Eztools.Host.Launcher.EncodeProvider.PinScore,
+                $"unit sub=\"{unit?.Subtitle}\" enc sub=\"{enc?.Subtitle}\""
+                + $" unitSec=\"{unit?.SecondaryAction?.Argument}\" encSec=\"{enc?.SecondaryAction?.Argument}\"");
+        }
+
+        // 35.17 注册表：unit/encode 进白名单、属 pin 段、白名单 == 默认启用集合
+        {
+            var known = Eztools.Host.Launcher.LauncherProviderRegistry.KnownIds;
+            var unitSeg = Eztools.Host.Launcher.LauncherProviderRegistry.SegmentOf(
+                Eztools.Host.Launcher.LauncherProviderRegistry.Unit);
+            var encSeg = Eztools.Host.Launcher.LauncherProviderRegistry.SegmentOf(
+                Eztools.Host.Launcher.LauncherProviderRegistry.Encode);
+
+            Report(
+                "35.17 注册表：unit/encode 进白名单且属 pin 段；白名单 == 默认启用集合（= schema 默认值，W7-8 交叉钉住）",
+                known.Contains(Eztools.Host.Launcher.LauncherProviderRegistry.Unit)
+                    && known.Contains(Eztools.Host.Launcher.LauncherProviderRegistry.Encode)
+                    && unitSeg == Eztools.Host.Launcher.LauncherSegment.Pin
+                    && encSeg == Eztools.Host.Launcher.LauncherSegment.Pin
+                    && Eztools.Host.Launcher.LauncherProviderRegistry.DefaultEnabled.SequenceEqual(known),
+                $"known=[{string.Join(",", known)}] unit={unitSeg} encode={encSeg}");
+        }
+
+        // 35.18 回填：calc 的 Ctrl+Enter 应按 §4.2 复制「表达式 = 结果」整串（W7-c 当时错写成回落主动作）
+        {
+            var calc = CalcRow("1+2");
+
+            Report(
+                "35.18 calc 次动作（W7-d 回填 §4.2）：Ctrl+Enter 复制「表达式 = 结果」整串，而非回落成只复制值",
+                calc?.SecondaryAction is { Kind: Eztools.Host.Launcher.LauncherActionKind.CopyText, Argument: "1+2 = 3" },
+                $"primary=\"{calc?.PrimaryAction?.Argument}\" secondary=\"{calc?.SecondaryAction?.Argument}\"");
+        }
+    }
+
+    /// <summary>
+    /// 频次记忆与别名（W7-e，36.x 段）。纯函数（Boost/解析）直测 +
+    /// 真文件 IO（临时目录）回读。**绝不碰真实配置根** —— 全部路径注入。
+    /// </summary>
+    private static void RunUsageCases()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ezt-selftest-usage-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            Directory.CreateDirectory(root);
+
+            // 36.1 Boost：count=0 ⇒ 0；单调；上限 400（count=15 时 100·log2(16) 恰好封顶）
+            {
+                var monotonic = new[] { 1L, 2L, 5L, 20L };
+                var scores = monotonic.Select(c => Eztools.Host.Launcher.LauncherUsageStore.Boost(c, 0)).ToArray();
+                var capped = Eztools.Host.Launcher.LauncherUsageStore.Boost(15, 0);
+                var beyond = Eztools.Host.Launcher.LauncherUsageStore.Boost(10000, 0);
+
+                Report(
+                    "36.1 Boost 纯函数：count=0 ⇒ 0 · 单调递增 · count≥15 封顶 400（100·log2(1+15)）",
+                    Eztools.Host.Launcher.LauncherUsageStore.Boost(0, 0) == 0
+                        && scores[0] < scores[1] && scores[1] < scores[2] && scores[2] < scores[3]
+                        && Math.Abs(capped - 400) < 1e-9 && beyond == 400,
+                    $"0={Eztools.Host.Launcher.LauncherUsageStore.Boost(0, 0):F1} " +
+                    $"15={capped:F2} 10000={beyond:F2}");
+            }
+
+            // 36.2 decay：7 天内不打折；90 天后 0.25 地板（经典边界：-40C=-40F 同族的"恰好"点）
+            {
+                var d7 = Eztools.Host.Launcher.LauncherUsageStore.Boost(15, 7);
+                var d8 = Eztools.Host.Launcher.LauncherUsageStore.Boost(15, 8);
+                var dFloor = Eztools.Host.Launcher.LauncherUsageStore.Boost(15, 1000);
+                var dMid = Eztools.Host.Launcher.LauncherUsageStore.Boost(15, 47);   // 1 - 40/90
+
+                Report(
+                    "36.2 时间衰减：≤7 天 ×1.0 · 之后线性下降 · 深处 0.25 地板（47 天 = 1−40/90）",
+                    d7 == 400 && d8 < 400
+                        && Math.Abs(dFloor - 100) < 1e-9
+                        && Math.Abs(dMid - 400 * (1.0 - 40.0 / 90.0)) < 1e-9,
+                    $"7天={d7:F1} 8天={d8:F1} 1000天={dFloor:F1} 47天={dMid:F1}");
+            }
+
+            // 36.3 落盘回读：Record ×2 ⇒ Flush ⇒ **新实例**读同一文件 ⇒ count/加成一致
+            {
+                var file = Path.Combine(root, "usage.json");
+                var store = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                store.Record("apps", @"C:\Tools\TwoApp.lnk");
+                store.Record("apps", @"C:\Tools\TwoApp.lnk");
+                var flushed = store.Flush(TimeSpan.FromSeconds(3));
+
+                var reloaded = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                reloaded.LoadNow();
+                var count = reloaded.CountOf("apps", @"C:\Tools\TwoApp.lnk");
+                var boost = reloaded.BoostFor("apps", @"C:\Tools\TwoApp.lnk");
+
+                Report(
+                    "36.3 落盘回读：Record×2 ⇒ Flush ⇒ 新实例 count==2 且加成 >0 且无错误",
+                    flushed && count == 2 && boost > 0 && reloaded.LastError is null,
+                    $"flushed={flushed} count={count} boost={boost:F2} err={reloaded.LastError ?? "(无)"}");
+            }
+
+            // 36.4 损坏文件：空表 + LastError 非空（不抛、不阻塞 —— §10.11 失败语义）
+            {
+                var file = Path.Combine(root, "corrupt.json");
+                File.WriteAllText(file, "{ 这不是 JSON");
+                var store = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                store.LoadNow();
+
+                Report(
+                    "36.4 损坏文件：空表继续服务 + LastError 非空（响亮但不崩）",
+                    store.EntryCount == 0 && store.LastError is not null && store.BoostFor("apps", "x") == 0,
+                    $"entries={store.EntryCount} err={store.LastError ?? "(无!)"}");
+            }
+
+            // 36.5 usage.json 原子写无残留（.tmp 必须被收走）
+            {
+                var dir = Path.Combine(root, "atomic");
+                _ = Directory.CreateDirectory(dir);
+                var file = Path.Combine(dir, "usage.json");
+                var store = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                store.Record("apps", "C:\\x\\a.lnk");
+                _ = store.Flush(TimeSpan.FromSeconds(3));
+                var leftovers = Directory.GetFiles(dir, "*.tmp");
+
+                Report(
+                    "36.5 原子写：落盘成功且目录里**没有 .tmp 残留**（写临时文件 + 覆盖移动）",
+                    File.Exists(file) && leftovers.Length == 0,
+                    leftovers.Length == 0 ? "无残留" : "残留：" + string.Join(";", leftovers));
+            }
+
+            // 36.6 开关关 ⇒ 彻底不读写（不是"只写不读"）
+            {
+                var file = Path.Combine(root, "disabled.json");
+                var store = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: false);
+                store.Record("apps", "C:\\x\\a.lnk");
+                store.EnsureLoaded();
+
+                Report(
+                    "36.6 开关关：Record 不落盘 · BoostFor 恒 0 · Flush 直接成功（「彻底不读写」）",
+                    !File.Exists(file) && store.BoostFor("apps", "C:\\x\\a.lnk") == 0
+                        && store.Flush(TimeSpan.FromMilliseconds(50)),
+                    $"fileExists={File.Exists(file)} boost={store.BoostFor("apps", "C:\\x\\a.lnk")}");
+            }
+
+            // 36.7 launcher.usage 解析：缺失 ⇒ true；显式布尔 ⇒ 原值；类型错 ⇒ 报错 + 回落 true
+            {
+                var missing = Eztools.Host.Launcher.LauncherPrefs.ParseUsage(null);
+                var on = Eztools.Host.Launcher.LauncherPrefs.ParseUsage(System.Text.Json.Nodes.JsonNode.Parse("true"));
+                var off = Eztools.Host.Launcher.LauncherPrefs.ParseUsage(System.Text.Json.Nodes.JsonNode.Parse("false"));
+                var bad = Eztools.Host.Launcher.LauncherPrefs.ParseUsage(System.Text.Json.Nodes.JsonNode.Parse("\"yes\""));
+
+                Report(
+                    "36.7 launcher.usage 解析：缺失 ⇒ true · true/false 原值 · 非布尔 ⇒ 报错 + 回落 true",
+                    missing == (true, null) && on == (true, null) && off == (false, null)
+                        && bad == (true, "launcher.usage 类型应为布尔（true/false）"),
+                    $"missing={missing} on={on} off={off} bad={bad}");
+            }
+
+            // 36.8 alias 解析：合法（混合分隔 + 空白）· 缺等号 ⇒ 报错 · 空 ⇒ 空表
+            {
+                var (ok, okErr) = Eztools.Host.Launcher.LauncherAliases.Parse(" np=记事本 ;code=Visual Studio Code\nvs=Visual Studio Code");
+                var (bad, badErr) = Eztools.Host.Launcher.LauncherAliases.Parse("没有等号的条目");
+                var (empty, emptyErr) = Eztools.Host.Launcher.LauncherAliases.Parse("  ; ; ");
+
+                Report(
+                    "36.8 alias 解析：「别名=目标」分号/换行分隔 · 缺等号 ⇒ 报错（回落空表）· 空白 ⇒ 空表",
+                    okErr is null && ok.Entries.Count == 3
+                        && ok.Entries[0] == ("np", "记事本")
+                        && badErr is not null && bad.Entries.Count == 0
+                        && emptyErr is null && empty.Entries.Count == 0,
+                    $"ok={ok.Entries.Count}/{okErr ?? "无错"} bad={badErr ?? "无错!"} empty={empty.Entries.Count}");
+            }
+
+            // 36.9 AliasesOf：目标与标题/路径做**不区分大小写子串包含**（W7-e 落地改判：
+            // 全等要求用户逐字抄文件名整串 —— 实机实测必失配：leigod.exe ≠ 雷声加速器）
+            {
+                var (table, err) = Eztools.Host.Launcher.LauncherAliases.Parse("np=记事本;leigod=leigod.exe");
+                var hitByPath = table.AliasesOf("记事本", "C:\\Users\\ishe\\Desktop\\记事本.lnk");
+                var hitByTitle = table.AliasesOf("记事本", "");
+                var leigod = table.AliasesOf("leigod.exe", "C:\\Users\\ishe\\Desktop\\leigod.exe.lnk");
+                var miss = table.AliasesOf("VSCodium", "C:\\tools\\VSCodium.exe");
+
+                Report(
+                    "36.9 AliasesOf：子串包含（大小写不敏感，标题或路径任一命中）· 目标无公共子串 ⇒ 不命中",
+                    err is null && hitByPath.Count == 1 && hitByTitle.Count == 1
+                        && leigod.Count == 1 && leigod[0] == "leigod" && miss.Count == 0,
+                    $"hitByPath={hitByPath.Count} hitByTitle={hitByTitle.Count} leigod={leigod.Count} miss={miss.Count} err={err ?? "无错"}");
+            }
+
+            // 36.10 Key 格式钉住（usage.json 的键 = providerId|identity，改格式 = 旧数据全部失忆）
+            {
+                var key = Eztools.Host.Launcher.LauncherUsageStore.Key("apps", @"C:\Tools\x.lnk");
+
+                Report(
+                    "36.10 存储键格式：providerId + '|' + identity（格式变更会让旧 usage.json 全部失忆，必须显式迁移）",
+                    key == "apps|C:\\Tools\\x.lnk",
+                    key);
+            }
+
+            // 36.11 脏闸：退出 flush **只在有过新 Record 时**才落盘（M4 实机回归：只加载不记录时，
+            // 退出 flush 也把 mtime 推新 ⇒ 用户记完 T1 重启托盘后看 mtime ≠ T1，误判"关闭没生效"。
+            // 判据 = 预置旧 mtime 不被零记录的 Flush 碰掉；突变验证：摘掉 dirty 闸 ⇒ idleTouched 变红）
+            {
+                var file = Path.Combine(root, "dirty.json");
+                var store = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                store.Record("apps", @"C:\Tools\DirtyApp.lnk");
+                _ = store.Flush(TimeSpan.FromSeconds(3));   // 首次落盘（有脏 ⇒ 必写）
+
+                var store2 = new Eztools.Host.Launcher.LauncherUsageStore(file, enabled: true);
+                store2.LoadNow();                            // 只加载、零新记录
+                File.SetLastWriteTime(file, new DateTime(2001, 1, 1));
+                var flushIdle = store2.Flush(TimeSpan.FromSeconds(3));
+                var idleTouched = File.GetLastWriteTime(file) > new DateTime(2001, 1, 1, 0, 0, 5);
+
+                store2.Record("apps", @"C:\Tools\DirtyApp.lnk");   // 有新记录 ⇒ 必须落盘
+                var flushDirty = store2.Flush(TimeSpan.FromSeconds(3));
+                var dirtyTouched = File.GetLastWriteTime(file) > new DateTime(2001, 1, 1, 0, 0, 5);
+
+                Report(
+                    "36.11 脏闸：零新记录的 Flush 不碰文件（mtime 保持）· Record 后 Flush 必落盘",
+                    flushIdle && !idleTouched && flushDirty && dirtyTouched && store2.LastError is null,
+                    $"flushIdle={flushIdle} idleTouched={idleTouched} flushDirty={flushDirty} dirtyTouched={dirtyTouched} err={store2.LastError ?? "(无)"}");
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (Exception)
+            {
+                // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言结果（进程退出后可再清）
+            }
+        }
+    }
+
+    // ── 37.x 核心服务可达性（W8·B1）：-32001 的两种成因必须分流 ─────────────
+    //
+    // 判据全部落在**纯函数**上（CoreAvailabilityRules.Decide / FilesProvider.MapError）——
+    // 这两处是"界面到底说什么话"的唯一决策点。真实环境的三态（端点 / 进程 / 提权）在自检里
+    // 造出来代价很高，而它们**全部**经过 Decide ⇒ 穷举 Decide 就等于穷举了界面的话。
+
+    private static async Task RunCoreAvailabilityCasesAsync()
+    {
+        // 37.1 判定真值表（六格穷举）
+        {
+            var cases = new (string Name, CoreProbeRaw Raw, CoreAvailability Want)[]
+            {
+                ("无端点", new CoreProbeRaw(false, CoreProcessState.Unknown, false),
+                    CoreAvailability.CoreNotRunning),
+                ("端点陈旧（pid 已死）", new CoreProbeRaw(true, CoreProcessState.Dead, true),
+                    CoreAvailability.CoreNotRunning),
+                ("pid 被别的进程复用", new CoreProbeRaw(true, CoreProcessState.AliveOtherName, true),
+                    CoreAvailability.CoreNotRunning),
+                ("进程名相符但未提权", new CoreProbeRaw(true, CoreProcessState.AliveSameName, false),
+                    CoreAvailability.CoreNotElevated),
+                ("进程名相符且已提权", new CoreProbeRaw(true, CoreProcessState.AliveSameName, true),
+                    CoreAvailability.CoreOk),
+                ("进程信息取不到", new CoreProbeRaw(true, CoreProcessState.Unknown, true),
+                    CoreAvailability.Unknown),
+            };
+
+            var bad = cases
+                .Where(c => CoreAvailabilityRules.Decide(c.Raw) != c.Want)
+                .Select(c => $"{c.Name} ⇒ {CoreAvailabilityRules.Decide(c.Raw)}（期望 {c.Want}）")
+                .ToArray();
+
+            Report(
+                "37.1 可达性真值表：无端点/陈旧/pid 复用 ⇒ 未运行 · 相符但未提权 ⇒ 未提权 · 相符且提权 ⇒ 就绪 · 取不到 ⇒ 未知",
+                bad.Length == 0,
+                bad.Length == 0 ? $"{cases.Length} 格全中" : string.Join("；", bad));
+        }
+
+        // 37.2 真在建 / 探测无结论 ⇒ Kind + 文案**逐字不变**（W7 FR-10 的文案面）
+        {
+            var ok = await MapErrorAsync(CoreAvailability.CoreOk, RpcErrorCodes.SearchNotReady)
+                .ConfigureAwait(false);
+            var unknown = await MapErrorAsync(CoreAvailability.Unknown, RpcErrorCodes.SearchNotReady)
+                .ConfigureAwait(false);
+
+            Report(
+                "37.2 CoreOk 与未知：逐字保持 W7 文案且不出出口（改文案＝改行为）",
+                ok is { Kind: LauncherErrorKind.IndexNotReady, CanLaunch: false }
+                    && ok.UserText == "正在建索引（首次全量约 10 秒级，取决于文件数）—— 打字会自动重试"
+                    && unknown is { Kind: LauncherErrorKind.IndexNotReady, CanLaunch: false }
+                    && unknown.UserText == ok.UserText,
+                $"CoreOk=({ok?.Kind}/{ok?.CanLaunch}) 未知=({unknown?.Kind}/{unknown?.CanLaunch}) text=「{ok?.UserText}」");
+        }
+
+        // 37.3 未运行 / 未提权 ⇒ 各自 Kind + 出口 + 文案给出动作
+        {
+            var notRunning = await MapErrorAsync(CoreAvailability.CoreNotRunning, RpcErrorCodes.SearchNotReady)
+                .ConfigureAwait(false);
+            var notElevated = await MapErrorAsync(CoreAvailability.CoreNotElevated, RpcErrorCodes.SearchNotReady)
+                .ConfigureAwait(false);
+
+            Report(
+                "37.3 未运行/未提权 ⇒ CoreUnavailable·CoreNotElevated + CanLaunch=true + 文案含动作指引",
+                notRunning is { Kind: LauncherErrorKind.CoreUnavailable, CanLaunch: true }
+                    && notRunning.UserText.Contains("启动核心服务", StringComparison.Ordinal)
+                    && notElevated is { Kind: LauncherErrorKind.CoreNotElevated, CanLaunch: true }
+                    && notElevated.UserText.Contains("管理员", StringComparison.Ordinal),
+                $"未运行=({notRunning?.Kind}/{notRunning?.CanLaunch}/「{notRunning?.UserText}」) "
+                    + $"未提权=({notElevated?.Kind}/{notElevated?.CanLaunch}/「{notElevated?.UserText}」)");
+        }
+
+        // 37.4 非 -32001 **不受可达性影响**（否则核心服务的问题会污染索引自身的故障，
+        //      给出一个点了也没用的启动按钮）
+        {
+            var mapped = await MapErrorAsync(CoreAvailability.CoreNotRunning, RpcErrorCodes.InternalError,
+                "索引进程崩了").ConfigureAwait(false);
+
+            Report(
+                "37.4 非 -32001 不受可达性影响：索引自身故障照旧报「搜索出错」且不出启动出口",
+                mapped is { Kind: LauncherErrorKind.IndexUnavailable, CanLaunch: false }
+                    && mapped.UserText.Contains("搜索出错", StringComparison.Ordinal),
+                $"kind={mapped?.Kind} canLaunch={mapped?.CanLaunch} text=「{mapped?.UserText}」");
+        }
+
+        // 37.5 配置指纹（W8·B2）：三项各自变更都要能察觉 —— 漏一个键 = 那项配置静默不生效
+        {
+            var prefs = LauncherPrefs.Parse("files,apps").Out;
+            var aliases = LauncherAliases.Parse("note=notepad").Out;
+            var fp = LauncherPrefs.Fingerprint(prefs, aliases);
+
+            var same = LauncherPrefs.Fingerprint(
+                LauncherPrefs.Parse("files,apps").Out, LauncherAliases.Parse("note=notepad").Out);
+            var byProviders = LauncherPrefs.Fingerprint(LauncherPrefs.Parse("files").Out, aliases);
+            var byUsage = LauncherPrefs.Fingerprint(prefs with { UsageEnabled = false }, aliases);
+            var byAlias = LauncherPrefs.Fingerprint(prefs, LauncherAliases.Parse("lei=leigod").Out);
+
+            Report(
+                "37.5 配置指纹：同值不变 · providers/usage/alias 任一变更都变（漏键＝该配置静默不生效）",
+                fp == same && fp != byProviders && fp != byUsage && fp != byAlias,
+                $"same={fp == same} providers={fp != byProviders} usage={fp != byUsage} alias={fp != byAlias}");
+        }
+    }
+
+    /// <summary>
+    /// 走**真实查询链路**取一次错误映射结果（W8·B1）。
+    ///
+    /// <para>为什么不直调 <c>FilesProvider.MapError</c>：① 它是 internal（Cli 看不见）；
+    /// ② 更重要的 —— "注入的可达性有没有真的接进查询路径"本身就该被验，
+    /// 直调映射函数会漏掉最可能的那个回归：<b>装配时忘了把探测传进 FilesProvider</b>
+    /// （默认值会让它静默退回"正在建索引"，而症状与修复前一模一样）。</para>
+    ///
+    /// <para>夹具与 25.3 同款：假传输 + 手工塞一帧 error。</para>
+    /// </summary>
+    private static async Task<LauncherError?> MapErrorAsync(
+        CoreAvailability availability, int code, string message = "索引准备中（ready=false）")
+    {
+        var transport = new SessionSearchTransport();
+        var client = new Eztools.Host.Search.SearchIndexClient(transport);
+        var provider = new FilesProvider(client, () => availability);
+
+        var task = provider.QueryAsync(new LauncherQuery("rep", 1, 50, true), CancellationToken.None);
+        transport.Gates[^1].SetResult(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = transport.Requests[^1]["id"]!.DeepClone(),
+            ["error"] = new JsonObject { ["code"] = code, ["message"] = message },
+        });
+
+        var set = await task.ConfigureAwait(false);
+        return set.Error;
+    }
+
+    // ── W7-a 启动器用例的夹具（假 provider / 结果项构造）─────────────────────
+
+    private static LauncherItem LItem(LauncherKind kind, string title, double score) =>
+        new(kind, title, "", "", score, Array.Empty<(int, int)>(), null, null, null);
+
+    /// <summary>假 provider：<c>Handler</c> 为 null = 必抛（故障隔离用例）。</summary>
+    private sealed class FakeLauncherProvider : ILauncherProvider
+    {
+        public string Id { get; init; } = "calc";
+
+        public string DisplayName { get; init; } = "假来源";
+
+        public bool IsReady { get; init; } = true;
+
+        public int Calls { get; private set; }
+
+        public Func<LauncherQuery, Task<LauncherResultSet>>? Handler { get; init; }
+
+        public Task<LauncherResultSet> QueryAsync(LauncherQuery query, CancellationToken ct)
+        {
+            Calls++;
+            if (Handler is null)
+            {
+                throw new InvalidOperationException("模拟 provider 故障");
+            }
+
+            return Handler(query);
+        }
+    }
+
+    /// <summary>按 (id, 结果项) 造一组假 provider；<c>Items</c> 为 null = 必抛。</summary>
+    private static ILauncherProvider[] NewProviders(params (string Id, LauncherItem[]? Items)[] specs) =>
+        [.. specs.Select(s => (ILauncherProvider)new FakeLauncherProvider
+        {
+            Id = s.Id,
+            Handler = s.Items is null
+                ? null
+                : q => Task.FromResult(new LauncherResultSet(
+                    q.Generation, s.Id, s.Items, s.Items.Length, 1, Dropped: false, Error: null)),
+        })];
+
+    private static (QueryRouter Router, List<LauncherRenderModel> Models) NewRouter(
+        params (string Id, LauncherItem[]? Items)[] specs)
+    {
+        var router = new QueryRouter(NewProviders(specs), nowMs: () => 0);
+        var models = new List<LauncherRenderModel>();
+        router.OnRender = m => { lock (models) { models.Add(m); } };
+        return (router, models);
+    }
+
 
     // ── USN 同步层（W3-c，假源零进程；真管道实证 = ezt-index --probe-usn 连提权 Core）──
 

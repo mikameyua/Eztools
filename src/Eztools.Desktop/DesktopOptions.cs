@@ -255,6 +255,30 @@ internal sealed class DesktopOptions
     public bool PickShow { get; private init; }
 
     /// <summary>
+    /// 启动器探针（<c>--probe-launcher &lt;mode&gt;</c>，W7-b 验收面）。取值：
+    /// <list type="bullet">
+    /// <item><c>rows</c> —— 五种来源的行渲染（徽标 / 主副行 / 高亮 / 图标）+ 文件项无徽标（FR-10 反向断言）；</item>
+    /// <item><c>actions</c> —— Enter / Ctrl+Enter / Ctrl+C 的动作分派与失败文案；</item>
+    /// <item><c>apps</c> —— 真 AppsProvider（临时扫描根）：命中 / 排序 / 图标句柄斜率 / 缓存上限 / 首扫补发；</item>
+    /// <item><c>isolation</c> —— 段位故障必须在状态行可见（FR-9）；</item>
+    /// <item><c>router</c> —— 代次闸的上屏级证据（R3）：慢来源在途 → 清空输入框推进代次 → 放行
+    ///   慢批次 ⇒ 渲染日志条数不得增加；</item>
+    /// <item><c>calc</c> —— 计算器真链路：该静默的真静默（纯数字/含字母/半成品）· 出结果行且置顶 ·
+    ///   Enter 复制格式化值并收窗 · 求值错行禁用动作（不收窗、不复制）· Ctrl+Enter 复制「表达式 = 结果」；</item>
+    /// <item><c>unit</c> —— 单位换算真链路：触发词 `to`/`->`/`转` · 温度仿射恒等式 `-40C == -40F` ·
+    ///   数据量两制式标注 · 无触发词列常用单位（不含源单位）· 混算/未知单位静默；</item>
+    /// <item><c>encode</c> —— 编码转换真链路：六前缀双向 · 非法输入 ⇒ 显式错误行且动作禁用 ·
+    ///   无前缀完全静默；</item>
+    /// <item><c>config</c> —— 读**真实**配置中心并落出解析结果/告警文案（两层测试的应用层观测面，
+    ///   CLI 写入由 acceptance 的步骤 8 配对断言；含 usage/alias 的解析观测）；</item>
+    /// <item><c>usage</c> —— 频次记忆真链路（W7-e）：记录两次 ⇒ 排序提前 · 落盘回读 ·
+    ///   开关关 ⇒ 彻底不读写 · 损坏文件 ⇒ 空表 + LastError；</item>
+    /// <item><c>all</c> —— 以上全跑（无真应用启动，无副作用）。</item>
+    /// </list>
+    /// </summary>
+    public string? ProbeLauncher { get; private init; }
+
+    /// <summary>
     /// WinForms 打字判决探针（--probe-winforms-typing，2026-09-27 换方案判决）：
     /// 纯 WinForms TextBox 注入真键 "hi" → 断言 Text=="hi"。无副作用。
     /// </summary>
@@ -312,6 +336,7 @@ internal sealed class DesktopOptions
         var probePickOverlay = false;
         var probeTrayItems = false;
         var probeW6ClipIntegration = false;
+        string? probeLauncher = null;
         var captureShow = false;
         var pickShow = false;
         var probeWinformsTyping = false;
@@ -398,6 +423,9 @@ internal sealed class DesktopOptions
                     break;
                 case "--probe-tray-items":
                     probeTrayItems = true;
+                    break;
+                case "--probe-launcher" when i + 1 < args.Length:
+                    probeLauncher = args[++i];
                     break;
                 case "--probe-w6-clip-integration":
                     probeW6ClipIntegration = true;
@@ -486,6 +514,7 @@ internal sealed class DesktopOptions
             ProbePickOverlay = probePickOverlay,
             ProbeTrayItems = probeTrayItems,
             ProbeW6ClipIntegration = probeW6ClipIntegration,
+            ProbeLauncher = probeLauncher,
             CaptureShow = captureShow,
             PickShow = pickShow,
             ProbeWinFormsTyping = probeWinformsTyping,

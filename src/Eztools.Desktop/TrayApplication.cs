@@ -13,6 +13,7 @@ using Eztools.ClipboardLib;
 using Eztools.Host;
 using Eztools.Host.Arbitration;
 using Eztools.Host.Config;
+using Eztools.Host.Launcher;
 using Eztools.Host.Processes;
 using Eztools.Host.Registry;
 using Eztools.Host.Search;
@@ -61,6 +62,23 @@ internal sealed class TrayApplication : IDisposable
     private SearchIndexProcess? _searchIndex;
     private SearchIndexClient? _searchClient;
     private SearchWindow? _searchWindow;
+
+    /// <summary>应用来源实例（W7-b）：唤出时做一次指纹失效检测（装/卸应用后自动重扫）。</summary>
+    private AppsProvider? _appsProvider;
+    private LauncherUsageStore? _usage;
+
+    /// <summary>
+    /// 核心服务可达性探测（W8·B1）。**窗口与 files provider 共用同一个实例** ——
+    /// 两处各探一次会拿到两个时间点的结论，状态行与卷清单行就可能互相矛盾。
+    /// </summary>
+    private CoreAvailabilityProbe? _coreAvailability;
+
+    /// <summary>
+    /// launcher 配置的**有效值**摘要（W8·B2），在窗口创建时记下。唤出时比对 —— 变了说明配置被改过，
+    /// 而旧窗口的 providers / alias / usage 全部冻结在创建那一刻，必须重建才生效。
+    /// 比的是有效值而不是文件 mtime：保存但没改内容、改了无关键，都不该触发重建。
+    /// </summary>
+    private string? _launcherFingerprint;
 
     /// <summary>剪贴板历史面板（W5-b）与其存储。面板生命周期同搜索窗：懒创建 + Closed 自愈 + X=隐藏。</summary>
     private ClipboardHistoryPanel? _clipPanel;
@@ -370,6 +388,15 @@ internal sealed class TrayApplication : IDisposable
             return code;
         }
 
+        // 启动器探针（W7-b）：非文件来源的行渲染 / 动作分派 / 段位隔离 / 真 apps 扫描。
+        // 无副作用（应用动作只断言参数构造，不真起进程）。
+        if (_options.ProbeLauncher is { Length: > 0 } launcherMode)
+        {
+            var code = RunProbeLauncher(launcherMode);
+            Dispose();
+            return code;
+        }
+
         // 托盘菜单入口探针（W6-d，FR-9）：菜单真实构建，无副作用。
         if (_options.ProbeTrayItems)
         {
@@ -488,6 +515,21 @@ internal sealed class TrayApplication : IDisposable
         _clipPanel = null;
         _clipStore?.Dispose();
         _clipStore = null;
+
+        // 频次落盘（W7-e，T-7）：**有界等待** ≤500ms，超时放弃 —— 退出不被磁盘 IO 拖住
+        try
+        {
+            if (_usage?.Flush(TimeSpan.FromMilliseconds(500)) == false)
+            {
+                _host?.Log.Warn("频次文件退出落盘超时（已放弃，2 秒去抖的那笔可能丢）", "shutdown");
+            }
+        }
+        catch (Exception ex)
+        {
+            _host?.Log.Warn($"频次文件退出落盘失败（忽略）：{ex.Message}", "shutdown");
+        }
+
+        _usage = null;
 
         // 剪贴板监听（W5-c）：先摘监听再销毁 sink（Dispose 内部已按 IsRunning 判定）
         try
@@ -1164,7 +1206,77 @@ internal sealed class TrayApplication : IDisposable
             return;
         }
 
-        _searchWindow = new SearchWindow(AcquireSearchClient());
+        var client = AcquireSearchClient();
+        var (prefs, configError) = LauncherPrefs.FromConfig(_host!.Configs);
+        if (configError is not null)
+        {
+            // 配置非法 ⇒ 回落默认 + **必须可见**（设计方案 §5：禁静默）。
+            // 两个出口都要有：日志（事后取证）+ 状态行（用户正在看的地方，首次唤出报一次）——
+            // 只写日志 = 出口不可达（审查规范 §3.3⑤：先问"写到哪、谁收得到"）。
+            _host.Log.Warn($"launcher.providers 配置无效，已回落默认：{configError}", "launcher");
+        }
+
+        // ★ 未启用 = 根本不进集合；未就绪 = 由 provider 自己表达（I6 的两侧分工）
+        // W7-e：频次记忆 + 别名。开关关 ⇒ store 不建（彻底不读写，§10.11）；别名解析错误走同一告警出口。
+        LauncherAliases aliases;
+        if (prefs.UsageEnabled)
+        {
+            _usage = new LauncherUsageStore(
+                Path.Combine(_host.Paths.LauncherDataDir, "usage.json"), enabled: true);
+            _usage.EnsureLoaded();
+        }
+
+        var (parsedAliases, aliasError) = LauncherAliases.FromConfig(_host.Configs);
+        aliases = parsedAliases;
+        // 出口与 providers 同款（日志 + 状态行一次性告警），但**回落是空表**不是默认集合
+        // ⇒ 告警文案单独成句（不能套"已回落默认来源"的前缀 —— 那话说的是 providers）
+        var aliasWarning = aliasError is null
+            ? null
+            : $"启动器别名无效（已按未配置处理）：{aliasError}";
+
+        // W8·B2：记下"这次创建用的是哪份配置"——唤出时比对，变了就重建。
+        // ★ usage 开关也参与指纹：用户实测踩到的正是"usage=false 落盘后文件还在长"，
+        //   根因是旧 store 仍被旧的 UsageRecorder 持有 —— 不重建就永远改不掉。
+        _launcherFingerprint = LauncherPrefs.Fingerprint(prefs, aliases);
+
+        // W8·B1：可达性探测（跨重建复用 —— 它只读 core.json，没有需要失效的内部状态，
+        // 唯一的缓存由启动成功后显式 Invalidate）
+        _coreAvailability ??= new CoreAvailabilityProbe(_host.Paths.Root);
+
+        AppsProvider? apps = null;
+        var providers = LauncherProviderSet.Build(prefs, new Dictionary<string, Func<ILauncherProvider>>
+        {
+            // ★ W8·B1：files 必须拿到可达性 —— 它是"-32001 那两句文案"分流的唯一决策点
+            [LauncherProviderRegistry.Files] =
+                () => new FilesProvider(client, _coreAvailability!.Snapshot),
+            [LauncherProviderRegistry.Apps] = () => apps = AppsProvider.CreateDefault(_usage, aliases),
+            [LauncherProviderRegistry.Calc] = () => new CalcProvider(),
+            [LauncherProviderRegistry.Unit] = () => new UnitProvider(),
+            [LauncherProviderRegistry.Encode] = () => new EncodeProvider(),
+        });
+        _appsProvider = apps;
+
+        _searchWindow = new SearchWindow(
+            client,
+            providers,
+            startupWarning: SearchWindow.StartupWarningFor(configError) ?? aliasWarning,
+            coreAvailability: () => _coreAvailability!.Snapshot());
+
+        // W8·B1：可点出口的宿主动作（提权启动 + 重建窗口）。不注入 ⇒ 状态行不做成可点。
+        _searchWindow.CoreLaunchRequested = LaunchCoreAndRebuildAsync;
+
+        // 频次记录（W7-e）：只记 App 段（有消费者的唯一段，见 LauncherUsageStore 类注）；
+        // identity = 目标全路径（§10.11 identity 规格）。定位（Ctrl+Enter 次动作）也算"用了"。
+        if (_usage is not null)
+        {
+            _searchWindow.UsageRecorder = (item, action) =>
+            {
+                if (item.Kind == LauncherKind.App)
+                {
+                    _usage.Record(LauncherProviderRegistry.Apps, action.Argument);
+                }
+            };
+        }
 
         // ★ 自愈（2026-09-25 实测教训）：任何路径真关闭（探针/未来重构）后，
         //   持着已 Closed 的窗口引用只会让热键每次都抛"关闭窗口后无法 Show"被吞掉。
@@ -1195,12 +1307,138 @@ internal sealed class TrayApplication : IDisposable
         try
         {
             EnsureSearchWindow();
+
+            // ★ W8·B2：配置热生效 —— 旧窗口的 providers / alias / usage 全部冻结在创建那一刻
+            //   （EnsureSearchWindow 首行就是"已存在则 return"），配置改了就重建，不必重启托盘。
+            if (LauncherConfigChanged())
+            {
+                _host?.Log.Info("launcher 配置已变更，重建搜索窗（热生效）", "launcher");
+                RebuildSearchWindow();
+                EnsureSearchWindow();   // 按新配置重装一切
+            }
+
+            // W7-b：每次唤出做一次指纹比对（装/卸应用后自动重扫；成本是数毫秒的目录枚举，在后台线程）
+            _appsProvider?.InvalidateIfChanged();
+
             _searchWindow!.Toggle();
         }
         catch (Exception ex)
         {
             _host?.Log.Warn($"打开搜索窗失败：{ex.Message}", "search");
         }
+    }
+
+    /// <summary>
+    /// launcher 配置自窗口创建以来是否变过（W8·B2）。
+    ///
+    /// <para>比对**有效值**（providers / usage 开关 / 别名表）而非文件 mtime ——
+    /// "保存了但没改内容"或"改的是别的段落"都不该触发重建（重建会清掉用户此刻的输入）。</para>
+    ///
+    /// <para>读配置是两次小文件读取，与 W7-b 已经放在这条路径上的
+    /// <c>InvalidateIfChanged</c>（目录枚举）同量级，没有引入新的慢操作形态。</para>
+    /// </summary>
+    private bool LauncherConfigChanged()
+    {
+        if (_launcherFingerprint is null)
+        {
+            return false;   // 首次创建刚记过（EnsureSearchWindow），无旧值可比
+        }
+
+        var (prefs, _) = LauncherPrefs.FromConfig(_host!.Configs);
+        var (aliases, _) = LauncherAliases.FromConfig(_host.Configs);
+        return !string.Equals(_launcherFingerprint, LauncherPrefs.Fingerprint(prefs, aliases), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 重建搜索窗 —— **W8·B1 的收尾与 W8·B2 的生效手段共用这一个动作**。
+    ///
+    /// <para><b>为什么必须连索引进程一起重启</b>：<c>ezt-index</c> 的自举只在进程启动时跑一次
+    /// 且不重试，<c>search.resumeIndexing</c> 也只清一个暂停标志、**不会重新自举**。
+    /// 所以"核心服务刚起来"时，那个已经自举失败的索引进程不会自己好 ——
+    /// 不重启它，用户点了"启动核心服务"照样搜不到东西（修复就成了假的）。
+    /// 好在 <see cref="SearchIndexProcess"/> 本就是"懒启动 + 进程死了下次请求自动重启"，
+    /// 置空引用 + Dispose 之后，下一次查询自然会拉起新进程重新自举。</para>
+    ///
+    /// <para><b>为什么收尾要丢到后台</b>：<c>Dispose</c> 走 <c>tool.stop</c> 并等进程退出
+    /// （宽限 3 s），<c>Flush</c> 有自己的超时；而这里在热键/点击路径上（UI 线程）——
+    /// 同步等就是卡住整个托盘。两件事都没有"完成后才知道结果"的依赖，所以放后台即可。</para>
+    ///
+    /// <para><b>已知的短暂并存</b>：后台 Dispose 期间新窗口可能已经拉起新的索引进程。
+    /// 这段时间通常只有几百毫秒（用户唤出后还要打字才触发查询，而索引进程是懒启动的），
+    /// 且索引是按卷追加写的 —— 取舍为"不卡 UI"优先。</para>
+    /// </summary>
+    private void RebuildSearchWindow()
+    {
+        var oldIndex = _searchIndex;
+        var oldUsage = _usage;
+
+        // 先关窗（Closed 自愈会把 _searchWindow 置空 —— 与既有纪律一致）
+        try
+        {
+            _searchWindow?.RealClose();
+        }
+        catch (Exception ex)
+        {
+            _host?.Log.Warn($"重建搜索窗前关闭旧窗口失败（忽略）：{ex.Message}", "launcher");
+        }
+
+        _searchWindow = null;
+        _searchClient = null;
+        _searchIndex = null;
+        _usage = null;
+        _appsProvider = null;
+        _launcherFingerprint = null;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                // 先把频次落盘再丢（usage 关掉时旧 store 也要有一次收尾）
+                oldUsage?.Flush(TimeSpan.FromMilliseconds(500));
+                oldIndex?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _host?.Log.Warn($"重建搜索窗时回收旧索引进程失败（忽略）：{ex.Message}", "launcher");
+            }
+        });
+    }
+
+    /// <summary>
+    /// 搜索窗"启动核心服务"出口的宿主动作（W8·B1）。
+    ///
+    /// <para>成功 ⇒ 作废可达性缓存 + 重建窗口（顺带重启索引进程 ⇒ 重新自举，这次核心服务在了）。
+    /// 用户在 UAC 上点"否" ⇒ **原样回显、不重试** —— 那是用户决策，不是错误。</para>
+    ///
+    /// <para>★ 提权实现全在 <see cref="CoreLauncher"/>（<c>UseShellExecute + Verb="runas"</c>）：
+    /// UAC 必过。本项目**不存在也不得新增**静默拉起核心服务的路径。</para>
+    /// </summary>
+    private async Task<(CoreLaunchOutcome Outcome, string Message)> LaunchCoreAndRebuildAsync()
+    {
+        var (outcome, message) = await CoreLauncher
+            .LaunchElevatedAsync(_host!.Paths, CancellationToken.None)
+            .ConfigureAwait(true);
+
+        if (outcome is CoreLaunchOutcome.Launched or CoreLaunchOutcome.AlreadyRunning)
+        {
+            // ★ 缓存必须作废：刚成立的结论是"没在跑"，留着它界面会立刻改口回"正在建索引"
+            _coreAvailability?.Invalidate();
+
+            // 重建 = 让索引进程重新自举（核心服务现在在了，这次会成）
+            RebuildSearchWindow();
+
+            try
+            {
+                EnsureSearchWindow();
+                _searchWindow?.Toggle();
+            }
+            catch (Exception ex)
+            {
+                _host?.Log.Warn($"启动核心服务后重建搜索窗失败：{ex.Message}", "launcher");
+            }
+        }
+
+        return (outcome, message);
     }
 
     /// <summary>
@@ -1432,6 +1670,27 @@ internal sealed class TrayApplication : IDisposable
     /// 搜索窗渲染探针（--probe-search-ui，W3-d-2/3 验收面）。全部逻辑在
     /// <see cref="SearchUiProbe"/>（假传输 + Measure/Arrange + 快照），这里只负责落盘与日志。
     /// </summary>
+    /// <summary>
+    /// 启动器探针（--probe-launcher &lt;mode&gt;，W7-b）。逻辑全在 <see cref="LauncherUiProbe"/>；
+    /// 这里只负责落盘与日志（与其他探针同一形态）。
+    /// </summary>
+    private int RunProbeLauncher(string mode)
+    {
+        try
+        {
+            var json = LauncherUiProbe.Run(mode, _host!.Configs);
+            WriteOutFile(json.ToJsonString());
+            _host!.Log.Info($"启动器探针完成（mode={mode}）", "launcher");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            WriteOutFile(new JsonObject { ["ok"] = false, ["error"] = ex.Message }.ToJsonString());
+            _host?.Log.Warn($"启动器探针失败（mode={mode}）：{ex}", "launcher");
+            return 2;
+        }
+    }
+
     private int RunProbeSearchUi()
     {
         try
@@ -1526,13 +1785,14 @@ internal sealed class TrayApplication : IDisposable
                 ["registered"] = _ocrHotkeyId is not null,
             };
 
-            // 程序化设置窗口：装配 → 选中宿主节 → 改值 → 保存（回调里 Reload + 重注册）
+            // 程序化设置窗口：装配 → 选中热键中心页（方案 B-2，ocr/pick 热键同页）→ 改值 → 保存
+            //（回调里 Reload + 重注册）。C4 起 dirty 确认在探针模式自动抑制（SuppressDirtyConfirm）。
             var window = new SettingsWindow(
                 _host!,
                 new SettingsWindow.HostSettingsSection(
-                    HostSettingsSchema.SectionId, "桌面宿主", HostSettingsSchema.SchemaJson),
+                    HostSettingsSchema.SectionId, "全局设置", HostSettingsSchema.SchemaJson),
                 OnHostSettingsSaved);
-            var selected = window.ProbeSelectHostSection();
+            var selected = window.ProbeSelectHostSection(SettingsWindow.HotkeysGroupKey);
             var setField = selected && window.ProbeSetField(HostSettingsSchema.KeyOcrHotkey, newHotkey);
             snap["probeUi"] = new JsonObject { ["hostSectionSelected"] = selected, ["fieldSet"] = setField };
 
@@ -1565,21 +1825,20 @@ internal sealed class TrayApplication : IDisposable
                 ["registered"] = _ocrHotkeyId is not null,
             };
 
-            // W6-d 补充：pick.hotkey 走**同一条 UI 保存链**（用户实测 OCR 可改成功、取色字段
-            // 当时因右栏不可滚而不可达；滚动修复后字段可达，这里把"可达字段的保存 → 重注册
-            // → 恢复"也钉进自动化）。Ctrl+Alt+K 在 OCR 恢复默认后已空闲，复用。
-            var pickWindow = new SettingsWindow(
-                _host!,
-                new SettingsWindow.HostSettingsSection(
-                    HostSettingsSchema.SectionId, "桌面宿主", HostSettingsSchema.SchemaJson),
-                OnHostSettingsSaved);
-            var pickSelected = pickWindow.ProbeSelectHostSection();
-            var pickSet = pickSelected && pickWindow.ProbeSetField(HostSettingsSchema.KeyPickHotkey, newHotkey);
-            pickWindow.ProbeSaveAsync().GetAwaiter().GetResult();
+            // W6-d 补充：pick.hotkey 走**同一条 UI 保存链**（方案 B 后同在热键中心页，
+            // 保存重渲染后直接设值再存，不再需要第二个窗口）。Ctrl+Alt+K 在 OCR 恢复
+            // 默认后已空闲，复用。
+            // ⚠️ 同页聚合的保存语义：保存会把页面上**全部**编辑器写盘 —— unset ocr 后
+            // 窗口里 ocr 编辑器仍是旧值 K，若不清空，第二次保存会把 K 二次写盘，
+            // 与 pick=K 仲裁冲突（先注册者赢 ⇒ pick 落败未注册，实测踩过）。
+            // 空字符串 = Unset 语义，幂等清掉。
+            _ = window.ProbeSetField(HostSettingsSchema.KeyOcrHotkey, string.Empty);
+            var pickSet = window.ProbeSetField(HostSettingsSchema.KeyPickHotkey, newHotkey);
+            window.ProbeSaveAsync().GetAwaiter().GetResult();
             var pickSaved = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyPickHotkey);
             snap["pick"] = new JsonObject
             {
-                ["hostSectionSelected"] = pickSelected,
+                ["hostSectionSelected"] = selected,
                 ["fieldSet"] = pickSet,
                 ["savedValue"] = pickSaved,
                 ["effectiveHotkey"] = _pickHotkey,
@@ -3080,7 +3339,7 @@ internal sealed class TrayApplication : IDisposable
         var window = new SettingsWindow(
             _host!,
             new SettingsWindow.HostSettingsSection(
-                HostSettingsSchema.SectionId, "桌面宿主", HostSettingsSchema.SchemaJson),
+                HostSettingsSchema.SectionId, "全局设置", HostSettingsSchema.SchemaJson),
             OnHostSettingsSaved);
         window.ShowDialog();
     }
@@ -3310,7 +3569,7 @@ internal sealed class TrayApplication : IDisposable
         var settings = new SettingsWindow(
             _host,
             new SettingsWindow.HostSettingsSection(
-                HostSettingsSchema.SectionId, "桌面宿主", HostSettingsSchema.SchemaJson))
+                HostSettingsSchema.SectionId, "全局设置", HostSettingsSchema.SchemaJson))
             .InventoryForSelfCheck();
 
         _host.Log.Info(line, "selfcheck");

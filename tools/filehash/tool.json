@@ -10,17 +10,37 @@
   "entry": "main.py",
   "weight": "lite",
   "lifecycle": "transient",
-  "needs": ["files.userSelected"],
+  "needs": [
+    "files.userSelected"
+  ],
   "contributes": {
     "commands": [
-      { "id": "filehash.hash", "title": "计算文件哈希", "handler": "hash", "description": "对单个文件计算哈希" },
-      { "id": "filehash.hashMany", "title": "批量计算文件哈希", "handler": "hashMany", "description": "对多个文件依次计算哈希" }
+      {
+        "id": "filehash.hash",
+        "title": "计算文件哈希",
+        "handler": "hash",
+        "description": "对单个文件计算哈希"
+      },
+      {
+        "id": "filehash.hashMany",
+        "title": "批量计算文件哈希",
+        "handler": "hashMany",
+        "description": "对多个文件依次计算哈希"
+      }
     ],
     "hotkeys": [
-      { "command": "filehash.hash", "default": "Ctrl+Alt+H" }
+      {
+        "command": "filehash.hash",
+        "default": "Ctrl+Alt+H"
+      }
     ],
     "menus": [
-      { "location": "tray", "command": "filehash.hashMany", "group": "file", "input": "clipboard" }
+      {
+        "location": "tray",
+        "command": "filehash.hashMany",
+        "group": "file",
+        "input": "clipboard"
+      }
     ]
   },
   "config": {
@@ -30,7 +50,12 @@
         "type": "string",
         "default": "sha256",
         "title": "默认算法",
-        "enum": ["sha256", "sha1", "md5", "blake2b"]
+        "enum": [
+          "sha256",
+          "sha1",
+          "md5",
+          "blake2b"
+        ]
       },
       "uppercase": {
         "type": "boolean",
@@ -38,6 +63,7 @@
         "title": "输出大写十六进制"
       },
       "chunkSizeKb": {
+        "x-advanced": true,
         "type": "integer",
         "default": 1024,
         "minimum": 4,

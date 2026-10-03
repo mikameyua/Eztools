@@ -190,7 +190,8 @@ internal static class PickOverlayProbe
             }
             catch
             {
-                // 探针即将退进程，无出口可去
+                // review-guards:allow-empty-catch :: 探针收尾路径（即将退进程），无出口可去 ——
+                // 与 CaptureOverlayProbe 同款兜底，意图显式声明而不是靠注释被忽略
             }
         }
     }
@@ -207,7 +208,8 @@ internal static class PickOverlayProbe
         }
         catch (COMException)
         {
-            // 剪贴板被外部程序短暂持锁：下轮轮询再试（≤3s deadline 内自愈）
+            // review-guards:allow-empty-catch :: 剪贴板被外部程序短暂持锁 ⇒ 下轮轮询再试
+            // （≤3s deadline 内自愈，日志会重复且无诊断价值）
         }
 
         text = string.Empty;

@@ -8,6 +8,9 @@ obj/
 # ── 运行时载荷（体积大，不入库；由 scripts/make-payload.* 生成）──
 payload/
 
+# ── 安装态运行时目录（体积大 ~43MB，不入库；与 payload/ 同源，可由脚本重生成）──
+runtimes/
+
 # ── 便携分发包（体积大 ~87MB，不入库；由 scripts/make-portable.sh 生成）──
 dist/
 

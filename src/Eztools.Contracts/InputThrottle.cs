@@ -104,7 +104,7 @@ public sealed class InputThrottle
     /// <b>为什么可覆盖</b>：150/80 这组数是按"一次 <c>tool.panel.data</c> 进程往返 + 面板重绘"的
     /// 代价定的。**搜索窗走的是另一条链路**（原生 WPF 直连索引进程 stdio，没有面板那一跳），
     /// 设计方案 §6.2 给同一条链路写的就是 30 ms —— 复用这个类是对的，
-    /// 但**常量取值必须跟着链路重新论证**，不能顺手抄（详见 <c>SearchSession.DebounceMs</c> 的注释）。
+    /// 但**常量取值必须跟着链路重新论证**，不能顺手抄（详见 <c>QueryPump.DebounceMs</c> 的注释）。
     /// </param>
     /// <param name="minIntervalMs">最短间隔覆盖值。默认 = <see cref="MinIntervalMs"/>（80 ms）。</param>
     public InputThrottle(

@@ -31,7 +31,7 @@ namespace Eztools.Host.Search;
 /// id 配不上的帧同理 —— **绝不静默吞帧**，也绝不把 A 的响应交给 B（配对闸由响应帧 id 决定）。
 ///
 /// <b>并发模型</b>：<see cref="RoundTripAsync"/> 用 <see cref="SemaphoreSlim"/> 全程串行
-/// （并发写 stdin 会帧间交错）。上层的 <see cref="SearchSession"/> 用节流 + 单在途把请求频率
+/// （并发写 stdin 会帧间交错）。上层的 <c>QueryPump</c> 用节流 + 单在途把请求频率
 /// 压在"毫秒级查询串行无感知"的量级，这里的信号量是正确性兜底而非吞吐手段。
 /// 内部状态（进程句柄 / pending 表）另用一把轻锁，两把锁不嵌套（先 state 后不碰 roundTrip）。
 /// </summary>

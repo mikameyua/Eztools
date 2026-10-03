@@ -238,6 +238,13 @@ public sealed class ToolManifest
     // ── 配置 schema（P1 将据此渲染设置页）──
     public JsonObject? ConfigSchema { get; init; }
 
+    /// <summary>
+    /// `configHidden`（方案 C2，2026-09-30）：配置链路照常（<c>ezt config</c> / ConfigStore），
+    /// 但**不在设置窗口展示** —— 验收/演示工具（echo、pinfo）的设置项对真实使用无意义，
+    /// 面板降噪用。⚠️ 解析器对未知字段一律忽略（前向兼容），所以这个标记必须显式进模型才生效。
+    /// </summary>
+    public bool ConfigHidden { get; init; }
+
     // ── 以下字段不是清单内容，而是发现过程填写的定位信息 ──
 
     /// <summary>工具目录绝对路径。</summary>
