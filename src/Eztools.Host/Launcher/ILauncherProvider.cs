@@ -71,6 +71,14 @@ public enum LauncherSegment{
 
     /// <summary>文件段（原序透传）。</summary>
     Files,
+
+    /// <summary>
+    /// 剪贴板历史段（W10-a，**原序透传**）。独立成段而不并入 Files 或 Pin，两条硬理由：
+    /// ① 合并时 files 段要原序透传且携带 files 专属计数（"显示 N / 共 M 条"），clip 混进去会让
+    ///    状态行的数字变成"剪贴板条数"（S9：显示的数字语义是错的）；
+    /// ② pin 段按 Score/Title 重排，而 D5 要求 clip 保持 store 返回序。
+    /// </summary>
+    Clip,
 }
 
 /// <summary>
@@ -93,8 +101,15 @@ public static class LauncherProviderRegistry
     /// <inheritdoc cref="Unit"/>
     public const string Encode = "encode";
 
+    /// <summary>剪贴板历史（W10-a）。</summary>
+    public const string Clip = "clip";
+
+    /// <summary>系统命令（W10-a）。</summary>
+    public const string Command = "cmd";
+
     /// <summary>**当前已实现**的 provider id（= 配置白名单）。随阶段增长；错误文案从这里取"已知集合"。</summary>
-    public static IReadOnlyList<string> KnownIds { get; } = [Files, Apps, Calc, Unit, Encode];
+    public static IReadOnlyList<string> KnownIds { get; } =
+        [Files, Apps, Calc, Unit, Encode, Clip, Command];
 
     /// <summary>
     /// 默认启用集合 = **全部已实现**（与 <see cref="KnownIds"/> 同源 ⇒ 杜绝"默认值里有未实现的 id"）。
@@ -120,7 +135,9 @@ public static class LauncherProviderRegistry
 
         return string.Equals(providerId, Apps, StringComparison.OrdinalIgnoreCase)
             ? LauncherSegment.Apps
-            : LauncherSegment.Pin;
+            : string.Equals(providerId, Clip, StringComparison.OrdinalIgnoreCase)
+                ? LauncherSegment.Clip
+                : LauncherSegment.Pin;
     }}
 
 /// <summary>
@@ -133,6 +150,37 @@ public static class LauncherProviderSet
     /// <summary>仅 files（搜索窗渲染/唤出探针的装配形态）。</summary>
     public static IReadOnlyList<ILauncherProvider> FilesOnly(SearchIndexClient client) =>
         [new FilesProvider(client)];
+
+    /// <summary>
+    /// 按"来源开关"过滤 provider id（W10-a）：<c>clip.enabled=false</c> ⇒ 移除 <c>clip</c>。
+    ///
+    /// <para><b>为什么单独抽成纯函数</b>：这是"段位静默缺席"的开关 —— 失效的表现是
+    /// "关了还在"或"没关却没了"，**两者都不报错**（静默失败登记册 S2 家族）。放在 UI 装配里
+    /// 就没人能钉住它；抽到平台中立层后 <c>ezt selftest</c> 可直接穷举。</para>
+    ///
+    /// <para>语义 = "从**已启用集合**里剔除"（用户本来就没配 clip 时，过滤是空操作）。</para>
+    /// </summary>
+    /// <param name="providers">已启用的 provider id 列表（<c>launcher.providers</c> 解析结果）。</param>
+    /// <param name="clipEnabled"><c>clip.enabled</c> 的生效值。</param>
+    public static IReadOnlyList<string> ApplySwitches(IReadOnlyList<string> providers, bool clipEnabled)
+    {
+        ArgumentNullException.ThrowIfNull(providers);
+        if (clipEnabled)
+        {
+            return providers;
+        }
+
+        var list = new List<string>(providers.Count);
+        foreach (var id in providers)
+        {
+            if (!string.Equals(id, LauncherProviderRegistry.Clip, StringComparison.OrdinalIgnoreCase))
+            {
+                list.Add(id);
+            }
+        }
+
+        return list;
+    }
 
     /// <summary>
     /// 按配置装配（生产路径，W7-b）。**"未启用"与"未就绪"是两件事**：

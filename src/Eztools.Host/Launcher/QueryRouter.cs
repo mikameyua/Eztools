@@ -210,6 +210,7 @@ public sealed class QueryRouter : IDisposable
         var errors = new Dictionary<string, LauncherError>(StringComparer.Ordinal);
         var pin = new List<LauncherItem>();
         var apps = new List<LauncherItem>();
+        var clip = new List<LauncherItem>();
         var files = new List<LauncherItem>();
         var anyAccepted = false;
         var filesAccepted = false;
@@ -255,6 +256,12 @@ public sealed class QueryRouter : IDisposable
                         apps.AddRange(set.Items);
                         break;
 
+                    case LauncherSegment.Clip:
+                        // W10-a：剪贴板段原序透传（D5，与 files 同款"不重排"），
+                        // 且**不参与** files 专属计数 —— 混进去会让状态行的数字失真（S9）。
+                        clip.AddRange(set.Items);
+                        break;
+
                     default:
                         files.AddRange(set.Items);
                         if (!fromPrevious)
@@ -269,10 +276,11 @@ public sealed class QueryRouter : IDisposable
             }
         }
 
-        // I7：段内排序（files 段跳过 —— I8 原序透传，那顺序是索引进程给的既有契约）
-        var merged = new List<LauncherItem>(pin.Count + apps.Count + files.Count);
+        // I7：段内排序（files / clip 段跳过 —— I8 原序透传，那顺序是各自来源给定的既有契约）
+        var merged = new List<LauncherItem>(pin.Count + apps.Count + clip.Count + files.Count);
         merged.AddRange(OrderSegment(pin));
         merged.AddRange(OrderSegment(apps));
+        merged.AddRange(clip);
         merged.AddRange(files);
 
         return new LauncherRenderModel(

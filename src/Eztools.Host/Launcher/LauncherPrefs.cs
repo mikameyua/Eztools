@@ -50,6 +50,22 @@ public sealed record LauncherPrefs(IReadOnlyList<string> Providers, bool UsageEn
     }
 
     /// <summary>
+    /// **搜索窗装配指纹**（W10-a）：<see cref="Fingerprint"/> 之外再纳入"来源开关"
+    /// <paramref name="clipEnabled"/>（<c>clip.enabled</c>）—— 它决定 clip provider 装不装进集合。
+    ///
+    /// <para><b>为什么必须进来</b>：<see cref="Fingerprint"/> 的注释写着"漏掉一个键 = 那一项配置
+    /// 静默不生效"（B2 的原始症状）。<c>clip.enabled</c> 是**装配输入**的一份子：它变了而窗口不重建，
+    /// 用户看到的将是"关了剪贴板来源，结果里却还有剪贴板条目"（或反之）—— 与 B2 同族，
+    /// 且同样**不报错**。</para>
+    /// </summary>
+    public static string AssemblyFingerprint(LauncherPrefs prefs, LauncherAliases aliases, bool clipEnabled)
+    {
+        ArgumentNullException.ThrowIfNull(prefs);
+        ArgumentNullException.ThrowIfNull(aliases);
+        return Fingerprint(prefs, aliases) + "\u001fclip=" + (clipEnabled ? "1" : "0");
+    }
+
+    /// <summary>
     /// 解析配置值（纯函数，selftest 直测；规则即设计方案 §5 的规格表逐行）。
     /// <paramref name="raw"/> 为 <c>null</c> = 键缺失 ⇒ 默认集合、无错误。
     /// </summary>

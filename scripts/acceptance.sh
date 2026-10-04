@@ -999,7 +999,9 @@ fi
 #       这是刻意的分工，不是缺验。
 LAUNCHER_DESK="$REPO/src/Eztools.Desktop/bin/Debug/net10.0-windows10.0.19041.0/Eztools.Desktop.exe"
 LAUNCHER_CFG_OUT="$WORK/desktop-launcher-cfg.json"
-V5="files,apps,calc,unit,encode"
+# W10-a：默认集合已含 clip/cmd —— 本变量同时充当"合法值写入"与"回落默认值"两侧的期望，
+# 必须与 HostSettingsSchema.DefaultLauncherProviders 步调一致，否则三条回落断言会假红。
+V5="files,apps,calc,unit,encode,clip,cmd"
 
 launcher_cfg_read() {
   rm -f "$LAUNCHER_CFG_OUT"
@@ -1022,7 +1024,7 @@ PY
 "$EZ" config set desktop launcher.providers "$V5" >/dev/null 2>&1
 R=$(launcher_cfg_read)
 if [ "$R" = "$V5|N|N|Y|0|N" ]; then
-  pass "launcher.providers 五来源 CLI 写入 → 应用原样解析（CLI 没吞字段）；usage 默认开、别名默认空"
+  pass "launcher.providers 全来源 CLI 写入 → 应用原样解析（CLI 没吞字段）；usage 默认开、别名默认空"
 else
   fail "launcher.providers 两层闭环（合法值）不符: $R"
 fi

@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -73,6 +74,13 @@ public sealed class SearchWindow : Window
     /// 未注入（探针路径）⇒ <see cref="CoreAvailability.Unknown"/> ⇒ 两个显示面都退化为既有文案。
     /// </summary>
     private readonly Func<CoreAvailability> _coreAvailability;
+
+    /// <summary>
+    /// 陈旧态（W9）：<c>null</c> = 无陈旧或探测说不清（保守闭嘴）；非空 = 状态行主出口 + 卷清单行
+    /// 后缀都该显示陈旧提示。**只在 <see cref="ApplyVolumeSummary"/> 的 Ready 分支维护** ——
+    /// 那是每次唤出必经的判定点，且只有那里同时拿得到"索引自称就绪"与"核心服务实际状态"。
+    /// </summary>
+    private CoreAvailability? _coreStale;
 
     private readonly NativeInputBox _input;
     private readonly ListBox _results;
@@ -315,6 +323,27 @@ public sealed class SearchWindow : Window
     /// <summary>唤出（已可见则仅激活到前台）。TrayApplication 的热键入口。</summary>
     public void Summon()
     {
+        // ★ W10-b：记下"唤出前的系统前台窗口" —— clip 直贴的还原目标（W5 面板 _lastForeground 同款语义）。
+        //   ★★ 判据是"**可粘贴的目标窗口**"，不是"有没有前台句柄"（2026-10-04 菲比真机实测修的那条）：
+        //     从桌面唤出时前台是 `Progman` —— 它非 0、IsWindow 也为真，RestoreForeground 还会返回 true
+        //     （桌面当然能被设为前台），于是代码当"直贴成功"把窗口收了，而 Ctrl+V 注进的是没人接收的
+        //     桌面 ⇒ 用户只看到"窗口莫名其妙消失"。所以壳表面要**显式清空**（走降级），不是"不更新"。
+        //   ① 本窗自己（已可见时的"再激活"）⇒ **保留**上一次的记录，覆盖会把目标写成自己。
+        //   ② ShowForProbe 不调 Summon ⇒ 探针路径恒为 0 ⇒ 直贴自动降级（绝不凭空注入）。
+        var foreground = GetForegroundWindow();
+        if (foreground == new WindowInteropHelper(this).Handle)
+        {
+            // 窗口已可见 ⇒ 只是"再激活一次"，保留上一次记录
+        }
+        else if (IsShellSurface(foreground))
+        {
+            _preSummonHwnd = nint.Zero;   // 桌面/任务栏不是目标 ⇒ 不留陈旧值
+        }
+        else
+        {
+            _preSummonHwnd = foreground;
+        }
+
         // 强制前台过程中焦点/激活事件会抖动（AttachThreadInput 可能瞬态 Deactivated），
         // 不屏蔽的话"失焦自动隐藏"会把刚唤出的窗口立刻藏掉 —— C2/G1 手工实测抓出的坑。
         _summoning = true;
@@ -350,6 +379,16 @@ public sealed class SearchWindow : Window
     }
 
     private bool _summoning;
+
+    /// <summary>唤出前的系统前台窗口（W10-b 直贴的还原目标）。<c>nint.Zero</c> = 从未记录 ⇒ 直贴降级为"仅复制"。</summary>
+    private nint _preSummonHwnd;
+
+    /// <summary>
+    /// 探针模式抑制真 Ctrl+V 注入（W10-b）。<b>由 <see cref="ShowForProbe"/> 强制置真</b> ——
+    /// 真注入会贴进"运行探针的那个终端"，是不可接受的副作用（W5 面板同款纪律）。
+    /// 探针要测的是"降级路径 + 动作参数构造"，真实注入归手工验收项。
+    /// </summary>
+    internal bool ProbeSuppressInject { get; private set; }
 
     /// <summary>
     /// 首次显示时把"启动期配置告警"投到状态行（设计方案 §5：非法配置必须可见，且**出口必须可达**）。
@@ -435,8 +474,36 @@ public sealed class SearchWindow : Window
         }
     }
 
+    /// <summary>
+    /// 该句柄是否是"壳表面"（桌面 / 任务栏）—— 它们**不是可粘贴目标**：往那儿注入 Ctrl+V 没有任何
+    /// 窗口接收，但 <c>RestoreForeground</c> 会返回 true（桌面确实能被设为前台）⇒ 调用方会**误判成功**。
+    ///
+    /// <para>★ 2026-10-04 菲比真机实测（M2）：从桌面按热键 ⇒ 搜剪贴板 ⇒ Enter ⇒ **窗口消失且没有状态行**。
+    /// 根因就是这里把 <c>Progman</c> 当成了有效目标（详见 `踩坑全集.md` §2.42）。</para>
+    /// </summary>
+    internal static bool IsShellSurface(nint hwnd) =>
+        hwnd != nint.Zero && IsShellSurfaceClass(ClassNameOf(hwnd));
+
+    /// <summary>类名判据（**纯函数** —— 探针可穷举，不必真造桌面窗口）。</summary>
+    internal static bool IsShellSurfaceClass(string? className) => className is
+        "Progman"                   // 桌面（传统）
+        or "WorkerW"                // 桌面（Win10+ 分层后的宿主）
+        or "Shell_TrayWnd"          // 主任务栏
+        or "Shell_SecondaryTrayWnd" // 副屏任务栏
+        or "SysListView32";         // 桌面图标视图（点了图标后前台可能是它）
+
+    private static string ClassNameOf(nint hwnd)
+    {
+        var buffer = new StringBuilder(256);
+        var len = GetClassName(hwnd, buffer, buffer.Capacity);
+        return len > 0 ? buffer.ToString(0, len) : "";
+    }
+
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(nint hWnd, StringBuilder lpClassName, int nMaxCount);
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
@@ -614,6 +681,19 @@ public sealed class SearchWindow : Window
         var text = DescribeVolumes(
             status.Volumes.Count, status.TotalFiles, status.Skipped, status.Failed, status.Paused);
 
+        // ★ W9 陈旧探测：Ready=true **不等于**索引在更新 —— 自举快照在而核心服务随后退出时，
+        //   查询一切正常、USN 增量却无人应用（旧文件搜得到、新文件搜不到且无从察觉）。
+        //   W8 只在 Ready=false 的分支看过可达性，陈旧态恰好 Ready=true ⇒ 从不进那个分支 ⇒ 沉默。
+        //   判据保守性继承 W8：CoreOk 正常、Unknown 说不清就闭嘴（见 CoreStaleNotice）。
+        var wasStale = _coreStale is not null;
+        var coreNow = _coreAvailability();   // ★ 只取一次：两次调用可能跨 2s 缓存边界拿到不同结论
+        _coreStale = CoreStaleNotice.For(coreNow) is not null ? coreNow : null;
+        if (_coreStale is not null)
+        {
+            // 第二个可见出口：卷清单行行尾后缀（与卷漂移提示 §7.4.1 同款打法，不新造 UI 元素）
+            text += $" · ⚠ {CoreStaleNotice.SuffixFor(_coreStale.Value)}";
+        }
+
         // ★ 卷漂移提示（热插拔已知限制的可见性补丁，设计方案 §7.4.1）：卷清单是自举快照，
         //   运行期插拔的盘不会自动进出索引 —— 提示写在卷清单行这个已有的可见处，不做即 S9′。
         if (!ProbeSuppressDrift)
@@ -630,6 +710,19 @@ public sealed class SearchWindow : Window
         _volumesLine.FontWeight = status.Paused ? FontWeights.SemiBold : FontWeights.Normal;
         _volumesLine.Cursor = status.Paused ? Cursors.Hand : Cursors.Arrow;
         _volumesLine.ToolTip = status.Paused ? "点击恢复索引更新" : null;
+
+        // 状态行同步：陈旧 ⇒ 提示立即上墙（不等第一次打字）；刚恢复 ⇒ 清掉上一轮的陈旧提示，
+        // 否则窗口开着时核心服务回来了，旧提示会一直挂到下次查询才消失（"显示了但显示的是错的"）。
+        if (_coreStale is not null)
+        {
+            ApplyStaleNotice();
+        }
+        else if (wasStale)
+        {
+            SetStatusLaunchable(false);
+            _status.Text = EmptyQueryHint;
+            _statusRight.Text = "";
+        }
     }
 
     /// <summary>
@@ -711,6 +804,31 @@ public sealed class SearchWindow : Window
     }
 
     // ── W8·B1：核心服务不可达时的可点出口 ───────────────────────────────────
+
+    /// <summary>
+    /// 把陈旧提示写到状态行（W9）。返回是否真的写了（<c>_coreStale</c> 为空 = 没写，调用方走原路径）。
+    ///
+    /// <para>文案与可点性来自纯函数 <see cref="CoreStaleNotice.For"/>（selftest 穷举）；
+    /// 可点性还要 <b>真的注入了宿主动作</b>才成立 —— 探针没注入 ⇒ 保持不可点，
+    /// 与 W8 出口同一纪律（RenderResults ② 注释）。</para>
+    /// </summary>
+    private bool ApplyStaleNotice()
+    {
+        if (_coreStale is not { } stale || CoreStaleNotice.For(stale) is not { } notice)
+        {
+            return false;
+        }
+
+        SetStatusLaunchable(notice.CanLaunch && CoreLaunchRequested is not null);
+        _status.Text = notice.Text;
+        return true;
+    }
+
+    /// <summary>探针观测面：当前陈旧态（W9）。</summary>
+    internal CoreAvailability? ProbeCoreStale => _coreStale;
+
+    /// <summary>空查询占位文案（W9 提取为常量：陈旧态恢复时也要恢复成同一句，防两处漂移）。</summary>
+    private const string EmptyQueryHint = "输入以搜索（Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径）";
 
     /// <summary>
     /// 点击"启动核心服务"出口时的宿主动作。**由托盘注入**：启动 + 重建窗口是宿主级编排
@@ -956,6 +1074,9 @@ public sealed class SearchWindow : Window
                 {
                     LauncherKind.File => copyItem.FileHit?.Path ?? copyItem.Subtitle,
                     LauncherKind.App => copyItem.Subtitle,
+                    // W10-b：剪贴板条目的主行是**摘要**（Preview）、副行是"来源 · 时间"，两者都不是内容
+                    //   ⇒ 从主动作取**全文**（与 Ctrl+Enter 同源，语义一致）
+                    LauncherKind.Clip => copyItem.PrimaryAction?.Argument ?? copyItem.Title,
                     _ => copyItem.Title,
                 };
 
@@ -1045,6 +1166,30 @@ public sealed class SearchWindow : Window
             return;
         }
 
+        // ★ W10-c 图片提字：先跑 OCR（**失败不收窗、状态行说明**），成功后把提出来的文本
+        //   交给**同一条直贴链** —— 图片条目因此与文本条目有完全一致的用户体验（内容到剪贴板 → 贴回原窗口）。
+        if (action.Kind == LauncherActionKind.OcrCopy)
+        {
+            var (text, error) = LauncherActionRunner.RecognizeImageText(action.Argument);
+            if (error is not null)
+            {
+                SetStatusLaunchable(false);
+                _status.Text = error;
+                return;
+            }
+
+            ExecutePasteBack(new LauncherAction(LauncherActionKind.CopyText, text!), item);
+            return;
+        }
+
+        // ★ W10-b 直贴：顺序是**契约**（设计方案 R4）—— 内容上剪贴板 → Hide → 还原前台 → 注入 Ctrl+V。
+        //   不能走下面"先 Execute 再 Hide"的通用路径：那会把 Ctrl+V 贴进启动器自己。
+        if (action.Kind == LauncherActionKind.PasteBack)
+        {
+            ExecutePasteBack(action, item);
+            return;
+        }
+
         var failure = LauncherActionRunner.Execute(action);
         if (failure is null)
         {
@@ -1068,6 +1213,65 @@ public sealed class SearchWindow : Window
 
         SetStatusLaunchable(false);
         _status.Text = failure;
+    }
+
+    /// <summary>
+    /// 直贴链路（W10-b，设计方案 §3）：内容上剪贴板 → <b>Hide</b> → 还原唤出前的前台 → 注入 Ctrl+V。
+    ///
+    /// <para><b>为什么 Hide 必须夹在中间</b>：Ctrl+V 是系统级注入，前台是谁就贴进谁 ——
+    /// 窗口还开着时注入 = 贴进启动器自己的输入框（R4 铁律的字面代价）。</para>
+    ///
+    /// <para><b>两条降级路径都如实说明，不静默</b>：① 探针模式（<see cref="ProbeSuppressInject"/>）
+    /// 或没有唤出前的前台记录 ⇒ **只复制** + 状态行说明、窗口**不收**（用户还得看见这句话）；
+    /// ② 还原失败（原窗口已销毁）⇒ 把窗口拿回来并说明。</para>
+    /// </summary>
+    private void ExecutePasteBack(LauncherAction action, LauncherItem? item)
+    {
+        try
+        {
+            Clipboard.SetText(action.Argument);
+        }
+        catch (Exception ex)
+        {
+            // 剪贴板被其它进程占用是真实场景（尤其远程桌面）—— 明示而非静默
+            SetStatusLaunchable(false);
+            _status.Text = $"复制失败：{ex.Message}";
+            return;
+        }
+
+        if (item is not null)
+        {
+            try
+            {
+                UsageRecorder?.Invoke(item, action);
+            }
+            catch (Exception ex)
+            {
+                // 与通用路径同款：记频次失败不影响"已复制"这件事，但也不再注入（状态行已被占用）
+                SetStatusLaunchable(false);
+                _status.Text = $"已复制（频次记录失败：{ex.Message}）";
+                return;
+            }
+        }
+
+        if (ProbeSuppressInject || _preSummonHwnd == nint.Zero)
+        {
+            SetStatusLaunchable(false);
+            _status.Text = "已复制（未能直贴：无可用目标窗口）";
+            return;
+        }
+
+        Hide();   // ★ 必须在还原前台**之前**（R4：否则 Ctrl+V 贴进启动器自己）
+
+        var failure = LauncherActionRunner.ExecutePasteBack(_preSummonHwnd);
+        if (failure is not null)
+        {
+            // 目标没了 ⇒ 把窗口拿回来（否则这句提示无处可显）。走 Summon 而不是裸 Show：
+            // 裸 Show 拿不到前台时会立刻触发 Deactivated → 又被 Hide 掉（"闪一下没了"）。
+            Summon();
+            SetStatusLaunchable(false);
+            _status.Text = failure;
+        }
     }
 
     /// <summary>
@@ -1100,11 +1304,18 @@ public sealed class SearchWindow : Window
     private void RenderResults(LauncherRenderModel model)
     {
         // ① 空查询（清空输入框）：**清列表** + 占位文案（与 W3 起的行为一致）
+        //    ★ W9：陈旧提示优先于占位文案 —— 唤出即见（卷清单行的后缀可能被截断，状态行是主出口）
         if (model.IsEmptyQuery)
         {
             ClearAndFill(model);
+            if (ApplyStaleNotice())
+            {
+                _statusRight.Text = "";
+                return;
+            }
+
             SetStatusLaunchable(false);
-            _status.Text = "输入以搜索（Enter 打开 · Ctrl+Enter 定位 · Ctrl+C 复制路径）";
+            _status.Text = EmptyQueryHint;
             _statusRight.Text = "";
             return;
         }
@@ -1145,6 +1356,16 @@ public sealed class SearchWindow : Window
         {
             // files 段本轮未接受（且无错误）⇒ 状态行的 files 部分**保持原值不动**
             //（多 provider 之后：apps 有新鲜结果要重绘，但 files 的计数不该被写成 0 —— 那是"没变"显示成"没结果"）
+            return;
+        }
+
+        // ★ W9：陈旧提示占状态行主位（它比"几毫秒/没匹配"更该被看见）——
+        //   原本要显示的信息挪到右栏，一个字都不丢；CoreOk/Unknown ⇒ 行为与 W7 逐字一致。
+        if (ApplyStaleNotice())
+        {
+            _statusRight.Text = model.FilesHitCount == 0
+                ? $"没有匹配“{model.QueryText}”的文件"
+                : $"显示 {model.FilesHitCount} / 共 {model.FilesTotal} 条";
             return;
         }
 
@@ -1325,6 +1546,7 @@ public sealed class SearchWindow : Window
         Top = -4000;
         ShowActivated = false;
         Topmost = false;
+        ProbeSuppressInject = true;   // ★ W10-b：探针一律不真注入（见属性注释）
         Show();
         RefreshVolumeSummary();   // 探针也要覆盖卷清单行（W3-e-2 的 UI 可见性）
         ShowStartupWarningOnce(); // 与生产 Summon 同路径（否则"配置告警可见"就没有观测面）

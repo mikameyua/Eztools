@@ -27,6 +27,12 @@ public enum LauncherKind
 
     /// <summary>编码转换结果（encode provider）。</summary>
     Encode,
+
+    /// <summary>剪贴板历史条目（clip provider，W10-a）。</summary>
+    Clip,
+
+    /// <summary>系统命令（cmd provider，W10-a）。</summary>
+    Command,
 }
 
 /// <summary>
@@ -49,10 +55,34 @@ public enum LauncherActionKind
 
     /// <summary>复制文本到剪贴板。W7-c 起产出（calc/unit/encode 的 Enter）。</summary>
     CopyText,
+
+    /// <summary>
+    /// 直贴回原前台（W10-a，clip provider 的 Enter）：窗口先 Hide → 还原唤出前的前台窗口 →
+    /// 注入 Ctrl+V。**执行在 Desktop 侧**（动作执行器 + W5 已验证的直贴原语）。
+    /// </summary>
+    PasteBack,
+
+    /// <summary>
+    /// 图片提字（W10-c，clip provider 的**图片**条目 Enter）：把历史里的图片交给系统 OCR，
+    /// 识别出的文本按 <see cref="PasteBack"/> 同一条链路贴回原前台。
+    ///
+    /// <para><b>为什么 Host 只声明动作、不带 OCR 依赖</b>：OCR 引擘落在
+    /// <c>Eztools.Ocr</c>（<c>net10.0-windows</c>），本层是平台中立 <c>net10.0</c> —— 引用不了。
+    /// 于是像 <see cref="PasteBack"/> 一样：Host 只产出"要做什么 + 做谁"（<c>Argument</c> = 图片绝对路径），
+    /// 真执行在 Desktop（那里同时引用了 Ocr 与 Clipboard）。</para>
+    /// </summary>
+    OcrCopy,
 }
 
-/// <summary>一个可执行动作。<paramref name="Argument"/> 的语义随 <see cref="LauncherActionKind"/> 而定。</summary>
-public sealed record LauncherAction(LauncherActionKind Kind, string Argument);
+/// <summary>
+/// 一个可执行动作。<paramref name="Argument"/> 的语义随 <see cref="LauncherActionKind"/> 而定。
+///
+/// <para><b><paramref name="Arguments"/> 是 W10-a 新增的可选参数位</b>：<see cref="LauncherActionKind.Launch"/>
+/// 原本只带一个"路径"，而系统命令（cmd provider）要启动的是"可执行文件 + 参数"
+/// （<c>rundll32.exe user32.dll,LockWorkStation</c>）—— 单参数位装不下。既有构造点全部只用两个
+/// 位置参数，加默认值后**零改动**（apps 的 Launch 传 null，行为逐字不变）。</para>
+/// </summary>
+public sealed record LauncherAction(LauncherActionKind Kind, string Argument, string? Arguments = null);
 
 /// <summary>
 /// 一次查询请求（provider 收到的东西）。不可变。

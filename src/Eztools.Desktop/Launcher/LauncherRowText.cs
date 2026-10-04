@@ -186,6 +186,8 @@ internal sealed class LauncherRowText : StackPanel
         LauncherKind.Calc => "=",
         LauncherKind.Unit => "⇄",
         LauncherKind.Encode => "{}",
+        LauncherKind.Clip => "⧉",
+        LauncherKind.Command => "⌘",
         _ => "",   // File 不走本控件（防御：真走到这里也不加徽标 —— FR-10 的口径）
     };
 }

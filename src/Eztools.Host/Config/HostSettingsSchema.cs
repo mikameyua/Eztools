@@ -52,7 +52,7 @@ public static class HostSettingsSchema
     /// 且集合 == `KnownIds`）比"在 schema 里插值"更稳：漏改会在验收当场变红，而不是留下一个
     /// "默认配置本身非法"的活雷。</para>
     /// </summary>
-    public const string DefaultLauncherProviders = "files,apps,calc,unit,encode";
+    public const string DefaultLauncherProviders = "files,apps,calc,unit,encode,clip,cmd";
 
     /// <summary>剪贴板历史上限默认值（FR-4；可配 100~50000，schema 校验）。</summary>
     public const int DefaultClipMaxItems = 1000;
@@ -188,8 +188,8 @@ public static class HostSettingsSchema
             "launcher.providers": {
               "type": "string",
               "title": "启动器结果来源",
-              "description": "逗号分隔的结果来源：files = 文件搜索、apps = 应用启动（开始菜单/桌面快捷键/App Paths）、calc = 计算器（输入算式直接出结果）、unit = 单位换算（如 10km to mi）、encode = 编码转换（前缀 b64: / b64d: / url: / urld: / u: / ud:）。★ 文案只列**已实现**的来源：未实现的取值会被明确拒绝（不静默忽略），在描述里预先许愿会让用户得到「配置里写了、功能却不存在」。保存后下次唤出搜索窗生效。",
-              "default": "files,apps,calc,unit,encode",
+              "description": "逗号分隔的结果来源：files = 文件搜索、apps = 应用启动（开始菜单/桌面快捷键/App Paths）、calc = 计算器（输入算式直接出结果）、unit = 单位换算（如 10km to mi）、encode = 编码转换（前缀 b64: / b64d: / url: / urld: / u: / ud:）、clip = 剪贴板历史（Enter 直贴回原窗口）、cmd = 系统命令（输入 > 触发，如 >锁屏）。★ 文案只列**已实现**的来源：未实现的取值会被明确拒绝（不静默忽略），在描述里预先许愿会让用户得到「配置里写了、功能却不存在」。保存后下次唤出搜索窗生效。",
+              "default": "files,apps,calc,unit,encode,clip,cmd",
               "x-order": 12,
               "x-group": "搜索"
             },

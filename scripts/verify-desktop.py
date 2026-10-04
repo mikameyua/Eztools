@@ -1424,7 +1424,7 @@ def main() -> int:
     r = run(["--probe-launcher", "all", "--no-prompt", "--out", lnch_file,
              "--tools-dir", tools_dir, "--install-root", install_root,
              "--config-root", config_root], timeout=180)
-    ck("启动器探针退出码 0（rows/actions/isolation/router/calc/unit/encode/config/apps/usage/corestatus 十一模式）", r.returncode == 0,
+    ck("启动器探针退出码 0（rows/actions/isolation/router/calc/unit/encode/config/apps/usage/corestatus/clip/cmd 十三模式）", r.returncode == 0,
        f"code={r.returncode} err={r.stderr[:200]}")
     lnch = {}
     if os.path.isfile(lnch_file):
@@ -1608,7 +1608,7 @@ def main() -> int:
     # ── config（W7-d）：协议层观测面 —— 这里是"键缺失 ⇒ 默认集合"这一态；
     #     其余三态（合法/未知/空）由 acceptance 步骤 8 的两层闭环（真 CLI 写入）配对断言。
     cfg = lnch.get("config") or {}
-    _cfg_all = ["files", "apps", "calc", "unit", "encode"]
+    _cfg_all = ["files", "apps", "calc", "unit", "encode", "clip", "cmd"]
     ck("★★ launcher.providers 协议层：键缺失 ⇒ 解析出全部已实现来源且无错误、无告警",
        (cfg.get("providers") or []) == _cfg_all
        and cfg.get("hasError") is False and cfg.get("hasWarning") is False,
@@ -1629,6 +1629,69 @@ def main() -> int:
     ck("★ usage 文件损坏 ⇒ 空表继续服务 + LastError 非空（响亮但不崩、不阻塞查询）",
        usg.get("corruptEntryCount") == 0 and usg.get("corruptHasError") is True,
        f"entries={usg.get('corruptEntryCount')} hasError={usg.get('corruptHasError')}")
+
+    # ── clip / cmd（W10-a/b）：真库夹具 → 行渲染（徽标）→ 直贴**降级路径**；真 command provider ──
+    #     直贴的**真实注入链**（Hide → 还原前台 → Ctrl+V）在探针里走不到 —— 真注入会贴进运行探针的
+    #     终端（不可接受的副作用，W5 面板同款纪律）⇒ 归手工项；这里钉的是"降级路径"与"动作参数"。
+    clp = lnch.get("clip") or {}
+    ck("★★ clip 真库夹具：命中的文本条目渲染出「⧉」徽标 + 副行带来源",
+       clp.get("rendered") is True and clp.get("rowCount") == 1
+       and clp.get("badge") == "⧉" and clp.get("subtitleHasSource") is True,
+       f"rows={clp.get('rowCount')} badge={clp.get('badge')!r} sub={clp.get('subtitle')!r}")
+    ck("★★ clip 文本查询不夹带图片（W10-c 后图片仅走「图片」触发词；图片 content 为 NULL ⇒ FTS/LIKE 都命不中）",
+       clp.get("imageFiltered") is True, str(clp.get("imageFiltered")))
+    ck("★★ clip 直贴降级路径：无唤出前前台 ⇒ **只复制全文**、**不收窗**、状态行如实说明（不静默）",
+       clp.get("enterHandled") is True and clp.get("enterCopiedFullText") is True
+       and clp.get("hiddenAfterEnter") is False and clp.get("suppressInject") is True
+       and "未能直贴" in str(clp.get("enterStatusText", "")),
+       f"clip={clp.get('enterClipboard')!r} hidden={clp.get('hiddenAfterEnter')} "
+       f"suppress={clp.get('suppressInject')} status={clp.get('enterStatusText')!r}")
+    ck("★ clip Ctrl+C 复制**全文**且不收窗（主行是摘要 —— 不能把摘要当内容复制走）",
+       clp.get("ctrlCHandled") is True and clp.get("ctrlCCopiedFullText") is True
+       and clp.get("hiddenAfterCtrlC") is False,
+       f"clip={clp.get('ctrlCClipboard')!r} hidden={clp.get('hiddenAfterCtrlC')}")
+    ck("★ clip 直贴无目标分支：句柄为 0 ⇒ 返回可读文案（**不碰任何窗口**，零副作用）",
+       isinstance(clp.get("pasteBackNoTarget"), str)
+       and "没有可还原的目标窗口" in str(clp.get("pasteBackNoTarget")),
+       repr(clp.get("pasteBackNoTarget")))
+    ck("★★ 壳表面判据：桌面/任务栏**不算可粘贴目标**，普通窗口算（真机实测修的那条）",
+       clp.get("shellSurfaceProgman") is True and clp.get("shellSurfaceTray") is True
+       and clp.get("shellSurfaceNotepad") is False,
+       f"Progman={clp.get('shellSurfaceProgman')} Tray={clp.get('shellSurfaceTray')} "
+       f"Notepad={clp.get('shellSurfaceNotepad')}")
+
+    # ── W10-c：图片条目入口 + 提字（真触发词 → 真渲染 → 真 OCR）──────────────────
+    #   为什么这三条缺一不可：① 触发词失效 ⇒ 图片结构性搜不到（content 为 NULL）
+    #   ② 渲染失效 ⇒ 行列出来了但用户看不见 ③ 提字只断"接通了" ⇒ 引擎坏了也全绿。
+    #   所以第三条拿**已知文字的样图**去跑真 OCR，断的是识别结果本身。
+    ck("★★ clip 图片入口：「图片」触发词 ⇒ 列出图片行并渲染（⧉ 徽标 / 与文本行同段）",
+       clp.get("imageRowFound") is True and clp.get("imageRowCount") == 2
+       and clp.get("imageRowKind") == "Clip" and clp.get("imageRowBadge") == "⧉"
+       and clp.get("imageRowTitle") == "图片 880×220",
+       f"found={clp.get('imageRowFound')} count={clp.get('imageRowCount')} "
+       f"kind={clp.get('imageRowKind')} badge={clp.get('imageRowBadge')!r} "
+       f"title={clp.get('imageRowTitle')!r}")
+    ck("★★ clip 图片提字：已知样图 ⇒ 真 OCR 出**已知文字**（不是「跑通了就算」）",
+       clp.get("ocrError") is None and clp.get("ocrHitKnownToken") is True,
+       f"text={clp.get('ocrText')!r} err={clp.get('ocrError')!r}")
+    ck("★ clip 提字缺图分支：文件不在 ⇒ 可读文案（**不谎报**「图里没文字」，S9 家族）",
+       isinstance(clp.get("ocrMissingImageError"), str)
+       and "图片文件已不在" in str(clp.get("ocrMissingImageError")),
+       repr(clp.get("ocrMissingImageError")))
+
+    cmd = lnch.get("cmd") or {}
+    ck("★★ cmd：\">\" 单独输入列全表且**守表序**（⌘ 徽标）",
+       cmd.get("allCount") == cmd.get("tableCount") == 3
+       and cmd.get("firstBadge") == "⌘"
+       and cmd.get("titlesInOrder") == ["锁屏", "休眠", "清空回收站（不可恢复）"],
+       f"count={cmd.get('allCount')} badge={cmd.get('firstBadge')!r} titles={cmd.get('titlesInOrder')}")
+    ck("★★ cmd：不可恢复命令标题带警示；无 \">\" 前缀完全不触发",
+       cmd.get("destructiveWarned") is True and cmd.get("noTriggerCount") == 0,
+       f"warned={cmd.get('destructiveWarned')} noTrigger={cmd.get('noTriggerCount')}")
+    ck("★★ cmd 动作参数：Launch(rundll32.exe, user32.dll,LockWorkStation)（只构造参数，不真执行）",
+       cmd.get("launchKind") == "Launch" and cmd.get("launchExe") == "rundll32.exe"
+       and cmd.get("launchArgs") == "user32.dll,LockWorkStation",
+       f"{cmd.get('launchKind')}({cmd.get('launchExe')}, {cmd.get('launchArgs')})")
 
     # ── 1c-9c. W8·B1：核心服务不可达 ⇒ 两个显示面都要说实话（--probe-launcher corestatus）──
     #     为什么必须有这一段：B1 的原始症状是"界面说了假话"，而**这句话是窗口说的**。
@@ -1673,6 +1736,53 @@ def main() -> int:
     ck("★ corestatus：夹具真的走了协议（query 与 status 都被问过 —— 不是硬编码文案）",
        (_run.get("queries") or 0) >= 1 and (_run.get("statuses") or 0) >= 1,
        f"queries={_run.get('queries')} statuses={_run.get('statuses')}")
+
+    # ── 1c-9c-2. W9：陈旧索引提示（status ready=true 而 Core 缺席 ⇒ 不许沉默）──
+    #     W8 验的是"-32001 时说什么"（CoreStatusTransport 恒回 ready=false）；
+    #     W9 验镜像面：status 恒回 ready=true（CoreReadyTransport）—— 查询一切正常时
+    #     核心服务缺席也必须可见（台账 10-03：出口只在 Ready=false 出现，而陈旧态恰好 true
+    #     ⇒ ~1.9 万条近期文件搜不到且无从察觉）。
+    _stales = {c.get("availability"): c
+               for c in (((lnch.get("corestatus") or {}).get("stale") or {}).get("cases") or [])}
+    ck("★ stale：四态都跑到（缺一 = 分支未覆盖而非全绿）",
+       set(_stales) == {"CoreOk", "CoreNotRunning", "CoreNotElevated", "Unknown"},
+       str(sorted(_stales)))
+
+    _sr = _stales.get("CoreNotRunning") or {}
+    ck("★★ stale：Ready=true + Core 缺席 ⇒ 状态行给「点此启动」且**真接到宿主动作**（沉默终结）"
+       " + 卷清单行带后缀（第二可见出口）",
+       _sr.get("staleFlag") == "CoreNotRunning"
+       and "点此启动" in str(_sr.get("statusText"))
+       and "已停止更新" in str(_sr.get("statusText"))
+       and _sr.get("statusLaunchable") is True and _sr.get("launchClicks") == 1
+       and "已停止更新" in str(_sr.get("volumesLine")),
+       f"text={_sr.get('statusText')!r} clickable={_sr.get('statusLaunchable')} "
+       + f"clicks={_sr.get('launchClicks')} volumes={_sr.get('volumesLine')!r}")
+
+    _se = _stales.get("CoreNotElevated") or {}
+    ck("★★ stale：未提权 ⇒ 提示可见但**刻意不可点**（核心服务活着，『启动』语义不成立 ——"
+       " 幂等启动只会回『已在运行』，那是对用户的嘲弄；指引写进文案）",
+       _se.get("staleFlag") == "CoreNotElevated"
+       and "未提权" in str(_se.get("statusText")) and "管理员" in str(_se.get("statusText"))
+       and _se.get("statusLaunchable") is False and _se.get("launchClicks") == 0
+       and "已停止更新" in str(_se.get("volumesLine")),
+       f"text={_se.get('statusText')!r} clickable={_se.get('statusLaunchable')} "
+       + f"volumes={_se.get('volumesLine')!r}")
+
+    _sok = _stales.get("CoreOk") or {}
+    _sunk = _stales.get("Unknown") or {}
+    ck("★★ stale：CoreOk/未知 ⇒ 与 W7 行为逐字一致（无陈旧字样、不可点、staleFlag=null —— 反向夹具防恒真）",
+       _sok.get("staleFlag") == "(null)" and _sunk.get("staleFlag") == "(null)"
+       and "已停止更新" not in str(_sok.get("statusText"))
+       and "已停止更新" not in str(_sunk.get("statusText"))
+       and "已停止更新" not in str(_sok.get("volumesLine"))
+       and _sok.get("statusLaunchable") is False and _sunk.get("statusLaunchable") is False,
+       f"okFlag={_sok.get('staleFlag')} unkFlag={_sunk.get('staleFlag')} "
+       + f"okText={_sok.get('statusText')!r} unkText={_sunk.get('statusText')!r}")
+
+    ck("★ stale：夹具真的走了协议（query 与 status 都被问过）",
+       (_sr.get("queries") or 0) >= 1 and (_sr.get("statuses") or 0) >= 1,
+       f"queries={_sr.get('queries')} statuses={_sr.get('statuses')}")
 
     # ── 1c-9d. W8·B1：启动动作的**可判定面**（corestatus.launch / .echo）──
     #     真起一个提权进程没法自动化，但"启动参数对不对 / 取消怎么识别 / 等到什么算成功"

@@ -3,8 +3,10 @@
 
 using System.Diagnostics;
 using System.Windows;
+using Eztools.ClipboardLib;
 using Eztools.Host.Launcher;
 using Eztools.Host.Search;
+using Eztools.Ocr;
 
 namespace Eztools.Desktop;
 
@@ -51,7 +53,8 @@ internal static class LauncherActionRunner
 
                 case LauncherActionKind.Launch:
                     // 工作目录 = 目标所在目录：有些应用（便携版/相对资源）靠 cwd 找自身文件
-                    using (var process = Process.Start(BuildLaunchStartInfo(action.Argument)))
+                    using (var process = Process.Start(
+                        BuildLaunchStartInfo(action.Argument, action.Arguments)))
                     {
                         _ = process;
                     }
@@ -71,6 +74,12 @@ internal static class LauncherActionRunner
                     Clipboard.SetText(action.Argument);
                     return null;
 
+                case LauncherActionKind.OcrCopy:
+                    // 提字要先异步跑 OCR、成功后再走**直贴链**（Hide → 还原前台 → Ctrl+V），
+                    // 那两步都是 SearchWindow 的职责（它持有 _preSummonHwnd）。走到这里说明有调用方
+                    // 绕过了那条链 —— 明示，而不是让 default 谎报"暂不支持"。
+                    return "提字动作需要走直贴链路（调用方未接）";
+
                 default:
                     return $"暂不支持的动作：{action.Kind}";
             }
@@ -81,14 +90,94 @@ internal static class LauncherActionRunner
         }
     }
 
+    /// <summary>
+    /// 直贴的**后半程**（W10-b，设计方案 §3 R4 铁律）—— 调用方**必须先 Hide 本窗**再调这里，
+    /// 否则注入的 Ctrl+V 会贴进启动器自己。本方法只负责"贴到哪"：
+    /// 还原 <paramref name="targetHwnd"/> 到前台 → 等激活消息落地 → 注入 Ctrl+V。
+    ///
+    /// <para><b>内容上剪贴板是调用方的事</b>：本方法不碰剪贴板内容（拆开的理由与 W5 面板同款 ——
+    /// "传给系统的到底是什么"可被断言，而"真的贴进了用户的编辑器"依赖桌面环境，属手工项）。</para>
+    ///
+    /// <para>返回 <c>null</c> = 成功；非 <c>null</c> = 可读失败文案（调用方上状态行）。</para>
+    /// </summary>
+    internal static string? ExecutePasteBack(nint targetHwnd)
+    {
+        if (targetHwnd == nint.Zero)
+        {
+            return "已复制（未能直贴：没有可还原的目标窗口）";
+        }
+
+        if (!PasteBack.RestoreForeground(targetHwnd))
+        {
+            // 目标窗口多半已销毁（用户 Alt+F4 关掉了复制来源）—— 如实返回，不假装贴成功
+            return "已复制，但原窗口已关闭，请手动粘贴";
+        }
+
+        // 目标窗口处理激活消息（与 W5 面板同款 120ms：可见窗已隐藏，UI 线程短睡无感）
+        Thread.Sleep(120);
+        PasteBack.InjectCtrlV();
+        return null;
+    }
+
+    /// <summary>
+    /// 图片提字（W10-c）：读盘 → 系统 OCR → 返回文本。**同步**（内部等异步引擎）——
+    /// 调用方是 UI 线程上一次 Enter，动作一次性且成功后立刻收窗，阻塞窗口极短
+    /// （与 <see cref="ExecutePasteBack"/> 里 120 ms 的 <c>Thread.Sleep</c> 同一条实践）。
+    ///
+    /// <para><b>R1 纪律照搬 W5 面板</b>：语言包缺失 / 引擎建不起来 / 图里确实没字，
+    /// 三种"提不出字"的原因**必须分开说** —— 绝不把"我没能力"讲成"你没内容"（S9 家族）。</para>
+    ///
+    /// <para>返回 <c>(null, 文案)</c> = 失败；<c>(文本, null)</c> = 成功。文本非空白由本方法保证。</para>
+    /// </summary>
+    internal static (string? Text, string? Error) RecognizeImageText(string imagePath)
+    {
+        if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
+        {
+            return (null, "提字失败：图片文件已不在（可能超过保留期被清掉）");
+        }
+
+        if (!OcrLanguages.IsAvailable)
+        {
+            return (null, "提字失败：本机没有可用的 OCR 语言包（`ezt ocr langs` 可查）");
+        }
+
+        try
+        {
+            var engine = WindowsOcrEngine.TryCreate(null);
+            if (engine is null)
+            {
+                return (null, "提字失败：OCR 引擎创建失败（本机语言包不可用）");
+            }
+
+            using var bitmap = new Drawing.Bitmap(imagePath);
+            var result = engine.RecognizeAsync(bitmap).GetAwaiter().GetResult();
+            return string.IsNullOrWhiteSpace(result.Text)
+                ? (null, "提字完成，但这张图里没识别到文字")
+                : (result.Text, null);
+        }
+        catch (Exception ex)
+        {
+            // 图片损坏 / 解码失败 / 引擎异常 —— 全部明示，不静默
+            return (null, $"提字失败：{ex.Message}");
+        }
+    }
+
     /// <summary>打开动作的进程参数（FileName = 全路径，UI 不拼路径）。</summary>
     internal static ProcessStartInfo BuildOpenStartInfo(string path) =>
         new(path) { UseShellExecute = true };
 
-    /// <summary>启动动作的进程参数（带工作目录）。</summary>
-    internal static ProcessStartInfo BuildLaunchStartInfo(string path)
+    /// <summary>
+    /// 启动动作的进程参数（带工作目录）。<paramref name="arguments"/> 非空时作为命令行参数下发
+    /// （W10-a：系统命令要的是"可执行文件 + 参数"，如 <c>rundll32.exe user32.dll,LockWorkStation</c>；
+    /// apps 的 Launch 不传 ⇒ 行为逐字不变）。
+    /// </summary>
+    internal static ProcessStartInfo BuildLaunchStartInfo(string path, string? arguments = null)
     {
         var info = new ProcessStartInfo(path) { UseShellExecute = true };
+        if (!string.IsNullOrEmpty(arguments))
+        {
+            info.Arguments = arguments;
+        }
         try
         {
             var dir = Path.GetDirectoryName(path);
@@ -124,12 +213,19 @@ internal static class LauncherActionRunner
             LauncherActionKind.Launch => "启动",
             LauncherActionKind.Reveal or LauncherActionKind.RevealApp => "定位",
             LauncherActionKind.CopyText => "复制",
+            LauncherActionKind.OcrCopy => "提字",
             _ => "执行",
         };
 
         if (action.Kind is LauncherActionKind.CopyText)
         {
             return $"复制失败：{ex.Message}";
+        }
+
+        // 提字的 Argument 是图片路径，不是"用户想打开的目标" —— 别套用下面的"目标不存在"话术
+        if (action.Kind is LauncherActionKind.OcrCopy)
+        {
+            return $"{verb}失败：{ex.Message}";
         }
 
         return File.Exists(action.Argument) || Directory.Exists(action.Argument)

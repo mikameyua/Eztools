@@ -5,9 +5,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
+using Eztools.ClipboardLib;
 using Eztools.Contracts;
 using Eztools.Host.Launcher;
 using Eztools.Host.Search;
+using Eztools.Ocr;
 using InputCmd = Eztools.Desktop.NativeInputBox.InputCommand;
 
 namespace Eztools.Desktop;
@@ -91,6 +93,16 @@ internal static class LauncherUiProbe
         if (all || Eq(mode, "corestatus"))
         {
             json["corestatus"] = RunCoreStatus();
+        }
+
+        if (all || Eq(mode, "clip"))
+        {
+            json["clip"] = RunClip();
+        }
+
+        if (all || Eq(mode, "cmd"))
+        {
+            json["cmd"] = RunCmd();
         }
 
         return json;
@@ -230,6 +242,235 @@ internal static class LauncherUiProbe
                 ["openFailureLegacy"] = SearchWindow.DescribeOpenFailure(
                     new SearchHitDto("gone.txt", false, @"C:\no\such\gone.txt", 2, []),
                     new FileNotFoundException("模拟：文件已被删除")),
+            };
+        }
+        finally
+        {
+            window.CloseForProbe();
+        }
+    }
+
+    // ── clip：剪贴板历史（W10-b）真库夹具 → 行渲染 → 直贴**降级路径** ────────────
+
+    /// <summary>
+    /// clip 段（W10-b）：**真库夹具**（临时 SQLite + 种子条目）→ 行渲染（徽标 ⧉ / 副行来源时间）
+    /// → 动作参数 → Enter 的降级路径。
+    ///
+    /// <para><b>为什么不真注入</b>：真 Ctrl+V 会贴进"运行探针的那个终端"（不可接受的副作用，
+    /// 与 W5 面板同款纪律）。探针窗口不调 Summon ⇒ 没有"唤出前的前台"记录 ⇒ 直贴必然走降级分支，
+    /// 所以这条路径既真实可达又零副作用。真实注入链（Hide → 还原 → Ctrl+V）归手工验收项。</para>
+    /// </summary>
+    private static JsonObject RunClip()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ezt-probe-clip-" + Guid.NewGuid().ToString("N")[..10]);
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new HistoryStore(
+                Path.Combine(root, "clips.db"), Path.Combine(root, "images"));
+
+            // 种子：一条文本（命中）+ 一条图片（D3：必须**不出现**在结果里）
+            const string hit = "探针剪贴板内容 ALPHA";
+            store.Upsert(new ClipEntry
+            {
+                Kind = ClipKind.Text,
+                Content = hit,
+                Preview = hit,
+                Hash = CaptureService.ComputeHash(hit),
+                SourceApp = "probe.exe",
+            });
+            store.Upsert(new ClipEntry
+            {
+                Kind = ClipKind.Image,
+                Content = null,
+                Preview = "图片 100×100",
+                Hash = CaptureService.ComputeHash("img:" + hit),
+                SourceApp = "probe.exe",
+            });
+
+            // W10-c：一张**真落盘的**样图 —— 图片入口（"图片" 触发词）+ 提字动作要用它，
+            //   而且它的文字是已知的，所以 OCR 那条路径可以真跑、真断言（不是"看起来接通了"）。
+            const string imageText = "EZT OCR PROBE 2026";
+            const string imageRelative = "probe-img.png";
+            const string imagePreview = "图片 880×220";
+            var imageDir = Path.Combine(root, "images");
+            Directory.CreateDirectory(imageDir);
+            var imageFile = Path.Combine(imageDir, imageRelative);
+            using (var sample = SampleImage.RenderText(imageText))
+            {
+                sample.Save(imageFile, Drawing.Imaging.ImageFormat.Png);
+            }
+
+            store.Upsert(new ClipEntry
+            {
+                Kind = ClipKind.Image,
+                Content = null,
+                Preview = imagePreview,
+                ImagePath = imageRelative,
+                ImageBytes = new FileInfo(imageFile).Length,
+                Hash = CaptureService.ComputeHash("imgfile:" + imageText),
+                SourceApp = "probe.exe",
+            });
+
+            var transport = new ProbeSearchUiTransport();
+            var client = new SearchIndexClient(transport);
+            var window = new SearchWindow(client, [new ClipProvider(new ClipboardHistorySource(() => store))])
+            {
+                ProbeSuppressDrift = true,
+            };
+
+            try
+            {
+                window.ShowForProbe();
+                window.ProbeStartRenderLog();
+                window.SubmitForProbe("ALPHA");
+                var rendered = PumpUntil(() => window.ProbeRenderLog.Count > 0, PumpTimeoutMs);
+
+                var rows = window.SnapshotRows();
+                var row = rows.Count > 0 ? rows[0] : null;
+
+                // Enter（降级路径）：无前台记录 ⇒ 只复制、**不收窗**、状态行说明
+                var (enterText, enterHidden, enterHandled) = ProbeCopy(window, InputCmd.Enter);
+                // ★ 立刻快照状态行：它是**共享可变状态**，后面的 Ctrl+C 会把它覆盖掉
+                //   （实测踩到：统一在末尾读 ⇒ 拿到的是最后一条动作的文案，断言假红）
+                var enterStatus = window.ProbeStatusText;
+
+                // Ctrl+C（W10-b）：clip 项必须复制**全文**（主行是摘要 Preview、副行是"来源·时间"，
+                //   两者都不是内容），且按既有语义**不收窗**。
+                //   ★ 必须先显式选中：CtrlC 分支的判据是 `SelectedItem() is { }`（与 Enter 的
+                //     "无选中取第一条"刻意不同），不选中它会走默认分支（返回 false、不复制）。
+                window.ProbeSelectIndex(0);
+                var (ctrlCText, ctrlCHidden, ctrlCHandled) = ProbeCopy(window, InputCmd.CtrlC);
+                // ★ 同样的"立刻快照"纪律（共享可变状态，见上）：后面还有一轮 Submit，状态行会被改写
+                var ctrlCStatus = window.ProbeStatusText;
+
+                // 直贴"无目标"分支（W10-b）：句柄为 0 ⇒ 直接返回可读文案、**不碰任何窗口**（零副作用）。
+                //   ★ 另一条失败分支（"目标已销毁"）测不了：要么造一个真窗口再销毁（探针里太重），
+                //     要么赌某个伪造句柄无效（赌输就是往别人的窗口注入 Ctrl+V —— 不可接受的副作用）
+                //     ⇒ 归手工（M2 的补充步骤：复制后立刻关掉源窗口再直贴）。
+                var pasteBackNoTarget = LauncherActionRunner.ExecutePasteBack(nint.Zero);
+
+                // ── W10-c：图片入口（真触发词 → 真渲染）+ 提字（真 OCR 跑样图）──────────────
+                //   ★ 探针**不点 Enter**：图片 Enter 会走直贴链（真注入 Ctrl+V）—— 注入纪律见类头，
+                //     且那条链与文本条目**共用同一段代码**（已由上面的降级断言覆盖）。
+                //     这里验的是两件新事：① "图片" 触发词能真的把图片行列出来并正确渲染
+                //     ② 提字方法真的能出字（用**已知文字**的样图，不是"接通了就算"）。
+                var imageLogBefore = window.ProbeRenderLog.Count;
+                window.SubmitForProbe("图片");
+                PumpUntil(() => window.ProbeRenderLog.Count > imageLogBefore, PumpTimeoutMs);
+                var imageRows = window.SnapshotRows();
+                var imageRow = imageRows.FirstOrDefault(r => r.Title == imagePreview);
+
+                var (ocrText, ocrError) = LauncherActionRunner.RecognizeImageText(imageFile);
+                var (_, missingImageError) = LauncherActionRunner.RecognizeImageText(
+                    Path.Combine(imageDir, "not-there.png"));
+
+                return new JsonObject
+                {
+                    ["rendered"] = rendered,
+                    ["rowCount"] = rows.Count,
+                    ["badge"] = row?.Badge,
+                    ["title"] = row?.Title,
+                    ["subtitle"] = row?.Subtitle,
+                    ["subtitleHasSource"] = row?.Subtitle.Contains("probe.exe", StringComparison.Ordinal) ?? false,
+                    ["imageFiltered"] = rows.All(r => !r.Title.Contains("图片", StringComparison.Ordinal)),
+                    ["enterHandled"] = enterHandled,
+                    ["enterClipboard"] = enterText,
+                    ["enterCopiedFullText"] = enterText == hit,
+                    ["hiddenAfterEnter"] = enterHidden,      // 降级 ⇒ 必须仍未收窗
+                    ["ctrlCHandled"] = ctrlCHandled,
+                    ["ctrlCClipboard"] = ctrlCText,
+                    ["ctrlCCopiedFullText"] = ctrlCText == hit,
+                    ["hiddenAfterCtrlC"] = ctrlCHidden,
+                    ["pasteBackNoTarget"] = pasteBackNoTarget,
+                    // 壳表面判据（W10-b 真机修复）：桌面 / 任务栏**不是可粘贴目标**（纯函数，穷举三例）
+                    ["shellSurfaceProgman"] = SearchWindow.IsShellSurfaceClass("Progman"),
+                    ["shellSurfaceTray"] = SearchWindow.IsShellSurfaceClass("Shell_TrayWnd"),
+                    ["shellSurfaceNotepad"] = SearchWindow.IsShellSurfaceClass("Notepad"),
+                    ["suppressInject"] = window.ProbeSuppressInject,
+                    ["enterStatusText"] = enterStatus,              // Enter 后的状态行（快照）
+                    ["ctrlCStatusText"] = ctrlCStatus,              // Ctrl+C 后的状态行（快照）
+                    // ── W10-c：图片入口 + 提字（见上面的注释块）──────────────────────────
+                    ["imageRowCount"] = imageRows.Count,
+                    ["imageRowFound"] = imageRow is not null,
+                    ["imageRowKind"] = imageRow?.Kind,
+                    ["imageRowBadge"] = imageRow?.Badge,
+                    ["imageRowTitle"] = imageRow?.Title,
+                    ["ocrText"] = ocrText,
+                    ["ocrError"] = ocrError,
+                    ["ocrHitKnownToken"] = ocrText?.Contains("EZT", StringComparison.OrdinalIgnoreCase) ?? false,
+                    ["ocrMissingImageError"] = missingImageError,
+                };
+            }
+            finally
+            {
+                window.CloseForProbe();
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+                // review-guards:allow-empty-catch :: 探针临时目录清理失败不阻塞（系统 temp 兜底）
+            }
+        }
+    }
+
+    // ── cmd：系统命令（W10-b）真 provider → 行渲染 → 动作参数 ──────────────────
+
+    /// <summary>
+    /// cmd 段（W10-b）：真 <see cref="CommandProvider"/> → 行渲染（⌘ 徽标 / 不可恢复警示 / 表序）
+    /// → 动作参数（Launch + Arguments）。<b>不真执行命令</b> —— 锁屏/休眠/清空回收站都是真副作用。
+    /// </summary>
+    private static JsonObject RunCmd()
+    {
+        var transport = new ProbeSearchUiTransport();
+        var client = new SearchIndexClient(transport);
+        var window = new SearchWindow(client, [new CommandProvider()]) { ProbeSuppressDrift = true };
+
+        try
+        {
+            window.ShowForProbe();
+            window.ProbeStartRenderLog();
+
+            window.SubmitForProbe(">");
+            PumpUntil(() => window.ProbeRenderLog.Count > 0, PumpTimeoutMs);
+            var allRows = window.SnapshotRows();
+
+            window.SubmitForProbe(">清空");
+            PumpUntil(() => window.ProbeRenderLog.Count > 1, PumpTimeoutMs);
+            var destructiveRows = window.SnapshotRows();
+
+            window.SubmitForProbe("锁屏");   // 无 ">" 前缀 ⇒ 不触发
+            PumpUntil(() => window.ProbeRenderLog.Count > 2, PumpTimeoutMs);
+            var noTriggerRows = window.SnapshotRows();
+
+            // 动作参数（纯 provider 构造，不经窗口 —— 与 rows 是两条独立观测面）
+            var lockSet = new CommandProvider()
+                .QueryAsync(new LauncherQuery(">锁", 1, 50, true), default).GetAwaiter().GetResult();
+            var lockAction = lockSet.Items.Count == 1 ? lockSet.Items[0].PrimaryAction : null;
+
+            var first = allRows.Count > 0 ? allRows[0] : null;
+            var destructive = destructiveRows.Count > 0 ? destructiveRows[0] : null;
+
+            return new JsonObject
+            {
+                ["allCount"] = allRows.Count,
+                ["tableCount"] = CommandCatalog.Entries.Count,
+                ["firstBadge"] = first?.Badge,
+                ["firstTitle"] = first?.Title,
+                ["titlesInOrder"] = new JsonArray([.. allRows.Select(r => (JsonNode)r.Title)]),
+                ["destructiveCount"] = destructiveRows.Count,
+                ["destructiveTitle"] = destructive?.Title,
+                ["destructiveWarned"] = destructive?.Title.Contains("不可恢复", StringComparison.Ordinal) ?? false,
+                ["noTriggerCount"] = noTriggerRows.Count,
+                ["launchKind"] = lockAction?.Kind.ToString(),
+                ["launchExe"] = lockAction?.Argument,
+                ["launchArgs"] = lockAction?.Arguments,
             };
         }
         finally
@@ -1204,7 +1445,92 @@ internal static class LauncherUiProbe
             ["cases"] = cases,
             ["launch"] = RunCoreLaunchChecks(),
             ["echo"] = RunCoreLaunchEchoChecks(),
+            ["stale"] = RunCoreStaleChecks(),
         };
+    }
+
+    /// <summary>
+    /// 陈旧索引提示（W9）：**status 回 ready=true（查询正常）而核心服务缺席** —— 台账 10-03
+    /// 登记的沉默场景。与 <see cref="ProbeCoreStatus"/> 的区别在传输夹具：那边 status 恒回
+    /// ready=false（W8 的"说假话"面），这边 status 恒回 ready=true（W9 的"沉默"面）——
+    /// 同一套窗口接线，两个夹具各复现一种真实形态。
+    ///
+    /// <para>四态各跑一次窗口：只有 CoreNotRunning/NotElevated 出提示（前者可点且**真接到**
+    /// 宿主动作，后者刻意不可点 —— 见 CoreStaleNotice 文档）；CoreOk/Unknown 必须与 W7
+    /// 行为逐字一致（反向夹具防恒真）。</para>
+    /// </summary>
+    private static JsonObject RunCoreStaleChecks()
+    {
+        var cases = new JsonArray();
+        foreach (var availability in new[]
+                 {
+                     CoreAvailability.CoreOk,
+                     CoreAvailability.CoreNotRunning,
+                     CoreAvailability.CoreNotElevated,
+                     CoreAvailability.Unknown,
+                 })
+        {
+            cases.Add(ProbeCoreStaleCase(availability));
+        }
+
+        return new JsonObject { ["cases"] = cases };
+    }
+
+    private static JsonObject ProbeCoreStaleCase(CoreAvailability availability)
+    {
+        var launchClicks = 0;
+        var transport = new CoreReadyTransport();
+        var client = new SearchIndexClient(transport);
+        var window = new SearchWindow(client, LauncherProviderSet.FilesOnly(client),
+            coreAvailability: () => availability)
+        {
+            ProbeSuppressDrift = true,
+            CoreLaunchRequested = () =>
+            {
+                launchClicks++;
+                return Task.FromResult((CoreLaunchOutcome.Cancelled, "（探针）未真正启动"));
+            },
+        };
+
+        try
+        {
+            window.ShowForProbe();
+
+            // ① 卷清单行：status 回 ready=true ⇒ 正常计数 +（陈旧态）行尾后缀
+            window.RefreshVolumeSummary();
+            PumpUntil(() => !string.IsNullOrEmpty(window.ProbeVolumesLine), PumpTimeoutMs);
+
+            // ② 结果状态行：查询回真实命中（有结果 + 陈旧提示**并存**正是本修复的形态）
+            window.SubmitForProbe("报");
+            PumpUntil(() => window.ProbeItemCount == CoreReadyTransport.HitCount, PumpTimeoutMs);
+            PumpFor(100);   // 让渲染续体把状态行落定
+
+            // ★ 文案必须在点击**前**采集：点击后 LaunchCoreAsync 会用回显覆盖状态行（W8 同款时序）
+            var statusText = window.ProbeStatusText;
+            var launchable = window.ProbeStatusLaunchable;
+            if (launchable)
+            {
+                window.ProbeInvokeStatusClick();
+                PumpUntil(() => launchClicks > 0, PumpTimeoutMs);
+            }
+
+            return new JsonObject
+            {
+                ["availability"] = availability.ToString(),
+                ["staleFlag"] = window.ProbeCoreStale?.ToString() ?? "(null)",
+                ["statusText"] = statusText,
+                ["statusLaunchable"] = launchable,
+                ["statusTextAfterClick"] = window.ProbeStatusText,
+                ["launchClicks"] = launchClicks,
+                ["volumesLine"] = window.ProbeVolumesLine,
+                ["queries"] = transport.Queries,
+                ["statuses"] = transport.Statuses,
+            };
+        }
+        finally
+        {
+            window.CloseForProbe();
+        }
     }
 
     /// <summary>
@@ -1407,8 +1733,7 @@ internal static class LauncherUiProbe
     /// 而不是协议本身（那是 25.x / W3-c 的地盘）。
     /// </summary>
     private sealed class CoreStatusTransport : ISearchIndexTransport
-    {
-        public int Queries { get; private set; }
+    {        public int Queries { get; private set; }
 
         public int Statuses { get; private set; }
 
@@ -1455,6 +1780,74 @@ internal static class LauncherUiProbe
                 {
                     ["code"] = RpcErrorCodes.SearchNotReady,
                     ["message"] = "索引准备中（ready=false）",
+                },
+            });
+        }
+    }
+
+    /// <summary>
+    /// W9 陈旧场景的假传输：与 <see cref="CoreStatusTransport"/> **成对** —— 那边 status 恒回
+    /// ready=false（复现"说假话"），这边 status 恒回 ready=true（复现"沉默"：索引自称就绪
+    /// 而核心服务缺席，查询正常返回 ⇒ W8 的错误路径完全不触发）。
+    /// 查询回 1 条真实命中 ⇒ 验"有结果 + 陈旧提示并存"（空结果场景由 selftest 的纯函数覆盖）。
+    /// </summary>
+    private sealed class CoreReadyTransport : ISearchIndexTransport
+    {
+        /// <summary>查询返回的命中条数（陈旧提示与结果并存的断言分母）。</summary>
+        public const int HitCount = 1;
+
+        public int Queries { get; private set; }
+
+        public int Statuses { get; private set; }
+
+        public Task<JsonObject> RoundTripAsync(JsonObject request, CancellationToken ct = default)
+        {
+            var method = request["method"]?.GetValue<string>();
+            if (method == "search.status")
+            {
+                Statuses++;
+                return Task.FromResult(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = request["id"]!.DeepClone(),
+                    ["result"] = new JsonObject
+                    {
+                        ["ready"] = true,
+                        ["totalFiles"] = 100,
+                        ["indexing"] = new JsonObject { ["active"] = false, ["paused"] = false },
+                        ["volumes"] = new JsonArray { new JsonObject { ["volume"] = "C:", ["entries"] = 100 } },
+                        ["skippedVolumes"] = new JsonArray(),
+                        ["failedVolumes"] = new JsonArray(),
+                        ["detectedVolumes"] = 1,
+                        ["lastError"] = null,
+                    },
+                });
+            }
+
+            // 协议契约：epoch 原样回传（配对闸必过 —— 见 ProbeSearchUiTransport 同款注释）
+            var epoch = request["params"]!["epoch"]!.GetValue<long>();
+            Queries++;
+            return Task.FromResult(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = request["id"]!.DeepClone(),
+                ["result"] = new JsonObject
+                {
+                    ["epoch"] = epoch,
+                    ["total"] = HitCount,
+                    ["elapsedMs"] = 3,
+                    ["hits"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["name"] = "report-0001.txt",
+                            ["dir"] = false,
+                            ["len"] = 14,
+                            ["frn"] = 1001L,
+                            ["path"] = @"C:\Users\ishe\Desktop\report-0001.txt",
+                            ["highlights"] = new JsonArray { new JsonObject { ["start"] = 0, ["len"] = 6 } },
+                        },
+                    },
                 },
             });
         }

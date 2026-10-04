@@ -261,7 +261,18 @@ internal static class SelfTestCommand
         RunCalcCases();
         RunConvertCases();
         RunUsageCases();
+        await RunClipProviderCasesAsync().ConfigureAwait(false);
+        await RunClipRouterCasesAsync().ConfigureAwait(false);
+        RunCommandCases();
         await RunCoreAvailabilityCasesAsync().ConfigureAwait(false);
+
+        // W9：陈旧索引提示（Ready=true 而 Core 缺席的"沉默"面）
+        if (!cli.GetBool("json"))
+        {
+            ConsoleUi.Section("陈旧索引提示（W9）");
+        }
+
+        RunCoreStaleNoticeCases();
 
         // 6N) 资源占用与暂停（W3-e-1：后台线程优先级 + 暂停索引开关）
         if (!cli.GetBool("json"))
@@ -2780,6 +2791,35 @@ internal static class SelfTestCommand
                     + $"title={item?.Title} subtitle={item?.Subtitle} hl={item?.Highlights.Count} "
                     + $"primary={item?.PrimaryAction?.Kind} secondary={item?.SecondaryAction?.Kind}");
         }
+
+        // 25.11 W10-a：clip 段位于 apps 之后、files 之前；**不污染 files 计数**（S9 —— 状态行的
+        //   "显示 N / 共 M 条"说的是 files 段，clip 混进去会让数字语义错）
+        {
+            var (router, models) = NewRouter(
+                ("files", [LItem(LauncherKind.File, "z.txt", 0), LItem(LauncherKind.File, "a.txt", 0)]),
+                ("clip", [LItem(LauncherKind.Clip, "剪贴板条目", 0)]),
+                ("apps", [LItem(LauncherKind.App, "记事本", 10)]));
+
+            router.Submit("x");
+            await WaitForAsync(() => { lock (models) { return models.Count == 1; } }).ConfigureAwait(false);
+
+            string order;
+            int filesHits;
+            int filesTotal;
+            lock (models)
+            {
+                order = string.Join("|", models[0].Items.Select(i => $"{i.Kind}:{i.Title}"));
+                filesHits = models[0].FilesHitCount;
+                filesTotal = models[0].FilesTotal;
+            }
+
+            router.Dispose();
+            Report(
+                "25.11 W10-a 归并：clip 段在 apps 后 / files 前 · files 计数不被 clip 污染",
+                order == "App:记事本|Clip:剪贴板条目|File:z.txt|File:a.txt"
+                    && filesHits == 2 && filesTotal == 2,
+                $"order={order} filesHits={filesHits} filesTotal={filesTotal}");
+        }
     }
 
     // ── W7-b 启动器配置与匹配（纯函数，零进程）──────────────────────────────
@@ -2966,6 +3006,465 @@ internal static class SelfTestCommand
     // 纪律（`验收断言审视清单.md` §2.17③）：每一条的期望值都是从表达式**手推**出来的常数
     // （96 / 512 / -4 / 0.5 …），不是"先跑一遍把输出抄回来" —— 后者只能证明代码没变，
     // 证明不了它是对的。格式化期望值同理，逐字符写死（`1.15292E+18`）。
+    // ── W10-a 剪贴板来源 / 系统命令（假来源 + 纯函数，零进程）─────────────────
+
+    /// <summary>
+    /// clip provider 夹具（W10-a，设计方案 §7）。用**假来源**驱动 —— 真实存储的检索能力已由
+    /// W5 的 <c>RunClipStoreCasesAsync</c> 覆盖，这里只验"provider 契约 → 结果行"这一段
+    /// （空查询防御 / 类型过滤 / 行映射 / 动作构造 / 段内原序 / 异常透传）。
+    /// </summary>
+    private static async Task RunClipProviderCasesAsync()
+    {
+        var clip = Eztools.Host.Launcher.LauncherProviderRegistry.Clip;
+
+        // W10-1 空查询（含全空白）⇒ 空结果，且**完全不触碰来源**（防"清空输入框倒出整段历史"）
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("内容 A", "预览 A", "app.exe", 9));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("   "), default).ConfigureAwait(false);
+            Report(
+                "W10-1 clip 空查询 ⇒ 空结果且零触达来源（不倾倒历史）",
+                set.Items.Count == 0 && set.ProviderId == clip && source.SearchCalls == 0,
+                $"items={set.Items.Count} provider={set.ProviderId} sourceCalls={source.SearchCalls}");
+        }
+
+        // W10-2 类型过滤（D3）：非文本条目不入结果（真库夹具在 verify-desktop 的 clip 段）
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("文本一", "文本一", "a.exe", 1));
+            source.Items.Add(new Eztools.Host.Launcher.ClipHistoryEntry(
+                false, "", "图片 800×600", "b.exe", ClipAt(2)));
+            source.Items.Add(ClipItem("文本二", "文本二", "c.exe", 3));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("文本"), default).ConfigureAwait(false);
+            Report(
+                "W10-2 clip 类型过滤（D3）：3 条源（含 1 非文本）⇒ 只出 2 条文本",
+                set.Items.Count == 2 && set.Items.All(i => i.Kind == LauncherKind.Clip),
+                $"items={set.Items.Count} titles=[{string.Join(",", set.Items.Select(i => i.Title))}]");
+        }
+
+        // W10-3 行映射：Title=Preview；Subtitle="来源 {app} · MM-dd HH:mm"（单点确定，渲染层不拼串）
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("全文内容", "预览摘要", "notepad.exe", 9, minute: 5));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("预览"), default).ConfigureAwait(false);
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-3 clip 行映射：Title=Preview、Subtitle=「来源 X · MM-dd HH:mm」",
+                row is { Title: "预览摘要", Subtitle: "来源 notepad.exe · 10-03 09:05", IconHint: "" },
+                $"title={row?.Title} subtitle={row?.Subtitle} icon={row?.IconHint}");
+        }
+
+        // W10-4 动作：Enter=直贴(**全文**)、Ctrl+Enter=复制(**全文**) —— 不是 Preview 摘要
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("完整正文 12345", "完整正文…", "a.exe", 1));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("完整"), default).ConfigureAwait(false);
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-4 clip 动作：Enter=PasteBack(全文)、Ctrl+Enter=CopyText(全文)（不是摘要）",
+                row?.PrimaryAction is { Kind: LauncherActionKind.PasteBack, Argument: "完整正文 12345" }
+                    && row.SecondaryAction is { Kind: LauncherActionKind.CopyText, Argument: "完整正文 12345" },
+                $"primary={row?.PrimaryAction?.Kind}/{row?.PrimaryAction?.Argument} "
+                    + $"secondary={row?.SecondaryAction?.Kind}/{row?.SecondaryAction?.Argument}");
+        }
+
+        // W10-5 段内原序（D5）：Score 恒 0，结果顺序 = 来源返回序（pinned/最近使用在前）
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("甲", "甲", "a.exe", 1));
+            source.Items.Add(ClipItem("乙", "乙", "a.exe", 2));
+            source.Items.Add(ClipItem("丙", "丙", "a.exe", 3));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("甲"), default).ConfigureAwait(false);
+            var titles = string.Join(",", set.Items.Select(i => i.Title));
+            Report(
+                "W10-5 clip 段内原序（D5）：Score 恒 0 ⇒ 顺序 = 来源返回序（不参与重排）",
+                titles == "甲,乙,丙" && set.Items.All(i => i.Score == 0),
+                $"titles=[{titles}] scores=[{string.Join(",", set.Items.Select(i => i.Score))}]");
+        }
+
+        // W10-6 查询下传：trim 后交来源、limit 原样透传（provider 不得自行改查询/截断）
+        {
+            var source = new FakeClipSource();
+            await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery("  关键词  ", 3, 17, true), default)
+                .ConfigureAwait(false);
+            Report(
+                "W10-6 clip 查询下传：trim 后交来源、limit 原样透传",
+                source.LastQuery == "关键词" && source.LastLimit == 17,
+                $"query=\"{source.LastQuery}\" limit={source.LastLimit}");
+        }
+
+        // W10-7 异常**不吞**：来源抛 ⇒ QueryAsync 抛（由 QueryRouter 隔离成段位错误，FR-6）
+        {
+            var source = new FakeClipSource { Throw = true };
+            var threw = false;
+            try
+            {
+                await new Eztools.Host.Launcher.ClipProvider(source)
+                    .QueryAsync(ClipQ("x"), default).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException)
+            {
+                threw = true;
+            }
+
+            Report(
+                "W10-7 clip 异常不吞：来源抛 ⇒ provider 抛（交 QueryRouter 隔离，FR-6 不静默）",
+                threw,
+                $"threw={threw}");
+        }
+
+        // W10-21 图片入口（W10-c）：**精确**命中触发词 ⇒ 走 ListImages（不是 Search）；
+        //   主动作 = OcrCopy(图片绝对路径)、次动作刻意留空。图片的 content 恒为 NULL ⇒
+        //   FTS/LIKE 两条路都结构性地搜不到，这个入口是它们唯一的发现路径。
+        {
+            var source = new FakeClipSource();
+            source.Images.Add(ClipImage(@"C:\imgs\a.png", "图片 800×600 · 12 KB", 4));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("图片"), default).ConfigureAwait(false);
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-21 clip 图片入口：精确「图片」⇒ ListImages + 主动作 OcrCopy(绝对路径)、无次动作",
+                source.ListImagesCalls == 1 && source.SearchCalls == 0
+                    && row?.Title == "图片 800×600 · 12 KB"
+                    && row.PrimaryAction is { Kind: LauncherActionKind.OcrCopy, Argument: @"C:\imgs\a.png" }
+                    && row.SecondaryAction is null,
+                $"listImages={source.ListImagesCalls} search={source.SearchCalls} "
+                    + $"title={row?.Title} primary={row?.PrimaryAction?.Kind}/{row?.PrimaryAction?.Argument} "
+                    + $"secondary={row?.SecondaryAction?.Kind}");
+        }
+
+        // W10-21b 触发词**只精确匹配**："图片处理" 必须仍走文本检索（否则普通查询被吃掉）
+        {
+            var source = new FakeClipSource();
+            source.Items.Add(ClipItem("图片处理工具", "图片处理工具", "a.exe", 1));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("图片处理"), default).ConfigureAwait(false);
+            Report(
+                "W10-21b clip 触发词只精确匹配：「图片处理」仍走文本检索（不吞普通查询）",
+                source.SearchCalls == 1 && source.ListImagesCalls == 0 && set.Items.Count == 1,
+                $"search={source.SearchCalls} listImages={source.ListImagesCalls} items={set.Items.Count}");
+        }
+
+        // W10-22 图片路径缺失 ⇒ 主动作 null（不可执行）：**不编假动作**，也不让 Enter 落到
+        //   "暂不支持的动作"（那是说谎 —— 动作是支持的，只是这行的图片文件没了）。
+        //   顺带钉住 ASCII 别名 "img" 同样触发。
+        {
+            var source = new FakeClipSource();
+            source.Images.Add(ClipImage(null, "图片 1×1", 1));
+            var set = await new Eztools.Host.Launcher.ClipProvider(source)
+                .QueryAsync(ClipQ("IMG"), default).ConfigureAwait(false);
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-22 clip 图片路径缺失 ⇒ 主动作 null（不可执行）；别名 \"img\" 大小写不敏感同样触发",
+                source.ListImagesCalls == 1 && row?.PrimaryAction is null,
+                $"listImages={source.ListImagesCalls} items={set.Items.Count} primary={row?.PrimaryAction?.Kind}");
+        }
+    }
+
+    /// <summary>系统命令表 + provider 穷举（W10-a 设计方案 §7：Catalog 全表 + provider 产出）。</summary>
+    private static void RunCommandCases()
+    {
+        var cmd = Eztools.Host.Launcher.LauncherProviderRegistry.Command;
+        var catalog = Eztools.Host.Launcher.CommandCatalog.Entries;
+
+        // W10-8 触发判定：">" 与 "cmd:" 两个前缀；正文 trim；前缀单独出现 ⇒ 空正文；裸词/空串不触发
+        {
+            var t1 = Eztools.Host.Launcher.CommandCatalog.TryGetBody(">锁", out var b1);
+            var t2 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("  > 锁 ", out var b2);
+            var t3 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("lock", out _);
+            var t4 = Eztools.Host.Launcher.CommandCatalog.TryGetBody(">", out var b4);
+            var t5 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("", out _);
+
+            // W10-c：ASCII 等价前缀。★ 裸 "cmd"（无冒号）**不得**触发 —— 否则用户打 "cmd"
+            // 想看"命令提示符"时会被整段命令表顶掉。
+            var c1 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("cmd:锁", out var cb1);
+            var c2 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("CMD:清", out var cb2);
+            var c3 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("cmd:", out var cb3);
+            var c4 = Eztools.Host.Launcher.CommandCatalog.TryGetBody("cmd", out _);
+            Report(
+                "W10-8 cmd 触发判定：\">\" 与 \"cmd:\" 两前缀；正文 trim；裸词/空串不触发",
+                t1 && b1 == "锁" && t2 && b2 == "锁" && !t3 && t4 && b4.Length == 0 && !t5
+                    && c1 && cb1 == "锁" && c2 && cb2 == "清" && c3 && cb3.Length == 0 && !c4,
+                $">锁=({t1},\"{b1}\") cmd:锁=({c1},\"{cb1}\") CMD:清=({c2},\"{cb2}\") "
+                    + $"cmd:=({c3},\"{cb3}\") cmd裸词=({c4})");
+        }
+
+        // W10-9 全表自洽：四字段非空、别名非空且无空白项、命令名唯一
+        {
+            var bad = new List<string>();
+            foreach (var e in catalog)
+            {
+                if (e.Name.Length == 0 || e.Description.Length == 0
+                    || e.LaunchExe.Length == 0 || e.LaunchArgs.Length == 0
+                    || e.Aliases.Count == 0 || e.Aliases.Any(a => a.Trim().Length == 0))
+                {
+                    bad.Add(e.Name);
+                }
+            }
+
+            var distinct = catalog.Select(e => e.Name).Distinct(StringComparer.Ordinal).Count() == catalog.Count;
+            Report(
+                "W10-9 cmd 命令表自洽：名称/描述/程序/参数/别名全非空，命令名唯一",
+                bad.Count == 0 && distinct,
+                $"条目={catalog.Count} 异常=[{string.Join(",", bad)}] 唯一={distinct}");
+        }
+
+        // W10-10 Match：精确 / 前缀 / 别名 / 未命中 / 空正文=全表（守表序）
+        {
+            var exact = Eztools.Host.Launcher.CommandCatalog.Match("锁屏");
+            var prefix = Eztools.Host.Launcher.CommandCatalog.Match("清");
+            var alias = Eztools.Host.Launcher.CommandCatalog.Match("lock");
+            var none = Eztools.Host.Launcher.CommandCatalog.Match("zzz");
+            var all = Eztools.Host.Launcher.CommandCatalog.Match("");
+            Report(
+                "W10-10 cmd 匹配：精确/前缀/别名命中；未命中 0 条；空正文 ⇒ 全表且守表序",
+                exact.Count == 1 && exact[0].Name == "锁屏"
+                    && prefix.Count == 1 && prefix[0].Name == "清空回收站"
+                    && alias.Count == 1 && alias[0].Name == "锁屏"
+                    && none.Count == 0
+                    && all.Count == catalog.Count
+                    && all.Select(e => e.Name).SequenceEqual(catalog.Select(e => e.Name)),
+                $"精确={exact.Count} 前缀={prefix.Count} 别名={alias.Count} 未命中={none.Count} 全表={all.Count}");
+        }
+
+        // W10-11 Destructive 白名单：只有"清空回收站"标了不可恢复（关机/重启本就不进表）
+        {
+            var destructive = catalog.Where(e => e.Destructive).Select(e => e.Name).ToArray();
+            Report(
+                "W10-11 cmd 不可恢复标记：只有「清空回收站」（高危命令不进表）",
+                destructive.Length == 1 && destructive[0] == "清空回收站",
+                $"destructive=[{string.Join(",", destructive)}]");
+        }
+
+        // W10-12 provider 产出：">锁" ⇒ Launch(rundll32.exe, user32.dll,LockWorkStation)
+        {
+            var set = new Eztools.Host.Launcher.CommandProvider()
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(">锁", 1, 50, true), default)
+                .GetAwaiter().GetResult();
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-12 cmd 产出：\">锁\" ⇒ 1 行 Command + Launch(rundll32.exe, user32.dll,LockWorkStation)",
+                row is { Kind: LauncherKind.Command, Title: "锁屏" }
+                    && row.PrimaryAction is { Kind: LauncherActionKind.Launch, Argument: "rundll32.exe", Arguments: "user32.dll,LockWorkStation" }
+                    && set.ProviderId == cmd,
+                $"title={row?.Title} exe={row?.PrimaryAction?.Argument} args={row?.PrimaryAction?.Arguments}");
+        }
+
+        // W10-13 provider：单独 ">" ⇒ 全表条数 + Score 严格递减（段内守表序，可断言）
+        {
+            var set = new Eztools.Host.Launcher.CommandProvider()
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(">", 1, 50, true), default)
+                .GetAwaiter().GetResult();
+            var descending = true;
+            for (var i = 1; i < set.Items.Count; i++)
+            {
+                if (set.Items[i].Score >= set.Items[i - 1].Score)
+                {
+                    descending = false;
+                }
+            }
+
+            Report(
+                "W10-13 cmd 列全部：\">\" ⇒ 全表条数与表同序（Score 严格递减，不被 Title 重排）",
+                set.Items.Count == catalog.Count && descending,
+                $"items={set.Items.Count}（表 {catalog.Count}）递减={descending}");
+        }
+
+        // W10-14 不可恢复命令的标题必须带警示（R6：误触代价不可逆）
+        {
+            var set = new Eztools.Host.Launcher.CommandProvider()
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(">清空", 1, 50, true), default)
+                .GetAwaiter().GetResult();
+            var row = set.Items.Count == 1 ? set.Items[0] : null;
+            Report(
+                "W10-14 cmd 不可恢复警示：标题带「（不可恢复）」",
+                row is not null && row.Title == "清空回收站（不可恢复）",
+                $"title={row?.Title}");
+        }
+
+        // W10-15 非 ">" 输入 ⇒ 空结果（不干扰内容检索）
+        {
+            var set = new Eztools.Host.Launcher.CommandProvider()
+                .QueryAsync(new Eztools.Host.Launcher.LauncherQuery("锁屏", 1, 50, true), default)
+                .GetAwaiter().GetResult();
+            Report(
+                "W10-15 cmd 不触发：无 \">\" 前缀 ⇒ 空结果（不干扰内容检索）",
+                set.Items.Count == 0,
+                $"items={set.Items.Count}");
+        }
+
+        // W10-23 ASCII 等价前缀走通 provider（W10-c）："cmd:锁" 与 ">锁" **逐字同结果**。
+        //   TryGetBody 的断言只证明"认得前缀"，这条证明 provider 那条链也真的走它；
+        //   同时钉住 **裸 "cmd锁"（无冒号）不触发** —— 否则打 "cmd" 想找命令提示符会被整表顶掉。
+        {
+            var byAscii = CmdQuery("cmd:锁");
+            var bySymbol = CmdQuery(">锁");
+            var noColon = CmdQuery("cmd锁");
+            var a = byAscii.Items.Count == 1 ? byAscii.Items[0] : null;
+            var b = bySymbol.Items.Count == 1 ? bySymbol.Items[0] : null;
+            Report(
+                "W10-23 cmd ASCII 前缀走通 provider：\"cmd:锁\" 与 \">锁\" 逐字同结果；无冒号不触发",
+                a is not null && b is not null && a.Title == b.Title
+                    && a.PrimaryAction == b.PrimaryAction && noColon.Items.Count == 0,
+                $"cmd:锁={a?.Title} >锁={b?.Title} 无冒号条数={noColon.Items.Count}");
+        }
+
+        // W10-16 段位与白名单：clip → Clip 段（原序）；cmd → Pin 段（确定性命中置顶）；均入白名单
+        {
+            var clipSeg = Eztools.Host.Launcher.LauncherProviderRegistry.SegmentOf(
+                Eztools.Host.Launcher.LauncherProviderRegistry.Clip);
+            var cmdSeg = Eztools.Host.Launcher.LauncherProviderRegistry.SegmentOf(cmd);
+            var known = Eztools.Host.Launcher.LauncherProviderRegistry.KnownIds;
+            Report(
+                "W10-16 段位/白名单：clip → Clip 段（原序）· cmd → Pin 段 · 两者均入白名单",
+                clipSeg == Eztools.Host.Launcher.LauncherSegment.Clip
+                    && cmdSeg == Eztools.Host.Launcher.LauncherSegment.Pin
+                    && known.Contains(Eztools.Host.Launcher.LauncherProviderRegistry.Clip)
+                    && known.Contains(cmd),
+                $"clipSeg={clipSeg} cmdSeg={cmdSeg} known=[{string.Join(",", known)}]");
+        }
+
+        // W10-17 来源开关（FR-5）：clip.enabled=true ⇒ 原样；false ⇒ 剔除 clip（大小写不敏感 + 幂等）。
+        //   ★ 抽成纯函数就是为了这条 —— "段位静默缺席"的开关失效不报错（S2 家族），必须机器钉住。
+        {
+            var all = new[] { "files", "apps", "calc", "unit", "encode", "CLIP", "cmd" };
+            var on = Eztools.Host.Launcher.LauncherProviderSet.ApplySwitches(all, clipEnabled: true);
+            var off = Eztools.Host.Launcher.LauncherProviderSet.ApplySwitches(all, clipEnabled: false);
+            var offAgain = Eztools.Host.Launcher.LauncherProviderSet.ApplySwitches(off, clipEnabled: false);
+            Report(
+                "W10-17 来源开关（FR-5）：clip.enabled=true 原样；false 剔除 clip（大小写不敏感 + 幂等）",
+                on.SequenceEqual(all)
+                    && off.SequenceEqual(new[] { "files", "apps", "calc", "unit", "encode", "cmd" })
+                    && offAgain.SequenceEqual(off),
+                $"on=[{string.Join(",", on)}] off=[{string.Join(",", off)}] 幂等={offAgain.SequenceEqual(off)}");
+        }
+
+        // W10-18 装配指纹（W10-a）：clip.enabled 必须参与 —— 否则改了不生效（与 W8·B2 同族，且不报错）
+        {
+            var prefs = Eztools.Host.Launcher.LauncherPrefs.Default;
+            var aliases = Eztools.Host.Launcher.LauncherAliases.Empty;
+            var on = Eztools.Host.Launcher.LauncherPrefs.AssemblyFingerprint(prefs, aliases, clipEnabled: true);
+            var off = Eztools.Host.Launcher.LauncherPrefs.AssemblyFingerprint(prefs, aliases, clipEnabled: false);
+            var onAgain = Eztools.Host.Launcher.LauncherPrefs.AssemblyFingerprint(prefs, aliases, clipEnabled: true);
+            Report(
+                "W10-18 装配指纹：clip.enabled 翻转 ⇒ 指纹变；同值 ⇒ 稳定（配置热生效的判据）",
+                on != off && on == onAgain
+                    && on.StartsWith(
+                        Eztools.Host.Launcher.LauncherPrefs.Fingerprint(prefs, aliases), StringComparison.Ordinal),
+                $"翻转有差异={on != off} 同值稳定={on == onAgain}");
+        }
+    }
+
+    /// <summary>
+    /// clip × router 组合链路（W10-c，FR-6）。**单列一条的理由**：W10-7 只验到"provider 不吞异常"，
+    /// 25.9 只验到"router 会隔离"（且样本是 apps）—— 两者能推出结论，但没有一条断言**直接跑这条组合**
+    /// （clip 的段位归属是新加的 `LauncherSegment.Clip`，与 apps 不同源）。
+    /// </summary>
+    private static async Task RunClipRouterCasesAsync()
+    {
+        var clip = Eztools.Host.Launcher.LauncherProviderRegistry.Clip;
+
+        // W10-19 来源抛异常 ⇒ 该段进错误面且带原因、其它段照常渲染（一个来源坏了不拖垮别的段）
+        {
+            var (router, models) = NewRouter(
+                ("files", [LItem(LauncherKind.File, "ok.txt", 0)]),
+                (clip, null));   // Items=null ⇒ 该假 provider 必抛
+
+            router.Submit("x");
+            await WaitForAsync(() => { lock (models) { return models.Count == 1; } }).ConfigureAwait(false);
+
+            LauncherError? clipError = null;
+            var itemCount = 0;
+            lock (models)
+            {
+                models[0].Errors.TryGetValue(clip, out clipError);
+                itemCount = models[0].Items.Count;
+            }
+
+            router.Dispose();
+            Report(
+                "W10-19 clip×router（FR-6）：来源抛 ⇒ clip 段进错误面且带原因、files 段照常渲染",
+                clipError is { Kind: LauncherErrorKind.ProviderFailed }
+                    && clipError.UserText.Contains("暂不可用", StringComparison.Ordinal)
+                    && itemCount == 1,
+                $"err={clipError?.UserText} items={itemCount}");
+        }
+    }
+
+    // ── W10-a 夹具辅助 ────────────────────────────────────────────────────────
+
+    private static DateTime ClipAt(int hour, int minute = 0) => new(2026, 10, 3, hour, minute, 0);
+
+    private static Eztools.Host.Launcher.ClipHistoryEntry ClipItem(
+        string content, string preview, string? sourceApp, int hour, int minute = 0) =>
+        new(true, content, preview, sourceApp, ClipAt(hour, minute));
+
+    /// <summary>图片条目夹具（W10-c）：<paramref name="imagePath"/> 为 null = 路径缺失形态。</summary>
+    private static Eztools.Host.Launcher.ClipHistoryEntry ClipImage(
+        string? imagePath, string preview, int hour, string? sourceApp = "snipping.exe") =>
+        new(false, "", preview, sourceApp, ClipAt(hour), IsImage: true, ImagePath: imagePath);
+
+    private static Eztools.Host.Launcher.LauncherQuery ClipQ(string text) =>
+        new(text, 1, 50, Substr: true);
+
+    /// <summary>跑一次 CommandProvider（夹具顺序无关的同步包装，W10-c）。</summary>
+    private static Eztools.Host.Launcher.LauncherResultSet CmdQuery(string text) =>
+        new Eztools.Host.Launcher.CommandProvider()
+            .QueryAsync(new Eztools.Host.Launcher.LauncherQuery(text, 1, 50, true), default)
+            .GetAwaiter().GetResult();
+
+    /// <summary>假剪贴板来源（W10-a 夹具）：可注入条目、可令其抛（验异常透传）。</summary>
+    private sealed class FakeClipSource : Eztools.Host.Launcher.IClipboardHistorySource
+    {
+        internal List<Eztools.Host.Launcher.ClipHistoryEntry> Items { get; } = [];
+
+        /// <summary>图片入口返回的条目（W10-c；与 <see cref="Items"/> 分开 —— 两个入口本就是两条路）。</summary>
+        internal List<Eztools.Host.Launcher.ClipHistoryEntry> Images { get; } = [];
+
+        internal bool Throw { get; init; }
+
+        internal int SearchCalls { get; private set; }
+
+        internal int ListImagesCalls { get; private set; }
+
+        internal string? LastQuery { get; private set; }
+
+        internal int LastLimit { get; private set; }
+
+        internal int LastImagesLimit { get; private set; }
+
+        public IReadOnlyList<Eztools.Host.Launcher.ClipHistoryEntry> Search(string query, int limit)
+        {
+            SearchCalls++;
+            LastQuery = query;
+            LastLimit = limit;
+            if (Throw)
+            {
+                throw new InvalidOperationException("剪贴板库损坏（夹具）");
+            }
+
+            return Items;
+        }
+
+        public IReadOnlyList<Eztools.Host.Launcher.ClipHistoryEntry> ListImages(int limit)
+        {
+            ListImagesCalls++;
+            LastImagesLimit = limit;
+            if (Throw)
+            {
+                throw new InvalidOperationException("剪贴板库损坏（夹具）");
+            }
+
+            return Images;
+        }
+    }
+
     private static void RunCalcCases()
     {
 
@@ -3948,6 +4447,62 @@ internal static class SelfTestCommand
                 "37.5 配置指纹：同值不变 · providers/usage/alias 任一变更都变（漏键＝该配置静默不生效）",
                 fp == same && fp != byProviders && fp != byUsage && fp != byAlias,
                 $"same={fp == same} providers={fp != byProviders} usage={fp != byUsage} alias={fp != byAlias}");
+        }
+    }
+
+    // ── 38.x 陈旧索引提示（W9）：Ready=true 而 Core 缺席 ─────────────────────
+    //
+    // 判据全落在**纯函数**上（CoreStaleNotice.For / SuffixFor）—— 窗口只负责"显示它"，
+    // 显示接线由 --probe-launcher corestatus 的 stale 段断言（真窗口 + ready=true 夹具）。
+    // 与 37.x 的分工：37 管的是"-32001（索引没就绪）说什么"，38 管的是"就绪了但停止更新说什么"。
+
+    private static void RunCoreStaleNoticeCases()
+    {
+        // 38.1 For() 真值表（四态穷举）：保守性继承 W8 —— 说不清就闭嘴，绝不给点了没用的按钮
+        {
+            var ok = CoreStaleNotice.For(CoreAvailability.CoreOk);
+            var unknown = CoreStaleNotice.For(CoreAvailability.Unknown);
+            var notRunning = CoreStaleNotice.For(CoreAvailability.CoreNotRunning);
+            var notElevated = CoreStaleNotice.For(CoreAvailability.CoreNotElevated);
+
+            Report(
+                "38.1 陈旧提示真值表：CoreOk/未知 ⇒ 不提示 · 未运行 ⇒ 可点出口 · 未提权 ⇒ 不可点只给重启指引",
+                ok is null
+                    && unknown is null
+                    && notRunning is { CanLaunch: true }
+                    && notRunning.Value.Text.Contains("点此启动", StringComparison.Ordinal)
+                    && notRunning.Value.Text.Contains("已停止更新", StringComparison.Ordinal)
+                    && notElevated is { CanLaunch: false }
+                    && notElevated.Value.Text.Contains("未提权", StringComparison.Ordinal)
+                    && notElevated.Value.Text.Contains("管理员", StringComparison.Ordinal),
+                $"CoreOk={(ok is null ? "null" : "有值")} 未知={(unknown is null ? "null" : "有值")} "
+                    + $"未运行=({notRunning?.CanLaunch}/「{notRunning?.Text}」) "
+                    + $"未提权=({notElevated?.CanLaunch}/「{notElevated?.Text}」)");
+        }
+
+        // 38.2 SuffixFor 单一来源：状态行文案必须以卷清单行后缀开头（防两处文案漂移），
+        //      且 CoreOk/Unknown 后缀为空（否则正常态的卷清单行会被挂上"已停止更新"——假警报）
+        {
+            var drift = true;
+            foreach (var availability in new[]
+                     {
+                         CoreAvailability.CoreOk,
+                         CoreAvailability.CoreNotRunning,
+                         CoreAvailability.CoreNotElevated,
+                         CoreAvailability.Unknown,
+                     })
+            {
+                var suffix = CoreStaleNotice.SuffixFor(availability);
+                var notice = CoreStaleNotice.For(availability);
+                drift &= (suffix is null) == (notice is null)
+                    && (suffix is null
+                        || notice!.Value.Text.StartsWith(suffix, StringComparison.Ordinal));
+            }
+
+            Report(
+                "38.2 卷行后缀单一来源：For 的文案以 SuffixFor 开头 · 有提示才有后缀（正常态零假警报）",
+                drift,
+                $"四态一致性={drift}");
         }
     }
 
@@ -5818,6 +6373,18 @@ internal static class SelfTestCommand
                 d1 == PrivacyDecision.Blocked && d2 == PrivacyDecision.Blocked
                     && d3 == PrivacyDecision.Allow && d4 == PrivacyDecision.Paused,
                 "Blocked/Allow/Paused 三态可区分");
+
+            // 14b) 暂停闸的**生产表达式**（W10-c）：托盘的 OnClipboardUpdate 必须在读剪贴板前
+            //      用 Evaluate(sourceApp: null) 判暂停（W10-b 实测暴露的缺口：暂停只有手工证据，
+            //      而机器断言守的是 Evaluate 的 Paused 分支 —— 生产够不到，删掉那行 early-return 无人能钉）。
+            //      这里把生产用的那条表达式的**两个取值**都钉住，使它成为生产与断言共用的唯一判据。
+            var pausedGate = filter.Evaluate(sourceApp: null);     // 此刻仍 Paused=true
+            filter.Paused = false;
+            var resumedGate = filter.Evaluate(sourceApp: null);    // 恢复后（来源未知 ⇒ Allow）
+            Report(
+                "W10-c 暂停闸 = 生产表达式 Evaluate(null)：暂停 ⇒ Paused，恢复 ⇒ Allow",
+                pausedGate == PrivacyDecision.Paused && resumedGate == PrivacyDecision.Allow,
+                $"pausedGate={pausedGate} resumedGate={resumedGate}");
 
             // 15) 孤儿图片对账（R8 启动侧防线，W5-d）——**必须正反双向**：
             //     正向"无主 PNG 被清掉"很容易假绿（比如实现改成"全删"也通过），

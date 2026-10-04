@@ -917,7 +917,12 @@ internal sealed class TrayApplication : IDisposable
     {
         try
         {
-            if (_clipFilter.Paused)
+            // ★ W10-c：暂停闸走 PrivacyFilter.Evaluate —— 与 selftest「三态可区分」断言的是**同一个**纯函数。
+            //   之前这里直读 _clipFilter.Paused：那条表达式在断言之外，删掉/改坏它验收仍全绿
+            //   （Evaluate 的 Paused 分支照样过），而暂停实际失效 —— 正是 S 家族「断言守副本、生产走另一条」。
+            //   传 sourceApp: null 是因为此刻**还没读剪贴板**（暂停期连内容都不碰）拿不到来源进程；
+            //   Evaluate 对 null 返回 Allow（"不知道来源"不等于违规），所以等价于只判暂停。
+            if (_clipFilter.Evaluate(sourceApp: null) == PrivacyDecision.Paused)
             {
                 return;   // 手动暂停：静默丢弃（开关时刻气泡已告知状态，这里不刷屏）
             }
@@ -1237,14 +1242,14 @@ internal sealed class TrayApplication : IDisposable
         // W8·B2：记下"这次创建用的是哪份配置"——唤出时比对，变了就重建。
         // ★ usage 开关也参与指纹：用户实测踩到的正是"usage=false 落盘后文件还在长"，
         //   根因是旧 store 仍被旧的 UsageRecorder 持有 —— 不重建就永远改不掉。
-        _launcherFingerprint = LauncherPrefs.Fingerprint(prefs, aliases);
+        _launcherFingerprint = LauncherPrefs.AssemblyFingerprint(prefs, aliases, _clipEnabled);
 
         // W8·B1：可达性探测（跨重建复用 —— 它只读 core.json，没有需要失效的内部状态，
         // 唯一的缓存由启动成功后显式 Invalidate）
         _coreAvailability ??= new CoreAvailabilityProbe(_host.Paths.Root);
 
         AppsProvider? apps = null;
-        var providers = LauncherProviderSet.Build(prefs, new Dictionary<string, Func<ILauncherProvider>>
+        var factories = new Dictionary<string, Func<ILauncherProvider>>(StringComparer.Ordinal)
         {
             // ★ W8·B1：files 必须拿到可达性 —— 它是"-32001 那两句文案"分流的唯一决策点
             [LauncherProviderRegistry.Files] =
@@ -1253,7 +1258,23 @@ internal sealed class TrayApplication : IDisposable
             [LauncherProviderRegistry.Calc] = () => new CalcProvider(),
             [LauncherProviderRegistry.Unit] = () => new UnitProvider(),
             [LauncherProviderRegistry.Encode] = () => new EncodeProvider(),
-        });
+            // W10-a：系统命令是纯表，零依赖
+            [LauncherProviderRegistry.Command] = () => new CommandProvider(),
+            // W10-a：剪贴板历史复用托盘共享的同一个 HistoryStore。**惰性建库**（Search 才碰库）
+            // —— 库损坏只让 clip 段"暂不可用"，不拖垮搜索窗创建（FR-6）。
+            [LauncherProviderRegistry.Clip] =
+                () => new ClipProvider(new ClipboardHistorySource(EnsureClipStore)),
+        };
+
+        // W10-a：来源开关（FR-5）—— clip.enabled=false ⇒ clip **静默缺席**（不占位不报错）。
+        // 判定抽成纯函数（`ApplySwitches`，selftest 可穷举）：这个开关失效的表现是"关了还在 /
+        // 没关却没了"，两者都不报错 —— 与白名单同一条纪律（静默失败登记册 S2）。
+        var effectivePrefs = prefs with
+        {
+            Providers = LauncherProviderSet.ApplySwitches(prefs.Providers, _clipEnabled),
+        };
+
+        var providers = LauncherProviderSet.Build(effectivePrefs, factories);
         _appsProvider = apps;
 
         _searchWindow = new SearchWindow(
@@ -1346,7 +1367,10 @@ internal sealed class TrayApplication : IDisposable
 
         var (prefs, _) = LauncherPrefs.FromConfig(_host!.Configs);
         var (aliases, _) = LauncherAliases.FromConfig(_host.Configs);
-        return !string.Equals(_launcherFingerprint, LauncherPrefs.Fingerprint(prefs, aliases), StringComparison.Ordinal);
+        return !string.Equals(
+            _launcherFingerprint,
+            LauncherPrefs.AssemblyFingerprint(prefs, aliases, _clipEnabled),   // W10-a：含来源开关
+            StringComparison.Ordinal);
     }
 
     /// <summary>
