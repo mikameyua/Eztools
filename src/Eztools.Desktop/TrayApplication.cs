@@ -1286,6 +1286,10 @@ internal sealed class TrayApplication : IDisposable
         // W8·B1：可点出口的宿主动作（提权启动 + 重建窗口）。不注入 ⇒ 状态行不做成可点。
         _searchWindow.CoreLaunchRequested = LaunchCoreAndRebuildAsync;
 
+        // W11-c：重建索引出口（D1 —— 改排除规则后旧索引残留的可点出路）。
+        // 不注入 ⇒ 卷清单行不装订重建出口（探针路径，不做假出口）。
+        _searchWindow.RebuildIndexRequested = RebuildIndexAsync;
+
         // 频次记录（W7-e）：只记 App 段（有消费者的唯一段，见 LauncherUsageStore 类注）；
         // identity = 目标全路径（§10.11 identity 规格）。定位（Ctrl+Enter 次动作）也算"用了"。
         if (_usage is not null)
@@ -1317,7 +1321,14 @@ internal sealed class TrayApplication : IDisposable
         }
 
         // 索引进程的 data root = 安装根（core.json 与 .ezidx 都在那里 —— 与 CLI 形态同一份索引）。
-        _searchIndex ??= new SearchIndexProcess(_host!.Paths, _host.Paths.Root);
+        // W11-a：把 index.exclude 配置原样透传（索引侧用同一份 Contracts 解析器解析）。
+        // W11-b：search.pathFilter 作为**初始**限定一并传下（运行期变更走 search.start 开窗即发，
+        // 见 ToggleSearchWindow —— 两条链都以"最后一次设置"为准，不会打架）。
+        // 改规则后需重启托盘（或索引进程）才带上新 exclude 值 —— 与 D1"重建才瘦身"同一条已知限制链。
+        // ★ 探针路径（RunProbeSearch / RunProbeSearchSummon）**不传**排除/限定值：零排除装配纪律（W11 R7）。
+        var excludeRules = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeyIndexExclude);
+        var pathFilter = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeySearchPathFilter);
+        _searchIndex ??= new SearchIndexProcess(_host!.Paths, _host.Paths.Root, excludeRules, pathFilter);
         _searchClient = new SearchIndexClient(_searchIndex);
         return _searchClient;
     }
@@ -1342,6 +1353,28 @@ internal sealed class TrayApplication : IDisposable
             _appsProvider?.InvalidateIfChanged();
 
             _searchWindow!.Toggle();
+
+            // ★ W11-b 开窗即发 search.start（协议 §3.1"搜索窗打开时"的落地；v3 查出此前
+            // **没有任何地方发过这个请求** ⇒ pathFilter 的整条链在补上它之前是空话）。
+            // 每次唤出都重读配置 ⇒ 改 pathFilter **下一次唤出即生效**（M3 判据），无需重启/重建。
+            // 空配置发空串 = 清除限定（幂等）。fire-and-forget：失败写日志，不打扰唤出（毫秒级请求）。
+            var pfValue = HostSettingsSchema.TryGetString(_host!.Configs, HostSettingsSchema.KeySearchPathFilter) ?? "";
+            var searchClient = AcquireSearchClient();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var ack = await searchClient.StartAsync(pfValue).ConfigureAwait(false);
+                    _host?.Log.Info(
+                        $"search.start 已发（pathFilter=\"{pfValue}\" anchored={ack.PathFilterAnchored}"
+                        + $"{(ack.PathFilterAnchored ? "" : $"，原因：{ack.PathFilterReason}")}）", "search");
+                }
+                catch (Exception ex)
+                {
+                    // 结构化失败已透传（-32002 等）；唤出路径不能因它失败 —— 记日志可见即可
+                    _host?.Log.Warn($"search.start 失败：{ex.Message}", "search");
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -1463,6 +1496,94 @@ internal sealed class TrayApplication : IDisposable
         }
 
         return (outcome, message);
+    }
+
+    /// <summary>
+    /// 搜索窗"重建索引"出口的宿主动作（W11-c，D1/R4）。
+    ///
+    /// <para>★ 与 <see cref="LaunchCoreAndRebuildAsync"/> 的本质差别：那里是"核心服务缺席时补启动"
+    /// （重启后**热加载**即可）；这里必须**删掉 .ezidx** —— 热加载不会瘦身（Persister 含洞落盘、
+    /// 摘除只在全量重建时发生），不删 = 重建出口名存实亡（R11 的 UI 侧）。</para>
+    ///
+    /// <para>步骤：同步回收旧索引进程（tool.stop 优雅停；**删文件前必须确认 mmap 已释放**）→
+    /// 逐个删 index/*.ezidx（计数回显）→ 重建窗口（懒启动 ⇒ 自举即全量重建 ⇒ 排除规则落盘生效）。
+    /// 失败 ⇒ 如实回显 + 恢复搜索窗（出口还在，可重试 —— W8 教训）。</para>
+    /// </summary>
+    private async Task<(CoreLaunchOutcome Outcome, string Message)> RebuildIndexAsync()
+    {
+        try
+        {
+            var oldIndex = _searchIndex;
+            var oldUsage = _usage;
+
+            // 先关窗（Closed 自愈会把 _searchWindow 置空 —— 与 RebuildSearchWindow 同款）
+            try
+            {
+                _searchWindow?.RealClose();
+            }
+            catch (Exception ex)
+            {
+                _host?.Log.Warn($"重建索引前关闭旧窗口失败（忽略）：{ex.Message}", "launcher");
+            }
+
+            _searchWindow = null;
+            _searchClient = null;
+            _searchIndex = null;
+            _usage = null;
+            _appsProvider = null;
+            _launcherFingerprint = null;
+
+            // ★ 同步回收（RebuildSearchWindow 是后台回收 —— 这里删文件等不起"可能还没退"）
+            try
+            {
+                oldUsage?.Flush(TimeSpan.FromMilliseconds(500));
+                oldIndex?.Dispose();   // tool.stop 优雅停（3s 宽限后 kill）⇒ mmap 释放
+            }
+            catch (Exception ex)
+            {
+                _host?.Log.Warn($"重建索引时回收旧索引进程失败（删除步骤有占用兜底）：{ex.Message}", "launcher");
+            }
+
+            // 删索引文件（回滚语义 = 删 index/ 即回全量重建；逐文件计数让"删了什么"可回显）
+            var indexDir = Path.Combine(_host!.Paths.Root, Eztools.Index.IndexBootstrap.IndexDirName);
+            var deleted = 0;
+            if (Directory.Exists(indexDir))
+            {
+                foreach (var f in Directory.EnumerateFiles(indexDir, "*.ezidx"))
+                {
+                    File.Delete(f);
+                    deleted++;
+                }
+            }
+            else
+            {
+                _host?.Log.Info("重建索引：index/ 目录不存在（本来就会全量重建），直接重启索引进程", "search");
+            }
+
+            EnsureSearchWindow();
+            _searchWindow?.Toggle();
+
+            _host?.Log.Info($"索引重建已开始：已删 {deleted} 个 .ezidx，索引进程重启后全量重建", "search");
+            return (CoreLaunchOutcome.Launched,
+                $"索引重建已开始（已删 {deleted} 个索引文件；全量重建完成后排除规则即落盘生效，耗时约数分钟）");
+        }
+        catch (Exception ex)
+        {
+            _host?.Log.Warn($"重建索引失败：{ex}", "search");
+
+            // 恢复搜索窗（引用已置空 ⇒ 懒重建），出口经卷摘要重装后仍在 —— 可重试
+            try
+            {
+                EnsureSearchWindow();
+            }
+            catch (Exception ex2)
+            {
+                _host?.Log.Warn($"重建索引失败后恢复搜索窗失败：{ex2.Message}", "launcher");
+            }
+
+            return (CoreLaunchOutcome.Failed,
+                $"重建索引失败：{ex.Message}（索引文件可能被占用；搜索窗已恢复，可稍后重试）");
+        }
     }
 
     /// <summary>

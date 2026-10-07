@@ -299,6 +299,12 @@ internal static class SelfTestCommand
         // 6O4) 自有子树排除（P4：DataRoot 子树不入搜索结果 —— 顺带钉住"同名不同路径不得误排"）
         await RunOwnScopeCasesAsync().ConfigureAwait(false);
 
+        // 6O5) W11-a 索引排除规则（Contracts 纯函数 + Index 锚定/传播/排空/落盘前压缩）
+        RunIndexExcludeCases();
+
+        // 6O5-b) W11-a 接线（三趟法自举编排 / 落盘瘦身对照 / 查询期双闸两条路径）
+        await RunIndexExcludeWiringCasesAsync().ConfigureAwait(false);
+
         // 6P) 边界用例（W3-e-3：超长文件名 / emoji 代理对 / 硬链接 / 符号链接 / 深层父链）
         if (!cli.GetBool("json"))
         {
@@ -2273,24 +2279,30 @@ internal static class SelfTestCommand
         }
 
         // search.start：pathFilter 校验（-32002）+ 成功路径副作用（管道复位）+ ready/totalFiles
+        // ★ W11-b：好路径现在会真正 ApplyPathFilter（tempDir 在夹具索引里锚不到 ⇒ fail-open）
+        // 并重建引擎 ⇒ PipelineResetCount 归零后重数 —— 断言改用**确定性口径**（重建 1 次 + 复位 2 次 = 2），
+        // 不再依赖前置状态。响应含 pathFilterAnchored（加法扩展）。
         {
             var tempDir = Path.Combine(Path.GetTempPath(), "ezt-selftest-pf-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
             try
             {
-                var resetsBefore = service.PipelineResetCount;
                 var r = await ExchangeAsync(service,
                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"search.start\",\"params\":{\"pathFilter\":\"D:\\\\definitely-missing-xyz\"}}",
                     $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"search.start\",\"params\":{{\"pathFilter\":\"{tempDir.Replace("\\", "\\\\")}\"}}}}",
                     "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"search.start\",\"params\":{}}")
                     .ConfigureAwait(false);
-                Report("search.start：坏路径 -32002 且状态原状；好路径 ready=true + totalFiles；副作用复位管道",
+                Report("search.start：坏路径 -32002 且状态原状；好路径 ready=true + totalFiles + 锚定结局可见；副作用复位管道",
                     r[1]?["error"]?["code"]?.GetValue<int>() == -32002
                     && r[2]?["result"]?["ready"]?.GetValue<bool>() == true
                     && r[2]?["result"]?["totalFiles"]?.GetValue<int>() == 26
+                    && r[2]?["result"]?["pathFilterAnchored"]?.GetValue<bool>() == false
+                    && (r[2]?["result"]?["pathFilterReason"]?.GetValue<string>() ?? "").Length > 0
                     && r[3]?["result"]?["ready"]?.GetValue<bool>() == true
-                    && service.PipelineResetCount == resetsBefore + 2,
-                    $"resets {resetsBefore}→{service.PipelineResetCount}");
+                    && service.PipelineResetCount == 2,
+                    $"resets={service.PipelineResetCount}（重建引擎×1 + 复位×2，确定性） "
+                        + $"anchored={r[2]?["result"]?["pathFilterAnchored"]} "
+                        + $"reason={r[2]?["result"]?["pathFilterReason"]}");
             }
             finally
             {
@@ -5338,6 +5350,661 @@ internal static class SelfTestCommand
     // 判据一律落**数字**（排除条数 / total / 命中路径）。P4 最危险的失效不是"崩"，
     // 而是"排除了不该排的" —— 用户真文件从搜索里**静默消失**（W3-e-2 的 S9′ 红线）。
     // 所以 33.4 专门钉"同名目录**不得**按名字锚定，必须整条父链对上"。
+
+    // ══════════════════════════════════════════════════════════════════════
+    // W11-a：索引排除规则（Contracts 纯函数 + Index 锚定/传播/排空/落盘前压缩）
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// 排除规则夹具。<b>★ flags 一律 0</b> —— 与生产自举逐字一致（`VolumeWorker.cs:163` 的
+    /// `TryAdd(..., flags: 0)`）。这不是省事：本波的"目录判定"正是为它设计的（§2.6），
+    /// 夹具若偷偷标上 Directory 位，就测不出"实现是不是真的没读那个位"。
+    /// </summary>
+    private static IndexStore MakeExcludeStore()
+    {
+        var store = new IndexStore();
+        AssertStoreAdd(store, 1, 1, ".", 0);                  // 卷根（自指）
+        AssertStoreAdd(store, 2, 1, "proj", 0);
+        AssertStoreAdd(store, 3, 2, "node_modules", 0);       // ★ 命中（有子项 ⇒ 判为目录）
+        AssertStoreAdd(store, 4, 3, "left-pad", 0);
+        AssertStoreAdd(store, 5, 4, "index.js", 0);           // 子孙 ⇒ 靠子树传播排除
+        AssertStoreAdd(store, 6, 2, "src", 0);
+        AssertStoreAdd(store, 7, 6, "main.ts", 0);            // 兄弟子树 ⇒ **必须保留**
+        AssertStoreAdd(store, 8, 6, "node_modules", 0);       // 嵌套同名 ⇒ 同样命中
+        AssertStoreAdd(store, 9, 8, "dep", 0);
+        AssertStoreAdd(store, 10, 1, "node_modules", 0);      // ★ 同名但**无子项**（文件/空目录）⇒ 不排除
+        AssertStoreAdd(store, 11, 1, "Docs", 0);
+        AssertStoreAdd(store, 12, 11, "note.txt", 0);
+        return store;
+    }
+
+    /// <summary>W11-a 用例：规则解析/匹配（纯函数）+ 锚定/传播/增量/排空/压缩。</summary>
+    private static void RunIndexExcludeCases()
+    {
+        // W11-1 / 11-2 MatchName：等值 + 大小写不敏感；★ **不做子串**（负向，防有人改成 Contains）
+        {
+            var ok = Eztools.Contracts.IndexExcludeRules.TryParse(
+                "node_modules;.git", out var set, out var err);
+            var insensitive = Eztools.Contracts.IndexExcludeRules.MatchName("Node_Modules", set);
+            var exact = Eztools.Contracts.IndexExcludeRules.MatchName("node_modules", set);
+            var notSubstring = Eztools.Contracts.IndexExcludeRules.MatchName("node", set);
+            var notExtended = Eztools.Contracts.IndexExcludeRules.MatchName("my_node_modules", set);
+            var other = Eztools.Contracts.IndexExcludeRules.MatchName("src", set);
+            Report(
+                "W11-1 排除规则匹配：等值 + 大小写不敏感；**不做子串**（node 不命中 node_modules）",
+                ok && err is null && insensitive && exact && !notSubstring && !notExtended && !other,
+                $"ok={ok} err={err} Node_Modules={insensitive} node={(notSubstring ? "命中(错)" : "不命中(对)")} "
+                    + $"my_node_modules={notExtended} src={other}");
+        }
+
+        // W11-3 TryParse：分号/空白/重复（大小写不敏感去重）/引号
+        {
+            var ok = Eztools.Contracts.IndexExcludeRules.TryParse(
+                " node_modules ; .git ;; NODE_MODULES ; \"obj\" ", out var set, out var err);
+            Report(
+                "W11-3 规则解析：去空项 + trim + 大小写不敏感去重",
+                ok && err is null && set.Count == 3
+                    && set.Rules[0] == "node_modules" && set.Rules[1] == ".git" && set.Rules[2] == "obj",
+                $"ok={ok} err={err} count={set.Count} rules=[{string.Join("|", set.Rules)}]");
+        }
+
+        // W11-4 / 11-5 边界：空串 ⇒ **空集（不排除任何东西）**，不是"排除一切"；默认值 "" 合法
+        {
+            var okEmpty = Eztools.Contracts.IndexExcludeRules.TryParse("", out var empty, out _);
+            var okNull = Eztools.Contracts.IndexExcludeRules.TryParse(null, out var nullSet, out _);
+            var okOnlySeps = Eztools.Contracts.IndexExcludeRules.TryParse(" ; ; ", out var seps, out _);
+            var store = MakeExcludeStore();
+            var scope = FrScope.Mark(store, empty, "排除");
+            Report(
+                "W11-4 空规则集 ⇒ 空集（**不排除任何条目**，与「排除一切」相反）；默认值 \"\" 合法",
+                okEmpty && okNull && okOnlySeps && empty.IsEmpty && nullSet.IsEmpty && seps.IsEmpty
+                    && !scope.Anchored && scope.Count == 0 && !scope.Contains(2),
+                $"empty={empty.Count} null={nullSet.Count} seps={seps.Count} "
+                    + $"anchored={scope.Anchored} count={scope.Count}");
+        }
+
+        // W11-6 超上限 / 非法规则 ⇒ **显式报错**（静默截断 = S2 家族）
+        {
+            var tooMany = string.Join(";", Enumerable.Range(1, Eztools.Contracts.IndexExcludeRules.MaxRules + 1)
+                .Select(i => $"dir{i}"));
+            var okMany = Eztools.Contracts.IndexExcludeRules.TryParse(tooMany, out _, out var errMany);
+            var okPath = Eztools.Contracts.IndexExcludeRules.TryParse(@"a\node_modules", out _, out var errPath);
+            var okSlash = Eztools.Contracts.IndexExcludeRules.TryParse("a/node_modules", out _, out var errSlash);
+            var okDot = Eztools.Contracts.IndexExcludeRules.TryParse("..", out _, out var errDot);
+            Report(
+                "W11-6 非法规则显式报错：超 32 条 / 含路径分隔符 / 相对目录名（绝不静默截断或忽略）",
+                !okMany && errMany is not null && !okPath && errPath is not null
+                    && !okSlash && errSlash is not null && !okDot && errDot is not null,
+                $"超限=({okMany},\"{errMany}\") 反斜杠=({okPath}) 正斜杠=({okSlash}) 点点=({okDot})");
+        }
+
+        // W11-7 锚定 + 子树传播：命中目录连整棵子树排除；兄弟子树与"同名无子项"必须保留
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse("node_modules", out var set, out _);
+            var store = MakeExcludeStore();
+            var scope = FrScope.Mark(store, set, "排除");
+            var expected = new ulong[] { 3, 4, 5, 8, 9 };
+            var allIn = expected.All(scope.Contains);
+            var outsiderKept = !scope.Contains(10) && !scope.Contains(2) && !scope.Contains(6)
+                && !scope.Contains(7) && !scope.Contains(11) && !scope.Contains(12);
+            Report(
+                "W11-7 锚定+传播：命中目录连子树排除（3/4/5/8/9）；兄弟与「同名无子项」保留",
+                scope.Anchored && scope.Count == 5 && allIn && outsiderKept,
+                $"anchored={scope.Anchored} count={scope.Count} allIn={allIn} outsiderKept={outsiderKept} "
+                    + $"frns=[{string.Join(",", scope.Frns.OrderBy(x => x))}] reason=\"{scope.Reason}\"");
+        }
+
+        // W11-8 USN 增量补标：挂在已排除目录下的新条目纳入；挂别处的不纳入
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse("node_modules", out var set, out _);
+            var store = MakeExcludeStore();
+            var scope = FrScope.Mark(store, set, "排除");
+            var added = scope.Extend([
+                new UsnRecord(Usn: 1, Frn: 40, ParentFrn: 9, Reason: 0, FileAttributes: 0, Name: "new.js"),
+                new UsnRecord(Usn: 2, Frn: 41, ParentFrn: 6, Reason: 0, FileAttributes: 0, Name: "other.ts"),
+            ]);
+            Report(
+                "W11-8 增量补标：挂已排除目录下的新条目纳入（1 条），别处的不纳入",
+                added == 1 && scope.Contains(40) && !scope.Contains(41) && scope.ExtendedByUsn == 1,
+                $"added={added} 40={scope.Contains(40)} 41={scope.Contains(41)} ext={scope.ExtendedByUsn}");
+        }
+
+        // W11-9 未锚定契约：Anchored=false ⇒ Contains 恒 false；且**"没找到"与"找到但为空"可区分**
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse("no_such_dir", out var set, out _);
+            var store = MakeExcludeStore();
+            var scope = FrScope.Mark(store, set, "排除");
+            Report(
+                "W11-9 未锚定：Anchored=false ⇒ Contains 恒 false，且 Reason 说得出「没匹配到任何目录」",
+                !scope.Anchored && scope.Count == 0 && !scope.Contains(3) && scope.Reason.Length > 0,
+                $"anchored={scope.Anchored} count={scope.Count} reason=\"{scope.Reason}\"");
+        }
+
+        // W11-10 排空 + 落盘前压缩（D6）：摘除数 > 0 ⇒ 压缩、洞归零、FRN 仍严格升序
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse("node_modules", out var set, out _);
+            var store = MakeExcludeStore();
+            var before = store.EntryCount;
+            var holesBefore = store.HoleCount;
+            var scope = FrScope.Mark(store, set, "排除");
+            var report = IndexPrune.Run(store, scope);
+            Report(
+                "W11-10 排空+压缩：摘除 5 条 ⇒ 压缩一次、洞归零、FRN 仍严格升序（Compact 不破不变量）",
+                report.Removed == 5 && report.Compacted && report.HolesAfter == 0
+                    && store.HoleCount == 0 && store.EntryCount == before - 5
+                    && store.ValidateSorted() && !store.Contains(3) && store.Contains(6),
+                $"removed={report.Removed} compacted={report.Compacted} holes={report.HolesAfter} "
+                    + $"entry={before}->{store.EntryCount} sorted={store.ValidateSorted()} "
+                    + $"（压缩前洞数 {holesBefore}）");
+        }
+
+        // W11-11 未锚定 / 空作用域 ⇒ 排空**什么都不做**（零报告，不猜）
+        {
+            var store = MakeExcludeStore();
+            var scope = FrScope.NotAnchored("排除", "夹具：未锚定");
+            var report = IndexPrune.Run(store, scope);
+            Report(
+                "W11-11 未锚定作用域 ⇒ 排空零动作（不删任何东西、不压缩）",
+                report.ExcludedFrns == 0 && report.Removed == 0 && !report.Compacted
+                    && store.EntryCount == 12,
+                $"excluded={report.ExcludedFrns} removed={report.Removed} compacted={report.Compacted} "
+                    + $"entry={store.EntryCount}");
+        }
+
+        // W11-12 ★ 交叉断言：字符级 MatchName 与字节级 ByteMatches 在**已知一致域**内必须一致
+        //   （两者是同一语义的两个视图；不钉住就会漂移 —— 生产走字节路，断言走字符路 = §2.43 同族）
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse(
+                "node_modules;.git;obj;Bin;深层目录", out var set, out _);
+            var names = new[]
+            {
+                "node_modules", "NODE_MODULES", "Node_Modules", ".git", ".GIT", "obj", "OBJ",
+                "bin", "BIN", "深层目录", "src", "node", "node_modules2", "my.bin", "",
+            };
+            var mismatched = new List<string>();
+            foreach (var name in names)
+            {
+                var chars = Eztools.Contracts.IndexExcludeRules.MatchName(name, set);
+                var bytes = set.ByteMatches(System.Text.Encoding.UTF8.GetBytes(name));
+                if (chars != bytes)
+                {
+                    mismatched.Add($"{name}(char={chars},byte={bytes})");
+                }
+            }
+
+            Report(
+                "W11-12 交叉断言：MatchName（字符级）与 ByteMatches（字节级）在已知一致域内逐条一致",
+                mismatched.Count == 0,
+                mismatched.Count == 0 ? $"16 个名字全部一致（规则 {set.Count} 条）" : $"分叉：[{string.Join(",", mismatched)}]");
+        }
+    }
+
+    /// <summary>
+    /// W11 接线用例（W11-13~22）：W11-a（三趟法自举编排 + 落盘瘦身 + 查询期排除闸两条路径）
+    /// 与 W11-b（`pathFilter` 路径锚定 + 包含闸 + 跨卷负向 + 协议/client 两层 + 自举初始限定）。
+    /// ★ §2.43 纪律：全扫路径与子集路径**必须各有自己的断言** —— 只覆盖一条的话，
+    /// 删掉另一条的闸仍然全绿（那正是"断言守副本、生产走另一条"的形态）。
+    /// </summary>
+    private static async Task RunIndexExcludeWiringCasesAsync()
+    {
+        // 与 RunIndexBootstrapCases 的 VolBatch 同形状：单批、done=true、卷名 Q:。
+        static JsonNode W11Batch(params (ulong Frn, ulong Parent, string Name)[] recs)
+        {
+            var arr = new JsonArray();
+            foreach (var r in recs)
+            {
+                arr.Add(new JsonObject
+                {
+                    ["frn"] = unchecked((long)r.Frn),
+                    ["parent"] = unchecked((long)r.Parent),
+                    ["name"] = r.Name,
+                });
+            }
+
+            return new JsonObject
+            {
+                ["volume"] = "Q:",
+                ["cursor"] = null,
+                ["done"] = true,
+                ["count"] = recs.Length,
+                ["records"] = arr,
+            };
+        }
+
+        // 27.6 的同款夹具 = MakeExcludeStore 的 12 条（FRN/父子关系逐字一致）。
+        static JsonNode W11Fixture() => W11Batch(
+            (1, 1, "."), (2, 1, "proj"), (3, 2, "node_modules"), (4, 3, "left-pad"),
+            (5, 4, "index.js"), (6, 2, "src"), (7, 6, "main.ts"), (8, 6, "node_modules"),
+            (9, 8, "dep"), (10, 1, "node_modules"), (11, 1, "Docs"), (12, 11, "note.txt"));
+
+        static string MakeW11Root() =>
+            Path.Combine(Path.GetTempPath(), "ezt-selftest-w11-" + Guid.NewGuid().ToString("N")[..8]);
+
+        // ── W11-13 三趟法编排集成：自举（带规则）⇒ 摘除 + 压缩 + 落盘 + 查询闸 + status 两字段 ──
+        long prunedFileSize = 0;
+        {
+            var tmp = MakeW11Root();
+            Directory.CreateDirectory(tmp);
+            try
+            {
+                var svc = new SearchService();
+                var report = await IndexBootstrap.RunAsync(svc, new IndexBootstrap.Options
+                {
+                    DataRoot = tmp,
+                    ExcludeRules = "node_modules",
+                    DriveScan = () => VolumeClassifier.Scan(new[] { new DriveDescriptor(@"Q:\", "Fixed", true, "NTFS") }),
+                    Reader = (_, _, _) => W11Fixture(),
+                    VolumeSerialResolver = _ => 0xCAFE,
+                }).ConfigureAwait(false);
+
+                // 协议面两字段（search.status，第一层）
+                var status = await ExchangeAsync(svc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"search.status\"}")
+                    .ConfigureAwait(false);
+                var result = status[1]?["result"];
+                var protoRules = result?["excludeRules"]?.GetValue<int>() ?? -1;
+                var protoFrns = result?["excludedFrns"]?.GetValue<int>() ?? -1;
+
+                // 查询闸（全扫路径）：排除对象搜不到（正向对照 = W11-15 的排除前搜得到）；非排除对象照常出
+                var qExcluded = svc.Query("left-pad", substr: true, limit: 10);
+                var qExcluded2 = svc.Query("dep", substr: true, limit: 10);
+                var qKept = svc.Query("main.ts", substr: true, limit: 10);
+                var qDir = svc.Query("proj", substr: true, limit: 10);
+
+                // 落盘瘦身（R11 主卖点断言）：重开 .ezidx ⇒ 洞归零 + 条目数 12-5=7 + 文件非空
+                var load = Persister.TryLoad(Persister.GetIndexPath(tmp, 0xCAFE), 0xCAFE);
+                prunedFileSize = load.Store is null ? -1 : new FileInfo(Persister.GetIndexPath(tmp, 0xCAFE)).Length;
+
+                Report(
+                    "W11-13 三趟法编排：自举摘除 5 条 ⇒ 压缩后洞归零、status 回传 excludeRules=1/excludedFrns=5、查询闸生效",
+                    report.VolumesBuilt == 1 && report.Errors.Count == 0
+                        && report.ExcludeRuleCount == 1 && report.PrunedEntries == 5
+                        && report.TotalEntries == 7
+                        && protoRules == 1 && protoFrns == 5
+                        && qExcluded.Total == 0 && qExcluded2.Total == 0
+                        && qKept.Total == 1 && qDir.Total == 1
+                        && load.Status == EzidxLoadStatus.Ok
+                        && load.Store is not null && load.Store.HoleCount == 0 && load.Store.EntryCount == 7
+                        && prunedFileSize > 0,
+                    $"built={report.VolumesBuilt} pruned={report.PrunedEntries} total={report.TotalEntries} "
+                        + $"status=({protoRules},{protoFrns}) 查询 left-pad={qExcluded.Total} dep={qExcluded2.Total} "
+                        + $"main.ts={qKept.Total} proj={qDir.Total} 重载=({load.Status}, 洞={load.Store?.HoleCount}, "
+                        + $"条={load.Store?.EntryCount}, 文件={prunedFileSize}B）");
+            }
+            finally
+            {
+                try { Directory.Delete(tmp, true); } catch { // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言结果（进程退出后 OS 兜底回收）
+                }
+            }
+        }
+
+        // ── W11-14 落盘瘦身对照（R11 的"文件变小"半句）：同一夹具，无规则 vs 有规则 ⇒ .ezidx 字节数下降 ──
+        {
+            var tmpPlain = MakeW11Root();
+            var tmpPruned = MakeW11Root();
+            Directory.CreateDirectory(tmpPlain);
+            Directory.CreateDirectory(tmpPruned);
+            try
+            {
+                foreach (var (root, rules) in new[] { (tmpPlain, (string?)null), (tmpPruned, (string?)"node_modules") })
+                {
+                    var svc = new SearchService();
+                    await IndexBootstrap.RunAsync(svc, new IndexBootstrap.Options
+                    {
+                        DataRoot = root,
+                        ExcludeRules = rules,
+                        DriveScan = () => VolumeClassifier.Scan(new[] { new DriveDescriptor(@"Q:\", "Fixed", true, "NTFS") }),
+                        Reader = (_, _, _) => W11Fixture(),
+                        VolumeSerialResolver = _ => 0xCAFE,
+                    }).ConfigureAwait(false);
+                }
+
+                var lenPlain = new FileInfo(Persister.GetIndexPath(tmpPlain, 0xCAFE)).Length;
+                var lenPruned = new FileInfo(Persister.GetIndexPath(tmpPruned, 0xCAFE)).Length;
+
+                Report(
+                    "W11-14 落盘瘦身对照：同一夹具下，带排除规则的 .ezidx **严格小于**无规则的（摘除后必须压缩，D6）",
+                    lenPlain > 0 && lenPruned > 0 && lenPruned < lenPlain,
+                    $"无规则={lenPlain}B 带规则={lenPruned}B 差={lenPlain - lenPruned}B");
+            }
+            finally
+            {
+                try { Directory.Delete(tmpPlain, true); } catch { // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言结果（OS 兜底回收）
+                }
+
+                try { Directory.Delete(tmpPruned, true); } catch { // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言结果（OS 兜底回收）
+                }
+            }
+        }
+
+        // ── W11-15 查询期双闸的两条路径（§2.43：全扫 + 子集各断一次）──
+        {
+            Eztools.Contracts.IndexExcludeRules.TryParse("node_modules", out var set, out _);
+            var store = MakeExcludeStore();   // 12 条全在 store（模拟热启动：摘除没跑，靠查询闸挡）
+            var scope = FrScope.Mark(store, set, "排除");
+
+            // 路径 1（全扫）：无闸 ⇒ "index" 搜得到（正向对照，R5；只命中被排除的 index.js）；
+            // 带闸 ⇒ 搜不到；非排除对象照常出（"ma" → main.ts）
+            var targets = new VolumeTarget[] { new("Q:", store) };
+            var engineBare = new QueryEngine(targets);
+            var before = engineBare.Query("index", substr: true, limit: 10);
+            var engineGated = new QueryEngine(new VolumeTarget[] { new("Q:", store, Excluded: scope) });
+            var fullScan = engineGated.Query("index", substr: true, limit: 10);
+            var kept = engineGated.Query("ma", substr: true, limit: 10);
+
+            // 路径 2（子集）：先在**无闸期**让 "index" 的命中落进管道缓存（total=1 ≤ 20%×12；
+            // 选 "index" 而不是 "de" —— 后者命中 5 条 node_modules，超缓存占比不落位），
+            // 再把排除作用域挂上（模拟"缓存落位后 USN 增量补标/作用域重算"），
+            // 同一查询重跑 ⇒ 走子集路径 ⇒ 排除闸必须把缓存里的 index.js 挡掉。
+            // ★ 引擎必须与被替换的数组**共享同一实例**（引擎只持只读引用 —— 替换的是元素，不是数组）。
+            var shared = new VolumeTarget[] { new("Q:", store) };
+            var engine = new QueryEngine(shared);
+            var seeded = engine.Query("index", substr: true, limit: 10);
+            var cacheSeeded = engine.CachedEntryCount == 1;
+            shared[0] = shared[0] with { Excluded = scope };
+            var subset = engine.Query("index", substr: true, limit: 10);
+
+            Report(
+                "W11-15 查询期双闸：全扫路径（无闸搜得到→带闸搜不到）与子集路径（缓存落位后挂闸 ⇒ 同查询变 0）各断一次",
+                before.Total == 1 && fullScan.Total == 0 && kept.Total == 1
+                    && seeded.Total == 1 && cacheSeeded && subset.Total == 0,
+                $"全扫：无闸={before.Total}→带闸={fullScan.Total}（对照 main.ts={kept.Total}）；"
+                    + $"子集：落位缓存={cacheSeeded} 首查={seeded.Total}→挂闸后={subset.Total}");
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // W11-b：pathFilter（路径锚定 + 包含闸 + 跨卷负向 + 协议/client 两层）
+        // ══════════════════════════════════════════════════════════════════
+
+        // W11-16 MarkByPath 路径锚定：按**整条链**核对 —— 同名的另一棵子树不得混入
+        {
+            var store = MakeExcludeStore();
+            var scope = FrScope.MarkByPath(store, "Q:", @"Q:\proj\node_modules");
+            var inScope = new ulong[] { 3, 4, 5 }.All(scope.Contains);
+            var notMixed = !scope.Contains(8) && !scope.Contains(9)   // src 下的同名 node_modules —— 链不同
+                && !scope.Contains(2) && !scope.Contains(10);
+            Report(
+                "W11-16 路径锚定：Q:\\proj\\node_modules ⇒ 子树 {3,4,5}；**同名异链的 {8,9} 不混入**（路径核链的价值）",
+                scope.Anchored && scope.Count == 3 && inScope && notMixed,
+                $"anchored={scope.Anchored} count={scope.Count} in={inScope} notMixed={notMixed} "
+                    + $"frns=[{string.Join(",", scope.Frns.OrderBy(x => x))}] reason=\"{scope.Reason}\"");
+
+            // 整段锚定（proj 自身 = 全子树）
+            var whole = FrScope.MarkByPath(store, "Q:", @"Q:\proj");
+            Report(
+                "W11-16b 路径锚定整段：Q:\\proj ⇒ 全子树 {2..9}（目录自身含在内）",
+                whole.Anchored && whole.Count == 8
+                    && new ulong[] { 2, 3, 4, 5, 6, 7, 8, 9 }.All(whole.Contains) && !whole.Contains(12),
+                $"anchored={whole.Anchored} count={whole.Count} reason=\"{whole.Reason}\"");
+        }
+
+        // W11-17 MarkByPath 未锚定契约 + EmptyAnchored（非限定卷的"整卷不产出"载体）
+        {
+            var store = MakeExcludeStore();
+            var missing = FrScope.MarkByPath(store, "Q:", @"Q:\definitely-missing");
+            var root = FrScope.MarkByPath(store, "Q:", @"Q:\");
+            var empty = FrScope.EmptyAnchored("限定", "夹具：非限定卷");
+            Report(
+                "W11-17 未锚定契约：索引里找不到 / 卷根 ⇒ Anchored=false + Reason；EmptyAnchored ⇒ Anchored=true+Count=0+Contains 恒 false",
+                !missing.Anchored && missing.Reason.Contains("找不到", StringComparison.Ordinal)
+                    && !root.Anchored && root.Reason.Contains("卷根", StringComparison.Ordinal)
+                    && empty.Anchored && empty.Count == 0 && !empty.Contains(1) && empty.Contains(0) == false,
+                $"missing=\"{missing.Reason}\" root=\"{root.Reason}\" empty=({empty.Anchored},{empty.Count})");
+        }
+
+        // W11-18 ApplyPathFilter 正路 + 跨卷负向（R16：限定 Q: ⇒ R: 卷整卷不产出）
+        {
+            var storeQ = MakeExcludeStore();
+            var storeR = new IndexStore();
+            AssertStoreAdd(storeR, 100, 100, "rfolder", 0);
+            AssertStoreAdd(storeR, 101, 100, "rfile.txt", 0);
+            var svc = new SearchService(new VolumeTarget[]
+            {
+                new("Q:", storeQ), new("R:", storeR),
+            }, ready: true);
+
+            // 双向正向对照（R5）：限定前两卷条目都搜得到
+            var beforeR = svc.Query("rfile", substr: true, limit: 10);
+            var beforeMain = svc.Query("main.ts", substr: true, limit: 10);
+
+            var state = svc.ApplyPathFilter(@"Q:\proj");
+
+            var afterR = svc.Query("rfile", substr: true, limit: 10);      // R: 卷 ⇒ 整卷不产出
+            var outsideQ = svc.Query("note.txt", substr: true, limit: 10); // Q: 卷子树外 ⇒ 不出
+            var insideQ = svc.Query("main.ts", substr: true, limit: 10);   // 子树内 ⇒ 照出
+            var dirItself = svc.Query("proj", substr: true, limit: 10);    // 限定目录本身 ⇒ 照出
+
+            Report(
+                "W11-18 ApplyPathFilter 正路：子树内照出、子树外不出、**R: 卷整卷不产出**（跨卷负向 R16）",
+                beforeR.Total == 1 && beforeMain.Total == 1
+                    && state.Anchored && state.Filter == @"Q:\proj"
+                    && afterR.Total == 0 && outsideQ.Total == 0
+                    && insideQ.Total == 1 && dirItself.Total == 1,
+                $"限定前：rfile={beforeR.Total} main.ts={beforeMain.Total}；限定后：rfile={afterR.Total} "
+                    + $"note.txt={outsideQ.Total} main.ts={insideQ.Total} proj={dirItself.Total} "
+                    + $"status=({state.Filter},{state.Anchored})");
+        }
+
+        // W11-19 ApplyPathFilter fail-open（D8）+ 清除
+        {
+            var storeQ = MakeExcludeStore();
+            var svc = new SearchService(new VolumeTarget[] { new("Q:", storeQ) }, ready: true);
+            var before = svc.Query("note.txt", substr: true, limit: 10);
+            var state = svc.ApplyPathFilter(@"Q:\no-such-dir");
+            var after = svc.Query("note.txt", substr: true, limit: 10);
+            var cleared = svc.ApplyPathFilter("");
+
+            // ★ 回归钉（真进程冒烟抓到）：零卷清单（--no-bootstrap 形态）+ search.start ⇒
+            // 旧实现 FirstOrDefault 返回默认结构体 ⇒ null store 漏进锚定 ⇒ ArgumentNullException 崩进程。
+            var emptySvc = new SearchService();
+            var emptyState = emptySvc.ApplyPathFilter(@"C:\Windows");
+
+            Report(
+                "W11-19 锚定失败 ⇒ fail-open（结果**不被静默裁剪**）+ Reason 可见；空串 ⇒ 清除；**零卷清单不崩**（M5 判据的机器侧）",
+                before.Total == 1 && !state.Anchored && after.Total == 1
+                    && state.Reason.Contains("找不到", StringComparison.Ordinal)
+                    && cleared.Filter.Length == 0 && !cleared.Anchored
+                    && !emptyState.Anchored && emptyState.Reason.Contains("不在索引卷清单", StringComparison.Ordinal),
+                $"限定后 reason=\"{state.Reason}\" note.txt {before.Total}→{after.Total}；清除后 filter=\"{cleared.Filter}\"；"
+                    + $"零卷=\"{emptyState.Reason}\"");
+        }
+
+        // W11-20 子集路径的包含闸（§2.43：与全扫分开断言 —— W11-15 同款手法）
+        {
+            var storeQ = MakeExcludeStore();
+            var projScope = FrScope.MarkByPath(storeQ, "Q:", @"Q:\proj");
+            var shared = new VolumeTarget[] { new("Q:", storeQ) };
+            var engine = new QueryEngine(shared);
+            var seeded = engine.Query("note", substr: true, limit: 10);  // note.txt 在子树外，唯一命中 ⇒ 落缓存
+            var cacheSeeded = engine.CachedEntryCount == 1;
+            shared[0] = shared[0] with { Include = projScope };
+            var subset = engine.Query("note", substr: true, limit: 10);  // 子集路径 + 包含闸 ⇒ 缓存里的 note.txt 被踢
+            var kept = engine.Query("main", substr: true, limit: 10);    // 非延伸查询 ⇒ 全扫 ⇒ 子树内照出
+            Report(
+                "W11-20 子集路径包含闸：缓存落位后挂限定 ⇒ 同查询变 0；非延伸查询（全扫）照常出子树内条目",
+                seeded.Total == 1 && cacheSeeded && subset.Total == 0 && kept.Total == 1,
+                $"落位缓存={cacheSeeded} 首查={seeded.Total}→挂限定后={subset.Total}（全扫对照 main={kept.Total}）");
+        }
+
+        // W11-21 协议层 search.start + search.status（真 RPC 面；卷名用**真实临时目录所在盘**，
+        // 因为协议层先做 Directory.Exists 校验 —— 夹具 store 的链条按该真实路径构建才能锚定成功）
+        {
+            var tempRoot = Path.GetTempPath();                        // 如 C:\Users\...\Temp\
+            var drive = Path.GetPathRoot(tempRoot)![..2];             // "C:"
+            var trimmed = tempRoot.TrimEnd(Path.DirectorySeparatorChar);
+            var comps = trimmed[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+
+            // 按真实临时目录的链条建夹具（FRN 无所谓，父子链 + 名字必须逐级对上）
+            var store = new IndexStore();
+            ulong parent = 5, self = 10;
+            foreach (var c in comps)
+            {
+                AssertStoreAdd(store, self, parent, c, 0);
+                parent = self;
+                self++;
+            }
+
+            var anchorFrn = parent; // 最后一段（Temp）自身
+            AssertStoreAdd(store, self, anchorFrn, "inside.txt", 0);
+            AssertStoreAdd(store, self + 1, 5, "outside.txt", 0);
+
+            var svc = new SearchService(new VolumeTarget[] { new(drive, store) }, ready: true);
+            var statusBefore = await ExchangeAsync(svc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"search.status\"}")
+                .ConfigureAwait(false);
+            var readyBefore = statusBefore[1]?["result"]?["ready"]?.GetValue<bool>();
+            var totalBefore = statusBefore[1]?["result"]?["totalFiles"]?.GetValue<int>();
+            var pfBefore = statusBefore[1]?["result"]?["pathFilter"]?.GetValue<string>();
+
+            var r = await ExchangeAsync(svc,
+                $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"search.start\",\"params\":{{\"pathFilter\":\"{drive}\\\\definitely-missing-xyz\"}}}}",
+                $"{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"search.start\",\"params\":{{\"pathFilter\":\"{trimmed.Replace("\\", "\\\\")}\"}}}}",
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"search.status\"}")
+                .ConfigureAwait(false);
+
+            // ★ 查询必须落在"设置后、清除前"的窗口里（同一批次里先清除再查 = 量的是未限定状态）
+            var queryIn = svc.Query("inside", substr: true, limit: 10);
+            var queryOut = svc.Query("outside", substr: true, limit: 10);
+
+            var rClear = await ExchangeAsync(svc,
+                "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"search.start\",\"params\":{\"pathFilter\":\"\"}}",
+                "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"search.status\"}")
+                .ConfigureAwait(false);
+
+            var statusAfter = r[4]?["result"];
+            var statusCleared = rClear[6]?["result"];
+
+            Report(
+                "W11-21 协议层：坏路径 -32002 且 ready/totalFiles **逐字不变**；合法路径 ⇒ anchored=true；status 回传三字段；空串 ⇒ 清除",
+                r[2]?["error"]?["code"]?.GetValue<int>() == -32002
+                    && statusBefore[1]?["error"] is null
+                    && readyBefore == true
+                    && r[3]?["result"]?["ready"]?.GetValue<bool>() == true
+                    && r[3]?["result"]?["pathFilterAnchored"]?.GetValue<bool>() == true
+                    && statusAfter?["pathFilter"]?.GetValue<string>() == trimmed
+                    && statusAfter?["pathFilterAnchored"]?.GetValue<bool>() == true
+                    && (statusAfter?["pathFilterReason"]?.GetValue<string>() ?? "").Length > 0
+                    && queryIn.Total == 1 && queryOut.Total == 0
+                    && statusCleared?["pathFilter"]?.GetValue<string>() == ""
+                    && statusCleared?["pathFilterAnchored"]?.GetValue<bool>() == false
+                    && pfBefore == "",
+                $"负路 code={r[2]?["error"]?["code"]}；正路 anchored={r[3]?["result"]?["pathFilterAnchored"]}；"
+                    + $"status=({statusAfter?["pathFilter"]},{statusAfter?["pathFilterAnchored"]})；"
+                    + $"查询 inside={queryIn.Total} outside={queryOut.Total}；清除后 anchored={statusCleared?["pathFilterAnchored"]}");
+        }
+
+        // W11-22 client 层 StartAsync（v3 补的"调用侧"层）：请求带 params.pathFilter、应答解析、负路 -32002 透传
+        {
+            string? capturedPf = null;
+            JsonObject? capturedParams = null;
+            var okTransport = new FakeSearchTransport
+            {
+                Responder = req =>
+                {
+                    capturedParams = req["params"] as JsonObject;
+                    capturedPf = req["params"]?["pathFilter"]?.GetValue<string>();
+                    return new JsonObject
+                    {
+                        ["jsonrpc"] = "2.0",
+                        ["id"] = req["id"]!.DeepClone(),
+                        ["result"] = new JsonObject
+                        {
+                            ["ready"] = true,
+                            ["totalFiles"] = 99,
+                            ["pathFilterAnchored"] = true,
+                            ["pathFilterReason"] = "已锚定",
+                        },
+                    };
+                },
+            };
+            var client = new Eztools.Host.Search.SearchIndexClient(okTransport);
+            var ack = await client.StartAsync(@"D:\工作").ConfigureAwait(false);
+
+            Eztools.Host.Search.SearchIndexException? bad = null;
+            try
+            {
+                var badTransport = new FakeSearchTransport
+                {
+                    Responder = req => new JsonObject
+                    {
+                        ["jsonrpc"] = "2.0",
+                        ["id"] = req["id"]!.DeepClone(),
+                        ["error"] = new JsonObject { ["code"] = -32002, ["message"] = "pathFilter 不存在或不可读" },
+                    },
+                };
+                _ = await new Eztools.Host.Search.SearchIndexClient(badTransport).StartAsync(@"D:\missing")
+                    .ConfigureAwait(false);
+            }
+            catch (Eztools.Host.Search.SearchIndexException ex)
+            {
+                bad = ex;
+            }
+
+            // null ⇒ 不带 params（纯复位，存量语义）
+            string? nullPf = "sentinel";
+            JsonObject? nullParams = new JsonObject();
+            var nullTransport = new FakeSearchTransport
+            {
+                Responder = req =>
+                {
+                    nullParams = req["params"] as JsonObject;
+                    nullPf = req["params"]?["pathFilter"]?.GetValue<string>();
+                    return new JsonObject
+                    {
+                        ["jsonrpc"] = "2.0",
+                        ["id"] = req["id"]!.DeepClone(),
+                        ["result"] = new JsonObject { ["ready"] = true, ["totalFiles"] = 1 },
+                    };
+                },
+            };
+            _ = await new Eztools.Host.Search.SearchIndexClient(nullTransport).StartAsync().ConfigureAwait(false);
+
+            Report(
+                "W11-22 StartAsync：请求带 params.pathFilter（调用侧证据）；应答解析 anchored/reason；负路 -32002 透传；null ⇒ 无 params",
+                capturedPf == @"D:\工作" && capturedParams is not null
+                    && ack.Ready && ack.TotalFiles == 99 && ack.PathFilterAnchored
+                    && bad is not null && bad.Code == -32002
+                    && nullPf is null && nullParams is null,
+                $"captured=\"{capturedPf}\" ack=({ack.Ready},{ack.TotalFiles},{ack.PathFilterAnchored}) "
+                    + $"bad={bad?.Code} nullParams={nullParams is null}");
+        }
+
+        // W11-23 自举初始限定（--path-filter）：Options.PathFilter ⇒ status 三字段 + 查询面
+        {
+            var tmp = MakeW11Root();
+            Directory.CreateDirectory(tmp);
+            try
+            {
+                var svc = new SearchService();
+                var report = await IndexBootstrap.RunAsync(svc, new IndexBootstrap.Options
+                {
+                    DataRoot = tmp,
+                    PathFilter = @"Q:\proj",
+                    DriveScan = () => VolumeClassifier.Scan(new[] { new DriveDescriptor(@"Q:\", "Fixed", true, "NTFS") }),
+                    Reader = (_, _, _) => W11Fixture(),
+                    VolumeSerialResolver = _ => 0xCAFE,
+                }).ConfigureAwait(false);
+
+                var status = await ExchangeAsync(svc, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"search.status\"}")
+                    .ConfigureAwait(false);
+                var result = status[1]?["result"];
+                var queryIn = svc.Query("main.ts", substr: true, limit: 10);
+                var queryOut = svc.Query("note.txt", substr: true, limit: 10);
+
+                Report(
+                    "W11-23 自举初始限定：--path-filter ⇒ status pathFilter/Anchored 可见 + 查询只出子树内条目",
+                    report.VolumesBuilt == 1
+                        && result?["pathFilter"]?.GetValue<string>() == @"Q:\proj"
+                        && result?["pathFilterAnchored"]?.GetValue<bool>() == true
+                        && queryIn.Total == 1 && queryOut.Total == 0,
+                    $"status=({result?["pathFilter"]},{result?["pathFilterAnchored"]}) "
+                        + $"main.ts={queryIn.Total} note.txt={queryOut.Total}");
+            }
+            finally
+            {
+                try { Directory.Delete(tmp, true); } catch { // review-guards:allow-empty-catch :: 临时目录清理失败不影响断言结果（OS 兜底回收）
+                }
+            }
+        }
+    }
 
     /// <summary>DataRoot 夹具的规范路径（与 <see cref="MakeOwnScopeStore"/> 的 FRN 布局一一对应）。</summary>
     private const string OwnScopeFixtureRoot = @"Q:\App\Eztools";

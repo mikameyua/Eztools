@@ -21,9 +21,16 @@
 #            否则打破"纯逻辑可被 selftest 测 + 编译器强制不碰 Win32"；
 #          · 两侧都禁 `Eztools.Core` 引用（NFR-2 零特权）。
 #          ★ Desktop 侧**允许** UI/Win32（图标提取、Shell、注册表本来就在那儿）。
+#    G8 🔴 生产接线守卫（W11）—— 指定生产文件里必须能找到指定接线符号（剥注释后判）：
+#          W11 的排除/限定/开窗即发各自横跨多个文件，任何一段"被人删掉/改名/没接回"都会
+#          静默退回半截实现（§2.3 的 pathFilter 正是这么来的）。★ G4 对"public 方法在
+#          生产零调用"有类级盲区（RI-5），且 selftest 里的引用会让它永远不红 ——
+#          本守卫按**文件 + 符号**逐条钉住，§11.4 的"故意删 excluded?.Contains /
+#          include?.Contains ⇒ 两条路径各红一次"由此机器化。
 #
 #  ⚠️ 故意不检查行宽（80/120 字符）：本仓已判定"不采纳"（长行是有意取舍，见
-#     docs/README.md §3.6）—— --selftest 里有一条反向断言钉住它，防后人顺手加回来。
+#     docs/README.md §3.9「代码审查报告-全面对照」行）—— --selftest 里有一条反向断言
+#     钉住它，防后人顺手加回来。
 #
 #  级别语义：🔴 FAIL 计入失败并使退出码非 0；🟡 WARN 不计入失败但**必须落数字**
 #  （不阻断 ≠ 不用管）。`--strict` 可把 WARN 升级为失败，供专项审使用。
@@ -630,6 +637,75 @@ def check_g7(root: str, hits: list):
 
 
 # ============================================================================
+# G8 生产接线守卫（W11）：指定生产文件里必须能找到指定接线符号
+#
+# 为什么存在：W11 的排除/限定/开窗即发横跨 6 个文件，任何一段被删掉（或改名没接回）
+# 都会静默退回半截实现 —— §2.3 的 pathFilter（校验后丢弃）与 §0.2.2 的"无人发
+# search.start"正是这个形态。G4 抓不到它们：那些符号有 selftest 引用（"断言守副本"
+# 家族）或不是 private（G4 只查 private 定义无调用点，RI-5 类级盲区）。
+#
+# 判据：**剥注释后**（keep_strings=True —— "--exclude" 这类needle 本身在字符串字面量里）
+# 指定文件含指定子串。文件缺失也是 FAIL（守卫不能因文件被移走而静默放过）。
+# 两条查询路径（§2.43）各占一行 —— 删掉任一条闸的代码，对应行就红。
+# ============================================================================
+G8_WIRING = [
+    # （仓库相对路径, 必须存在的符号, 消失时的人读解释）
+    ("src/Eztools.Index/IndexRpcServer.cs", "ApplyPathFilter",
+     "search.start 必须真正应用 pathFilter —— 删掉 = 退回「校验后丢弃」的半截实现（W11 §2.3 的原始缺陷）"),
+    ("src/Eztools.Index/IndexBootstrap.cs", "IndexPrune.Run",
+     "自举三趟法必须编排「排空 + 落盘前压缩」—— 删掉 = .ezidx 永不瘦身（W11-a D6/R11）"),
+    ("src/Eztools.Index/IndexBootstrap.cs", "ApplyPathFilter",
+     "自举必须应用初始限定（--path-filter 成死参数 = 调用侧断链，§0.2.2 同族）"),
+    ("src/Eztools.Index/QueryEngine.cs", "MarkByPath",
+     "pathFilter 路径锚定必须接到 SearchService —— 删掉 = 限定整条链失效（W11-b）"),
+    ("src/Eztools.Index/QueryEngine.cs", "Excluded?.Contains(ce.Frn",
+     "子集路径的排除闸 —— 删掉 = 同一查询在两条路径上结果不一致（§2.43）"),
+    ("src/Eztools.Index/QueryEngine.cs", "excluded.Contains(frns",
+     "全扫路径的排除闸 —— 删掉 = 排除对存量索引静默失效（§2.43；删掉它 selftest W11-15/18 必红）"),
+    ("src/Eztools.Index/QueryEngine.cs", "!include.Contains(ce.Frn",
+     "子集路径的限定闸 —— 删掉 = 缓存里的范围外条目漏出（§2.43）"),
+    ("src/Eztools.Index/QueryEngine.cs", "!include.Contains(frns",
+     "全扫路径的限定闸 —— 删掉 = 限定静默失效（§2.43；删掉它 selftest W11-18/21 必红）"),
+    ("src/Eztools.Index/QueryEngine.cs", "Excluded?.Extend",
+     "排除作用域的 USN 增量补标 —— 删掉 = 自举时排除、增量时不排除 = 漏排除（W11 §2.1）"),
+    ("src/Eztools.Index/QueryEngine.cs", "Include?.Extend",
+     "限定作用域的 USN 增量补标 —— 删掉 = 限定后新建文件静默丢失（W11-b）"),
+    ("src/Eztools.Desktop/TrayApplication.cs", "StartAsync",
+     "开窗即发 search.start —— 删掉 = pathFilter 无生产调用方（R14：两侧各半截的原始形态）"),
+    ("src/Eztools.Host/Search/SearchIndexProcess.cs", "--path-filter",
+     "--path-filter 进程传参链（W11 §5.2 #8；删掉 = 初始限定断链）"),
+    ("src/Eztools.Index/Program.cs", "--exclude",
+     "--exclude 参数解析（W11-a §5.2 #8；删掉 = 排除配置到不了索引进程）"),
+    ("src/Eztools.Index/Program.cs", "--path-filter",
+     "--path-filter 参数解析（W11-b；删掉 = 初始限定到不了索引进程）"),
+]
+
+
+def check_g8(root: str, hits: list):
+    for relpath, needle, msg in G8_WIRING:
+        path = os.path.join(root, relpath)
+        if not os.path.isfile(path):
+            hits.append({
+                "check": "G8", "level": "FAIL",
+                "file": relpath, "line": 0,
+                "msg": f"生产文件缺失（守卫无法验证接线）：{relpath} —— 若是改名/移动，"
+                       f"请同步更新 G8_WIRING 表；若是误删，恢复文件",
+            })
+            continue
+
+        # keep_strings=True：needle 可能本来就在字符串字面量里（--exclude 等）；
+        # 注释仍剥掉 —— "注释里提到接线"不等于"接线存在"（与 G7 同一条判据纪律）。
+        src = strip_csharp(
+            open(path, encoding="utf-8-sig", errors="replace").read(), keep_strings=True)
+        if needle not in src:
+            hits.append({
+                "check": "G8", "level": "FAIL",
+                "file": relpath, "line": 0,
+                "msg": f"{msg}（未找到符号 `{needle}` —— 已被删除/改名/移走？）",
+            })
+
+
+# ============================================================================
 # 运行器
 # ============================================================================
 CHECKS = [
@@ -640,6 +716,7 @@ CHECKS = [
     ("G5", "死产物目录（TFM 不一致）", check_g5),
     ("G6", "跳过必须计数（断言脚本）", check_g6),
     ("G7", "分层守卫（Launcher 层）", check_g7),
+    ("G8", "生产接线守卫（W11）", check_g8),
 ]
 
 
@@ -816,6 +893,56 @@ public class Bad
                "{\n"
                "    public string? Tag { get; set; }\n"
                "}\n")
+        # G8 正向夹具：QueryEngine 缺 4 个接线符号（两条 include 闸 + 增量 + 锚定）；
+        # TrayApplication.cs 整个不建（文件缺失分支）；其余接线文件符号在场（不得误伤）。
+        _write(a, "src/Eztools.Index/QueryEngine.cs", """
+namespace Eztools.Index;
+public class QueryEngine
+{
+    public void Q(int[] frns, int slot, object ce, object excluded)
+    {
+        var a = _volumes[ce.Store].Excluded?.Contains(ce.Frn) == true;
+        if (excluded is not null && excluded.Contains(frns[slot])) { }
+        if (target.Excluded is not null) { target.Excluded?.Extend(records); }
+    }
+}
+""")
+        _write(a, "src/Eztools.Index/IndexRpcServer.cs",
+               "namespace Eztools.Index;\n"
+               "public class IndexRpcServer\n"
+               "{\n"
+               "    public void S() { service.ApplyPathFilter(pf); }\n"
+               "}\n")
+        _write(a, "src/Eztools.Index/IndexBootstrap.cs",
+               "namespace Eztools.Index;\n"
+               "public class IndexBootstrap\n"
+               "{\n"
+               "    public void B() { IndexPrune.Run(store, scope); service.ApplyPathFilter(opt.PathFilter); }\n"
+               "}\n")
+        _write(a, "src/Eztools.Host/Search/SearchIndexProcess.cs",
+               "namespace Eztools.Host.Search;\n"
+               "public class SearchIndexProcess\n"
+               "{\n"
+               "    private string Args() => \" --path-filter \\\"x\\\"\";\n"
+               "}\n")
+        _write(a, "src/Eztools.Index/Program.cs",
+               "namespace Eztools.Index;\n"
+               "public class Program\n"
+               "{\n"
+               "    static int Main(string[] args)\n"
+               "    {\n"
+               "        foreach (var a in args)\n"
+               "        {\n"
+               "            switch (a)\n"
+               "            {\n"
+               "                case \"--exclude\": break;\n"
+               "                case \"--path-filter\": break;\n"
+               "                default: break;\n"
+               "            }\n"
+               "        }\n"
+               "        return 0;\n"
+               "    }\n"
+               "}\n")
 
         hits_a = run_checks(a)
         by = {}
@@ -842,6 +969,10 @@ public class Bad
         expect("G6 正向：「跳过」文案无 SKIPPED 计数必须被报出", len(by.get("G6", [])), 1)
         expect("G7 正向：Host 侧 UI/特权层各报一条 + Desktop 侧特权层报一条（UI 在 Desktop 合法）",
                len(by.get("G7", [])), 3)
+        expect("G8 正向：缺 4 个接线符号（两 include 闸 + 增量 + 锚定）+ 1 个文件缺失 ⇒ 5 条 FAIL",
+               len(by.get("G8", [])), 5)
+        expect("G8 正向：文件缺失必须报 FAIL（守卫不因文件被移走而静默放过）",
+               len([h for h in by.get("G8", []) if "生产文件缺失" in h["msg"]]), 1)
 
         # ── 夹具仓 B：每条检查的**反向**（不得误伤）─────────────────────────
         b = os.path.join(tmp, "negative")
@@ -969,6 +1100,65 @@ public class LexHard
                "{\n"
                "    internal static BitmapSource? Probe() => null;\n"
                "}\n")
+        # G8 反向夹具：全部接线文件**符号在场** ⇒ 不得报出（含字符串字面量里的 needle）
+        _write(b, "src/Eztools.Index/QueryEngine.cs", """
+namespace Eztools.Index;
+public class QueryEngine
+{
+    public void Q(int[] frns, int slot, object ce, object excluded, object include)
+    {
+        var a = _volumes[ce.Store].Excluded?.Contains(ce.Frn) == true;
+        if (excluded is not null && excluded.Contains(frns[slot])) { }
+        if (include is not null && !include.Contains(ce.Frn)) { }
+        if (include is not null && !include.Contains(frns[slot])) { }
+        MarkByPath(store, volume, pathFilter);
+        if (target.Excluded is not null) { target.Excluded?.Extend(records); }
+        if (target.Include is not null) { target.Include?.Extend(records); }
+    }
+}
+""")
+        _write(b, "src/Eztools.Index/IndexRpcServer.cs",
+               "namespace Eztools.Index;\n"
+               "public class IndexRpcServer\n"
+               "{\n"
+               "    public void S() { service.ApplyPathFilter(pf); }\n"
+               "}\n")
+        _write(b, "src/Eztools.Index/IndexBootstrap.cs",
+               "namespace Eztools.Index;\n"
+               "public class IndexBootstrap\n"
+               "{\n"
+               "    public void B() { IndexPrune.Run(store, scope); service.ApplyPathFilter(opt.PathFilter); }\n"
+               "}\n")
+        _write(b, "src/Eztools.Host/Search/SearchIndexProcess.cs",
+               "namespace Eztools.Host.Search;\n"
+               "public class SearchIndexProcess\n"
+               "{\n"
+               "    private string Args() => \" --path-filter \\\"x\\\"\";\n"
+               "}\n")
+        _write(b, "src/Eztools.Index/Program.cs",
+               "namespace Eztools.Index;\n"
+               "public class Program\n"
+               "{\n"
+               "    static int Main(string[] args)\n"
+               "    {\n"
+               "        foreach (var a in args)\n"
+               "        {\n"
+               "            switch (a)\n"
+               "            {\n"
+               "                case \"--exclude\": break;\n"
+               "                case \"--path-filter\": break;\n"
+               "                default: break;\n"
+               "            }\n"
+               "        }\n"
+               "        return 0;\n"
+               "    }\n"
+               "}\n")
+        _write(b, "src/Eztools.Desktop/TrayApplication.cs",
+               "namespace Eztools.Desktop;\n"
+               "public class TrayApplication\n"
+               "{\n"
+               "    public void T() { client.StartAsync(pf); }\n"
+               "}\n")
 
         hits_b = run_checks(b)
         byb = {}
@@ -989,6 +1179,8 @@ public class LexHard
                len(byb.get("G6", [])), 0)
         expect("G7 反向：注释与字符串里提到 UI/特权层不得报出（防误伤理由书）；Desktop 侧真用 WPF 也不报",
                len(byb.get("G7", [])), 0)
+        expect("G8 反向：全部接线符号在场（含字符串字面量里的 needle）⇒ 不得报出",
+               len(byb.get("G8", [])), 0)
         expect("★ 行宽反向断言：300 字符长行不得产生任何命中",
                len([h for h in hits_b if "LongLine" in h["file"]]), 0)
         expect("★ 词法反向断言：原始字符串 `\"\"\"` 之后的调用点不得被吞（防错位误报）",

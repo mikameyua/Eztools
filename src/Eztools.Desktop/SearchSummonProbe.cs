@@ -244,6 +244,25 @@ internal static class SearchSummonProbe
         json["ready"] = ready;
         json["readyWaitMs"] = (int)sw.ElapsedMilliseconds;
 
+        // ★ W11-b §11.2 末条断言面：探针显式发一次 search.start（空串 = 零限定装配纪律 R7）
+        // 并记录应答 —— "唤起路径确实能发 search.start 且索引侧正确应答"由此可机断，
+        // 不靠正则挖日志（这条缺失 = #10 的接线可以整个不做而全绿，W11 R14 同族）。
+        try
+        {
+            var ack = client.StartAsync("").GetAwaiter().GetResult();
+            json["startAck"] = new JsonObject
+            {
+                ["ok"] = true,
+                ["ready"] = ack.Ready,
+                ["totalFiles"] = ack.TotalFiles,
+                ["pathFilterAnchored"] = ack.PathFilterAnchored,
+            };
+        }
+        catch (SearchIndexException ex)
+        {
+            json["startAck"] = new JsonObject { ["ok"] = false, ["code"] = ex.Code, ["error"] = ex.Message };
+        }
+
         var window = new SearchWindow(client, LauncherProviderSet.FilesOnly(client));
         try
         {

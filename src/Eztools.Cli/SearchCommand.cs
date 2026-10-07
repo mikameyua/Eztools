@@ -3,6 +3,7 @@
 
 using System.Text.Json.Nodes;
 using Eztools.Host;
+using Eztools.Host.Config;
 using Eztools.Host.Search;
 
 namespace Eztools.Cli;
@@ -83,7 +84,24 @@ internal static class SearchCommand
         var paths = EztoolsPaths.Create(cli.Get("install-root"), cli.Get("config-root"));
         var waitReady = int.TryParse(cli.Get("wait-ready"), out var w) ? w : 3_000;
 
-        using var index = new SearchIndexProcess(paths, paths.Root);
+        // W11-a：CLI 的临时索引实例与宿主托盘一样带上 index.exclude 配置 ——
+        // 否则 `ezt search status` 报出的 excludedFrns 与用户真实索引是两个世界（观察面失真）。
+        // W11-b：search.pathFilter 初始限定同款透传。
+        string? excludeRules = null;
+        string? pathFilter = null;
+        try
+        {
+            using var log = new HostLog(paths, echoToConsole: false);
+            var configs = new ConfigStore(paths, log);
+            excludeRules = HostSettingsSchema.TryGetString(configs, HostSettingsSchema.KeyIndexExclude);
+            pathFilter = HostSettingsSchema.TryGetString(configs, HostSettingsSchema.KeySearchPathFilter);
+        }
+        catch (Exception)
+        {
+            // review-guards:allow-empty-catch :: 读不到配置 = 按零排除/无限定跑（status 仍如实回报）
+        }
+
+        using var index = new SearchIndexProcess(paths, paths.Root, excludeRules, pathFilter);
 
         if (SearchIndexProcess.FindIndexExe(paths) is null)
         {
@@ -162,6 +180,13 @@ internal static class SearchCommand
                 ["detectedVolumes"] = status.DetectedVolumes,
                 ["accounted"] = accounted,
                 ["conserved"] = conserved,
+                // W11-a：用户排除可见性（协议 search.status 两字段的 CLI 面 —— 两层都必须能看见）
+                ["excludeRules"] = status.ExcludeRules,
+                ["excludedFrns"] = status.ExcludedFrns,
+                // W11-b：pathFilter 限定可见性（同上）
+                ["pathFilter"] = status.PathFilter,
+                ["pathFilterAnchored"] = status.PathFilterAnchored,
+                ["pathFilterReason"] = status.PathFilterReason,
                 ["waitedMs"] = waited,
             }, cli.GetBool("compact"));
         }
@@ -171,6 +196,14 @@ internal static class SearchCommand
             ConsoleUi.Field("就绪", status.Ready ? "是" : "否（仍在自举）");
             ConsoleUi.Field("总条目", status.TotalFiles.ToString("N0"));
             ConsoleUi.Field("暂停", status.Paused ? "是（搜索结果可能过时）" : "否");
+            ConsoleUi.Field("排除规则", status.ExcludeRules > 0
+                ? $"{status.ExcludeRules} 条（作用域 {status.ExcludedFrns:N0} 条）"
+                : "未配置");
+            ConsoleUi.Field("限定目录", status.PathFilter.Length == 0
+                ? "未配置"
+                : status.PathFilterAnchored
+                    ? $"{status.PathFilter}（已锚定）"
+                    : $"{status.PathFilter}（⚠ 未生效：{status.PathFilterReason}）");
             ConsoleUi.Field("已索引卷", status.Volumes.Count == 0
                 ? "（无）"
                 : string.Join("、", status.Volumes));

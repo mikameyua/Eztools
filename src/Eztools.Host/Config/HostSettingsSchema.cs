@@ -42,6 +42,8 @@ public static class HostSettingsSchema
     public const string KeyLauncherProviders = "launcher.providers";
     public const string KeyLauncherUsage = "launcher.usage";
     public const string KeyLauncherAlias = "launcher.alias";
+    public const string KeyIndexExclude = "index.exclude";
+    public const string KeySearchPathFilter = "search.pathFilter";
 
     /// <summary>
     /// 启动器结果来源的默认值（W7-b）。
@@ -207,6 +209,22 @@ public static class HostSettingsSchema
               "description": "给应用起小名：格式「别名=应用标题或路径」，分号分隔多个（如 notepad=记事本）。输入别名即可命中该应用并获得排序加成。写错的条目会被明确拒绝（不静默忽略）。",
               "default": "",
               "x-order": 14,
+              "x-group": "搜索"
+            },
+            "index.exclude": {
+              "type": "string",
+              "title": "索引排除目录",
+              "description": "搜索索引不收录这些名字的目录（整棵子树，含其中的全部文件），分号分隔（如 node_modules;.git;bin;obj）。只支持目录名等值匹配（大小写不敏感），不支持通配符与路径；最多 32 条，含路径分隔符的写法会被明确拒绝。改规则后：重启搜索（索引进程）即从结果里消失；要让索引文件本身也瘦身需重建索引。",
+              "default": "",
+              "x-order": 15,
+              "x-group": "搜索"
+            },
+            "search.pathFilter": {
+              "type": "string",
+              "title": "搜索限定目录",
+              "description": "只显示该目录子树内的结果（如 D:\\工作文档），留空 = 全盘。须是已索引卷上的绝对路径；只支持单根目录，不支持通配符。改后下一次唤出搜索窗即生效（无需重建或重启）。目录尚未进索引时会明确提示「限定未生效」而不会静默裁剪结果。",
+              "default": "",
+              "x-order": 16,
               "x-group": "搜索"
             }
           }

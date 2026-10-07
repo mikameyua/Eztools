@@ -46,11 +46,17 @@ public sealed class MftReaderException : Exception
 }
 
 /// <summary>
-/// 一卷的枚举目标：卷盘符 + 该卷自己的 IndexStore + **自有子树作用域**（P4）。
+/// 一卷的枚举目标：卷盘符 + 该卷自己的 IndexStore + **自有子树作用域**（P4）
+/// + **用户排除作用域**（W11-a）+ **用户限定作用域**（W11-b，`pathFilter`）。
 /// <see cref="Own"/> 为 null = 不排除任何条目（与"未锚定的 <see cref="OwnScope"/>"同效，
-/// 两者都走 <c>Contains</c> 的恒 false 分支）。
+/// 两者都走 <c>Contains</c> 的恒 false 分支）。<see cref="Excluded"/> / <see cref="Include"/> 同理。
+///
+/// <para>★ <see cref="Include"/> 的判据方向与排除**相反**（"没命中的踢出去"）；
+/// "已锚定的空作用域"（<see cref="FrScope.EmptyAnchored"/>）表示"限定生效但本卷不在限定范围
+/// ⇒ 整卷不产出"（跨卷语义）。两个实例两个语义，禁止混用（W11 §4.5）。</para>
 /// </summary>
-public readonly record struct VolumeTarget(string Volume, IndexStore Store, OwnScope? Own = null);
+public readonly record struct VolumeTarget(
+    string Volume, IndexStore Store, OwnScope? Own = null, FrScope? Excluded = null, FrScope? Include = null);
 
 /// <summary>单卷枚举结果报告（全部落具体数字，供日志与断言）。</summary>
 public sealed record VolumeIndexReport(

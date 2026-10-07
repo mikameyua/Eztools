@@ -194,8 +194,33 @@ public sealed class IndexStore
         return true;
     }
 
-    // ── 反查（二分，设计方案 §3.4 决策 1）──
+    /// <summary>
+    /// 批量摘除（W11-a 的"第 2 趟"）：把集合内的 FRN 逐个标墓碑 —— **完全复用 <see cref="Remove"/>
+    /// 的语义与计数**，不新增持久化路径、不搬数据（这是 R2 能保持低风险的原因）。
+    ///
+    /// <para>返回**实际摘除数**（集合里可能含已删除 / 不存在的 FRN ⇒ 以 store 的真实回收为准）。
+    /// 顺带既是摘除数也是"要不要压缩"的判据（D6：摘除数 &gt; 0 ⇒ 落盘前 <see cref="Compact"/> 一次）。</para>
+    ///
+    /// <para>★ 注意<b>墓碑会在落盘时保留</b>（<c>Persister</c> 明文"删除留洞不改动"）⇒
+    /// 只摘除**不会**让 <c>.ezidx</c> 变小，必须配合落盘前压缩。见 <see cref="IndexPrune"/>。</para>
+    /// </summary>
+    public int SweepRemovals(IReadOnlyCollection<ulong> frns)
+    {
+        ArgumentNullException.ThrowIfNull(frns);
 
+        int removed = 0;
+        foreach (var frn in frns)
+        {
+            if (Remove(frn))
+            {
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    // ── 反查（二分，设计方案 §3.4 决策 1）──
     public bool Contains(ulong frn) => TryGet(frn, out _);
 
     public bool TryGet(ulong frn, out IndexEntry entry)

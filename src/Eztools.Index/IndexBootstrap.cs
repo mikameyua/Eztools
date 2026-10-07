@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
+using Eztools.Contracts;
 
 namespace Eztools.Index;
 
@@ -81,6 +82,21 @@ public static class IndexBootstrap
 
         /// <summary>增量补齐时长上限（ms）。null = <see cref="JournalTail.DefaultMaxMs"/>。</summary>
         public int? DrainMaxMs { get; init; }
+
+        /// <summary>
+        /// 排除规则原文（W11-a，分号分隔的目录名列表；来自宿主配置键 <c>index.exclude</c>，
+        /// 经 <c>--exclude</c> 命令行原样传下来）。null / 空 = 不排除任何目录。
+        /// 解析失败 ⇒ 记入 <see cref="BootstrapReport.Errors"/> 并按空集继续
+        /// （fail-open + 可见 —— 宁可宽，不可静默；与 D8 同一条纪律）。
+        /// </summary>
+        public string? ExcludeRules { get; init; }
+
+        /// <summary>
+        /// 初始限定根（W11-b，来自配置键 <c>search.pathFilter</c>，经 <c>--path-filter</c> 传下）。
+        /// 自举完成后应用一次（<see cref="SearchService.ApplyPathFilter"/>）；锚定失败 ⇒
+        /// fail-open（不隐藏任何结果）+ 诊断行可见原因。运行期变更走 <c>search.start</c>，不走重启（D3）。
+        /// </summary>
+        public string? PathFilter { get; init; }
     }
 
     /// <summary>自举结果（全数字，供 stderr 诊断与断言）。</summary>
@@ -94,7 +110,9 @@ public static class IndexBootstrap
         IReadOnlyList<string> Errors,
         IReadOnlyList<VolumeSyncOutcome> SyncOutcomes,
         IReadOnlyList<SkippedVolume> SkippedVolumes,
-        IReadOnlyList<FailedVolume> FailedVolumes)
+        IReadOnlyList<FailedVolume> FailedVolumes,
+        int ExcludeRuleCount = 0,   // W11-a：解析后的规则条数（0 = 未配置）
+        int PrunedEntries = 0)      // W11-a：自举末尾实际摘除的条目数（跨卷求和）
     {
         /// <summary>
         /// 检测到的卷总数 = **尝试过的**（<see cref="VolumesTotal"/>，含失败）+ **跳过的**。
@@ -169,6 +187,28 @@ public static class IndexBootstrap
         // 取不到就退化成空集 ⇒ 结果里 SelfInflicted=false（如实，不编结论）——见 CollectOwnNames 注释。
         var ownNames = JournalTail.CollectOwnNames(opt.DataRoot);
 
+        // ── W11-a：排除规则解析（整个自举只解析一次，所有卷共用同一份语义）──
+        // 解析失败 ⇒ 记入 Errors（service.LastError 可见）并按空集继续：宁可宽，不可静默（D8 同款）。
+        // 解析器与宿主配置校验用**同一份**（Eztools.Contracts.IndexExcludeRules，D7）——不会各写一套。
+        IndexExcludeRuleSet excludeRuleSet = IndexExcludeRuleSet.Empty;
+        if (!string.IsNullOrWhiteSpace(opt.ExcludeRules))
+        {
+            if (Eztools.Contracts.IndexExcludeRules.TryParse(opt.ExcludeRules, out excludeRuleSet, out var ruleError))
+            {
+                await WriteDiagAsync(opt, $"排除规则 {excludeRuleSet.Count} 条：[{string.Join(",", excludeRuleSet.Rules)}]")
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                excludeRuleSet = IndexExcludeRuleSet.Empty;
+                errors.Add($"排除规则解析失败（按空集继续，不排除任何目录）: {ruleError}");
+                await WriteDiagAsync(opt, $"排除规则解析失败（按空集继续）: {ruleError}").ConfigureAwait(false);
+            }
+        }
+
+        service.ExcludeRuleCount = excludeRuleSet.Count;
+        int prunedTotal = 0;
+
         foreach (var sk in skippedVolumes)
         {
             await WriteDiagAsync(opt, $"volume {sk.Volume}: 跳过（{sk.Reason}）——{sk.ReasonText}")
@@ -204,6 +244,8 @@ public static class IndexBootstrap
             // 缺口③：本轮补齐的取证面，跨"放弃→重建"分支保留，最后统一贴到终态 outcome 上。
             IReadOnlyList<RecordSource> drainSources = [];
             bool selfInflicted = false;
+            // W11-a：本卷的用户排除作用域（重建路 = Mark+排空+压缩；热启动路 = 仅 Mark 挂查询闸）。
+            FrScope? excludeScope = null;
 
             // ── 热启动优先（W3-a-4：.ezidx + 卷序列号匹配 ⇒ 拒绝换盘旧索引）──
             // GetIndexPath 自带 index/ 子目录（&lt;root&gt;/index/vol-&lt;serial:X16&gt;.ezidx，回滚 = 删 index/）
@@ -356,6 +398,33 @@ public static class IndexBootstrap
                             + $"更新 {report.Updates} / 升序={report.Sorted} / {report.ElapsedMs} ms")
                         .ConfigureAwait(false);
 
+                    // ── W11-a 三趟法（设计方案 §3.3/§3.4，D6）──
+                    // 第 1 趟 FrScope.Mark：按目录名规则锚定 + 子树传播（用已建好的 store，绕开鸡生蛋）；
+                    // 第 2+3 步 IndexPrune.Run：标墓碑排空 + **摘除数 > 0 就压缩一次** ——
+                    //   Persister 落盘"含洞"（删除留洞不改动），不压缩则 .ezidx 一个字节都不会少，
+                    //   "让索引变小"的主卖点会静默落空（§2.4 —— 这步不可省）。
+                    // 必须在 SaveIndex **之前**：落盘的 .ezidx 里没有它们 = 本波的目标 1。
+                    if (!excludeRuleSet.IsEmpty)
+                    {
+                        excludeScope = FrScope.Mark(store, excludeRuleSet, "排除");
+                        if (excludeScope.Anchored)
+                        {
+                            var prune = IndexPrune.Run(store, excludeScope);
+                            prunedTotal += prune.Removed;
+                            totalEntries -= prune.Removed;   // 守恒：摘掉的条目不再计入总条目
+                            await WriteDiagAsync(opt,
+                                    $"volume {volume}: 排除生效 —— {excludeScope.Reason}；"
+                                    + $"摘除 {prune.Removed} 条 / 压缩={prune.Compacted} / 落盘前洞数 {prune.HolesAfter}")
+                                .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            // 未锚定（没命中任何目录 / 索引为空）：什么都不摘，但**必须说出为什么**（§4.4）
+                            await WriteDiagAsync(opt, $"volume {volume}: 排除未生效 —— {excludeScope.Reason}")
+                                .ConfigureAwait(false);
+                        }
+                    }
+
                     // 重建完成时点查 journal：NextUsn 即无损增量起点（枚举期间的变更全部
                     // 落在 [枚举开始, NextUsn) 之外 —— journal 里还在，tail 从这里读不丢）
                     if (source is not null)
@@ -394,6 +463,20 @@ public static class IndexBootstrap
                 source?.Dispose();
             }
 
+            // ── W11-a 热启动兜底（§4.3"查询期还要留一道闸"）：重跑一次 Mark（O(n)，与
+            // OwnScope 热启动重算同款代价），把用户排除作用域挂到 VolumeTarget 上 ⇒
+            // 重启索引进程后**结果**立刻正确。只挂闸、不摘除、不落盘瘦身 —— 磁盘回收仍以
+            // 重建为唯一出口（D1），这里的闸兜住的是".ezidx 里已有的排除对象 + 规则变更"。
+            if (hotLoaded && !rebuilt && !excludeRuleSet.IsEmpty)
+            {
+                excludeScope = FrScope.Mark(store, excludeRuleSet, "排除");
+                await WriteDiagAsync(opt,
+                        excludeScope.Anchored
+                            ? $"volume {volume}: 热启动排除闸 —— {excludeScope.Reason}（磁盘瘦身待重建）"
+                            : $"volume {volume}: 排除未生效 —— {excludeScope.Reason}")
+                    .ConfigureAwait(false);
+            }
+
             // P4：自有子树作用域 —— 位置是刻意的：**在增量补齐之后**才标，
             // 于是这个集合描述的正是"此刻 store 的真实内容"，不需要任何持久化或跨表对账。
             // 代价 = 一趟 O(n)（且锚点之前的槽位整段剪掉），只对 DataRoot 所在的那一个卷非空。
@@ -403,7 +486,7 @@ public static class IndexBootstrap
                 await WriteDiagAsync(opt, $"volume {volume}: {ownScope.Reason}").ConfigureAwait(false);
             }
 
-            targets.Add(new VolumeTarget(volume, store, ownScope));
+            targets.Add(new VolumeTarget(volume, store, ownScope, excludeScope));
 
             // 缺口③：终态 outcome 统一贴取证面（跨"放弃→全量重建"分支保留下来）。
             // 只在真有记录时贴 —— 空集合贴上去只会让消费方多一层"这到底是没跑还是没记录"的歧义。
@@ -429,6 +512,18 @@ public static class IndexBootstrap
         {
             // 热替换 + ready（部分成功也算 ready：搜索先覆盖可用卷，失败卷在 lastError 可见）
             service.InstallVolumes(targets);
+
+            // W11-b：自举后的初始限定（--path-filter）。放在 InstallVolumes 之后 ——
+            // 锚定需要已建好的 store（鸡生蛋与三趟法同源）；锚定失败 fail-open + 诊断可见。
+            if (!string.IsNullOrWhiteSpace(opt.PathFilter))
+            {
+                var pfState = service.ApplyPathFilter(opt.PathFilter);
+                await WriteDiagAsync(opt,
+                        pfState.Anchored
+                            ? $"pathFilter 限定生效 —— {pfState.Reason}"
+                            : $"pathFilter 限定未生效（fail-open，不隐藏任何结果）—— {pfState.Reason}")
+                    .ConfigureAwait(false);
+            }
         }
 
         if (errors.Count > 0)
@@ -446,7 +541,8 @@ public static class IndexBootstrap
 
         sw.Stop();
         return new BootstrapReport(ordered.Count, loaded, built, failed, totalEntries,
-            sw.ElapsedMilliseconds, errors, syncOutcomes, skippedVolumes, failedVolumes);
+            sw.ElapsedMilliseconds, errors, syncOutcomes, skippedVolumes, failedVolumes,
+            excludeRuleSet.Count, prunedTotal);
     }
 
     /// <summary>落盘（构建完成时点）。游标 = 重建/补齐后的真实值；静态快照落 (0,0)（"无游标"如实持久化）。</summary>

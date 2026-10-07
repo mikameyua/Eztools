@@ -66,6 +66,25 @@ internal sealed class ProbeSearchUiTransport : ISearchIndexTransport
     /// <summary>status 被请求过几次（断言"卷清单行真的走了协议"而不是硬编码）。</summary>
     public int StatusCalls { get; private set; }
 
+    // ── W11 收口夹具（排除/限定/重建出口）────────────────────────────────────
+    // ★ R7 探针装配纪律的镜像面：这里**显式给出**非零排除夹具（真机配置为零）——
+    //   "排除段/限定段/重建出口"的渲染断言必须确定，不能依赖环境配置。
+
+    /// <summary>生效的排除规则条数（0 = 断言"排除段消失 + 重建出口不装订"的反向夹具）。</summary>
+    public int ExcludeRules { get; set; } = 1;
+
+    /// <summary>排除作用域 FRN 总数（状态行"（N 条）"的数字来源）。</summary>
+    public int ExcludedFrns { get; set; } = 12308;
+
+    /// <summary>当前限定串（非空 + 未锚定 ⇒ 状态行必须说得出原因 —— M5 的机器侧）。</summary>
+    public string PathFilter { get; set; } = @"D:\工作文档";
+
+    /// <summary>限定是否锚定成功（夹具恒 false ⇒ 渲染"⚠ 限定未生效（原因）"）。</summary>
+    public bool PathFilterAnchored { get; set; }
+
+    /// <summary>限定未生效原因（与 PathFilter 成对出现在状态行）。</summary>
+    public string PathFilterReason { get; set; } = "索引中找不到该目录（D:\\工作文档）—— 限定不生效，本次不隐藏任何结果";
+
     /// <summary>当前暂停态（夹具可写：翻成 true 后 `RefreshVolumeSummary` 应把徽标刷出来）。</summary>
     public bool Paused { get; set; }
 
@@ -154,6 +173,12 @@ internal sealed class ProbeSearchUiTransport : ISearchIndexTransport
             ["skippedVolumes"] = skipped,
             ["failedVolumes"] = failed,
             ["detectedVolumes"] = DetectedVolumes,
+            // W11 三出口之协议面（夹具值 —— 状态行/CLI 断言与此同源）
+            ["excludeRules"] = ExcludeRules,
+            ["excludedFrns"] = ExcludedFrns,
+            ["pathFilter"] = PathFilter,
+            ["pathFilterAnchored"] = PathFilterAnchored,
+            ["pathFilterReason"] = PathFilterReason,
             ["lastError"] = null,
         };
     }
@@ -256,6 +281,15 @@ internal static class SearchUiProbe
             ProbeSuppressDrift = true,   // 假传输卷清单 vs 真实盘符 → 环境依赖提示；drift 由纯函数直测断言
         };
 
+        // ★ W11-c：重建出口的**假宿主动作**（不删任何文件）—— 出口"真的接到了宿主动作"
+        //   由点击计数证明（与 launchClicks 同款判据）；未注入 ⇒ 出口不装订（假出口防线）。
+        var rebuildCalls = 0;
+        window.RebuildIndexRequested = () =>
+        {
+            rebuildCalls++;
+            return Task.FromResult((CoreLaunchOutcome.Launched, "索引重建已开始（假动作）"));
+        };
+
         try
         {
             // 真窗口、屏幕外、不抢焦点（虚拟化需要呈现源建立的真实视口）
@@ -270,7 +304,7 @@ internal static class SearchUiProbe
                 PumpTimeoutMs);
 
             var snap = window.SnapshotUi();
-            var json = Snapshot(snap, transport.StatusCalls);
+            var json = Snapshot(snap, transport.StatusCalls, transport);
 
             // ── 暂停徽标（缺口①「暂停必须可见」）───────────────────────────────
             // 快照一：未暂停（上面那份）—— 断言**不含**"已暂停"（反向夹具，防恒真）。
@@ -297,6 +331,41 @@ internal static class SearchUiProbe
             json["resumeCalls"] = transport.ResumeCalls;
             json["pausedAfterResume"] = transport.Paused;
             json["pauseText"] = window.ProbeStatusText;
+
+            // ── W11 收口（§11.3）：排除/限定三出口 + 重建出口 ─────────────────────
+            // 此时 transport.Paused=false、夹具 excludeRules=1 + 限定未生效（带原因）。
+            var w11 = new JsonObject();
+
+            // ① 正向：排除段（M>0 正向对照，R4/R5 判据）+ 限定未生效原因可见（M5 机器侧）
+            var line = window.ProbeVolumesLine;
+            w11["volumesLine"] = line;
+            w11["excludeVisible"] = line.Contains("排除 1 条规则（12,308 条）", StringComparison.Ordinal);
+            w11["pathFilterReasonVisible"] = line.Contains("限定未生效", StringComparison.Ordinal)
+                && line.Contains("索引中找不到", StringComparison.Ordinal);
+            w11["rebuildArmed"] = window.ProbeVolumesRebuildArmed;
+            w11["rebuildTooltip"] = window.ProbeVolumesToolTip;
+
+            // ② 出口真的接到了宿主动作：模拟点击 ⇒ 假重建计数 +1（未注入时点击是 no-op）
+            window.ProbeInvokeVolumesLineClick();
+            PumpUntil(() => rebuildCalls >= 1, PumpTimeoutMs);
+            w11["rebuildClicks"] = rebuildCalls;
+            w11["rebuildFeedback"] = window.ProbeStatusText;
+
+            // ③ 反向（防恒真）：无规则 ⇒ 排除段消失 + 重建出口不装订
+            transport.ExcludeRules = 0;
+            window.RefreshVolumeSummary();
+            PumpUntil(() => !window.ProbeVolumesLine.Contains("排除", StringComparison.Ordinal), PumpTimeoutMs);
+            w11["noRulesLine"] = window.ProbeVolumesLine;
+            w11["rebuildArmedNoRules"] = window.ProbeVolumesRebuildArmed;
+
+            // ④ 反向：有限制规则但无限定串 ⇒ 不含"限定"字样
+            transport.ExcludeRules = 1;
+            transport.PathFilter = "";
+            window.RefreshVolumeSummary();
+            PumpUntil(() => !window.ProbeVolumesLine.Contains("限定", StringComparison.Ordinal), PumpTimeoutMs);
+            w11["noPathFilterLine"] = window.ProbeVolumesLine;
+
+            json["w11"] = w11;
             return json;
         }
         finally
@@ -305,7 +374,8 @@ internal static class SearchUiProbe
         }
     }
 
-    private static JsonObject Snapshot(SearchUiSnapshot snap, int statusCalls)
+    private static JsonObject Snapshot(
+        SearchUiSnapshot snap, int statusCalls, ProbeSearchUiTransport transport)
     {
         var segments = new JsonArray();
         foreach (var (text, bold) in snap.FirstSegments)
@@ -376,7 +446,10 @@ internal static class SearchUiProbe
                 [.. ProbeSearchUiTransport.SkippedVolumes.Select(s =>
                     new SkippedVolumeDto(s.Volume, s.Reason, s.ReasonText))],
                 [.. ProbeSearchUiTransport.FailedVolumes.Select(f =>
-                    new FailedVolumeDto(f.Volume, f.Kind, f.Code, f.ReasonText, f.Message))]),
+                    new FailedVolumeDto(f.Volume, f.Kind, f.Code, f.ReasonText, f.Message))],
+                paused: false,
+                transport.ExcludeRules, transport.ExcludedFrns,
+                transport.PathFilter, transport.PathFilterAnchored, transport.PathFilterReason),
             ["actions"] = new JsonObject
             {
                 ["openTarget"] = open.FileName,

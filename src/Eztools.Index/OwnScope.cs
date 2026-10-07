@@ -97,7 +97,7 @@ public sealed class OwnScope
         }
 
         var scope = new OwnScope();
-        var anchor = scope.FindAnchor(store, components);
+        var anchor = FindAnchor(store, components);
         if (anchor is null)
         {
             return NotAnchored($"索引中找不到 DataRoot 子树（{dataRoot}）—— 本次不排除任何条目");
@@ -140,7 +140,10 @@ public sealed class OwnScope
     // ── 内部：锚定 ──
 
     /// <summary>找 DataRoot 自身的 FRN；找不到（或父链对不上）⇒ null。</summary>
-    private ulong? FindAnchor(IndexStore store, string[] components)
+    /// <remarks>internal static：W11-b 的 <see cref="FrScope.MarkByPath"/>（pathFilter 路径锚定）
+    /// 复用同一套"字节预筛 + 逐级核链"算法 —— **只共享算法，不共享语义**
+    ///（"自有"与"用户限定"是两件事，W11 §5.3）。</remarks>
+    internal static ulong? FindAnchor(IndexStore store, string[] components)
     {
         string leaf = components[^1];
         byte[] leafBytes = Encoding.UTF8.GetBytes(leaf);
@@ -172,8 +175,8 @@ public sealed class OwnScope
         return null;
     }
 
-    /// <summary>自叶子向上逐级核对父链名字（叶子已由字节比较命中，这里一并复核）。</summary>
-    private static bool ChainMatches(IndexStore store, ulong leafFrn, string[] components)
+    /// <summary>自叶子向上逐级核对父链名字（叶子已由字节比较命中，这里一并复核）。internal：同 <see cref="FindAnchor"/>。</summary>
+    internal static bool ChainMatches(IndexStore store, ulong leafFrn, string[] components)
     {
         ulong cur = leafFrn;
         for (int k = components.Length - 1; k >= 0; k--)
@@ -250,8 +253,8 @@ public sealed class OwnScope
 
     // ── 内部：路径与字节比较 ──
 
-    /// <summary>卷名 → 卷根（"D:" / "D:\" / "d:" ⇒ "D:\"）。非法 ⇒ null。</summary>
-    private static string? VolumeRootOf(string volume)
+    /// <summary>卷名 → 卷根（"D:" / "D:\" / "d:" ⇒ "D:\"）。非法 ⇒ null。internal：同 <see cref="FindAnchor"/>。</summary>
+    internal static string? VolumeRootOf(string volume)
     {
         if (string.IsNullOrWhiteSpace(volume))
         {
@@ -273,8 +276,8 @@ public sealed class OwnScope
         return $"{drive}:\\";
     }
 
-    /// <summary>把 dataRoot 拆成"相对卷根"的分量；不在本卷 / 就是卷根自身 ⇒ false。</summary>
-    private static bool TryRelativeComponents(string volRoot, string dataRoot, out string[] components)
+    /// <summary>把 dataRoot 拆成"相对卷根"的分量；不在本卷 / 就是卷根自身 ⇒ false。internal：同 <see cref="FindAnchor"/>。</summary>
+    internal static bool TryRelativeComponents(string volRoot, string dataRoot, out string[] components)
     {
         components = [];
 
@@ -313,8 +316,9 @@ public sealed class OwnScope
     /// UTF-8 字节比较（Windows 语义：ASCII 大小写不敏感，其余严格相等）。
     /// **零解码、零分配** —— 这是"一趟扫 200 万槽位"能便宜的前提。
     /// 用不到 <c>Fold</c>：store 存的是**原名**，全角/半角在 NTFS 里并不等价。
+    /// internal：同 <see cref="FindAnchor"/>。
     /// </summary>
-    private static bool BytesMatch(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
+    internal static bool BytesMatch(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
     {
         if (a.Length != b.Length)
         {

@@ -51,6 +51,8 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
 
     private readonly EztoolsPaths _paths;
     private readonly string? _dataRoot;
+    private readonly string? _excludeRules;
+    private readonly string? _pathFilter;
     private readonly SemaphoreSlim _roundTrip = new(1, 1);
     private readonly object _stateGate = new();
     private readonly Dictionary<long, TaskCompletionSource<JsonObject>> _pending = new();
@@ -61,6 +63,14 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
     private long _nextId;
     private long _lastExitAtMs;
     private bool _disposed;
+
+    /// <summary>
+    /// 索引进程 stderr 的**最近一行「自举完成」汇总**（W11 R6/R11 的取证面）：
+    /// 「自举完成：卷 N（热启动 x / 重建 y / 失败 z）· M 条 · T ms · 排除规则 r 条 / 摘除 p 条」。
+    /// ★ 此前 stderr 重定向后**无人读取** —— 诊断行全部丢失（R6/R11 的机器取证被挡住），
+    /// 且管道写满会**反压阻塞索引进程的自举线程**（潜伏炸弹，2026-10-07 手工 B2 发现）。
+    /// </summary>
+    public string? LastBootstrapSummary { get; private set; }
 
     /// <summary>最近一次"stdout 出现配不上的帧"的诊断（非致命：帧被丢弃并记录，不猜归属）。</summary>
     public string? LastProtocolError { get; private set; }
@@ -77,10 +87,26 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
         }
     }
 
-    public SearchIndexProcess(EztoolsPaths paths, string? dataRoot = null)
+    /// <param name="paths">安装根定位。</param>
+    /// <param name="dataRoot">索引数据根（core.json 与 .ezidx 的根；null = 进程当前目录）。</param>
+    /// <param name="excludeRules">
+    /// 排除规则原文（W11-a，配置键 <c>index.exclude</c> 的值原样透传，索引侧用**同一份**
+    /// Contracts 解析器解析 —— 两侧不会各写一套语义）。null/空 = 不传参 = 零排除：
+    /// ★ 探针装配纪律（W11 R7）—— 探针构造本类时**不传**本参数，保证 itemsCount 类
+    /// 断言不被用户规则污染。
+    /// </param>
+    /// <param name="pathFilter">
+    /// 初始限定根（W11-b，配置键 <c>search.pathFilter</c>，§5.2 #8）。null/空 = 不传参 =
+    /// 无限定（探针同款纪律）。注意这只是**初始值**：运行期限定走 <c>search.start</c>
+    /// （<see cref="SearchIndexClient.StartAsync"/>），改后下一次开窗即生效、无需重启（D3）。
+    /// </param>
+    public SearchIndexProcess(
+        EztoolsPaths paths, string? dataRoot = null, string? excludeRules = null, string? pathFilter = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _dataRoot = dataRoot;
+        _excludeRules = string.IsNullOrWhiteSpace(excludeRules) ? null : excludeRules;
+        _pathFilter = string.IsNullOrWhiteSpace(pathFilter) ? null : pathFilter;
     }
 
     /// <summary>定位 <c>ezt-index.exe</c>（与 <c>PrimitiveClient.FindCoreExe</c> 同族候选序列）。</summary>
@@ -240,6 +266,18 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
             args.Append("--data-root \"").Append(root).Append('"');
         }
 
+        if (_excludeRules is { } excl)
+        {
+            // 目录名在 Windows 上不可能含引号；剥掉只是防配置里手滑写出会破坏命令行拼装的引号
+            //（索引侧解析器本来也会把引号 trim 掉 —— 两侧语义一致）。
+            args.Append(" --exclude \"").Append(excl.Replace("\"", "")).Append('"');
+        }
+
+        if (_pathFilter is { } pf)
+        {
+            args.Append(" --path-filter \"").Append(pf.Replace("\"", "")).Append('"');
+        }
+
         var startInfo = new ProcessStartInfo
         {
             FileName = exe,
@@ -277,6 +315,7 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
         };
 
         StartReaderLoop(stdout);
+        StartStderrDrain(process.StandardError);
 
         // 协议活性证明：ping 一发。exe 缺件 / runtime 缺失 / 首帧崩坏在此当场暴露，
         // 而不是伪装成"查询无结果"（恒真假象同族）。
@@ -392,6 +431,56 @@ public sealed class SearchIndexProcess : ISearchIndexTransport, IDisposable
         {
             _pending.Remove(id, out _);
         }
+    }
+
+    /// <summary>
+    /// stderr 排水线程（W11 R6/R11 取证通道，2026-10-07 手工 B2 发现的修复）：
+    /// **持续读干** stderr —— ①「自举完成」汇总行存 <see cref="LastBootstrapSummary"/>
+    /// （排除/摘除数字的机器取证）；② 其余诊断行追加到 <c>&lt;LogsDir&gt;/index-stderr.log</c>
+    /// （"诊断一律走文件"纪律）。**不排水 = 写满管道反压阻塞索引进程**（潜伏炸弹）。
+    /// 日志上限 2 MB：超出即截断重写（本文件是诊断面，不是审计面）。
+    /// </summary>
+    private void StartStderrDrain(StreamReader stderr)
+    {
+        var logPath = Path.Combine(_paths.LogsDir, "index-stderr.log");
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(_paths.LogsDir);
+                if (File.Exists(logPath) && new FileInfo(logPath).Length > 2 * 1024 * 1024)
+                {
+                    File.Delete(logPath);   // 超 2 MB 截断重写（诊断面非审计面）
+                }
+
+                using var writer = new StreamWriter(logPath, append: true, new UTF8Encoding(false));
+                string? line;
+                while ((line = stderr.ReadLine()) is not null)
+                {
+                    if (line.Contains("自举完成", StringComparison.Ordinal))
+                    {
+                        LastBootstrapSummary = line;
+                    }
+
+                    writer.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {line}");
+                    writer.Flush();
+                }
+            }
+            catch (Exception)
+            {
+                // 排水失败（日志盘不可写等）⇒ 退化为纯排水：继续读干管道，防反压
+                try
+                {
+                    while (stderr.ReadLine() is not null)
+                    {
+                    }
+                }
+                catch
+                {
+                    // review-guards:allow-empty-catch :: 进程已死或流已关 = 排水目标已达成
+                }
+            }
+        });
     }
 
     /// <summary>进程判死：kill + 释放流 + 记退出时刻（冷却计时起点）。自带轻锁，不要求调用方持锁。</summary>

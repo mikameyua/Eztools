@@ -184,6 +184,57 @@ public sealed class SearchIndexClient
     }
 
     /// <summary>
+    /// 发起一次 <c>search.start</c>（W11-b，v3 补的"调用侧"那一层：此前该类只有
+    /// Query/Pause/Resume/Status 四个方法，**没有任何地方发过 search.start**）。
+    ///
+    /// <para><b>语义</b>（协议 §3.1）：索引侧清空递减管道；带 <paramref name="pathFilter"/> 时
+    /// 同时应用限定 —— **下一次调用即生效**，不重建索引、不重启索引进程（D3）。</para>
+    ///
+    /// <para><paramref name="pathFilter"/>：<c>null</c> = 不带该字段（纯复位）；空串 = 清除限定；
+    /// 非空 = 设置限定。目录不存在 ⇒ 服务端 <c>-32002</c> ⇒ <see cref="SearchIndexException"/>
+    ///（错误路径不改变任何状态，协议 §4）。锚定失败（磁盘存在但索引里没有）**不是**错误 ——
+    /// 响应里 <see cref="SearchStartResponse.PathFilterAnchored"/>=false + 原因（D8 fail-open）。</para>
+    /// </summary>
+    public async Task<SearchStartResponse> StartAsync(string? pathFilter = null, CancellationToken ct = default)
+    {
+        var epoch = IssueEpoch();   // 管道被清 ⇒ 在途查询结果一并作废
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = $"t{epoch}",
+            ["method"] = ProtocolMethods.SearchStart,
+        };
+        if (pathFilter is not null)
+        {
+            request["params"] = new JsonObject { ["pathFilter"] = pathFilter };
+        }
+
+        var response = await _transport.RoundTripAsync(request, ct).ConfigureAwait(false);
+        if (response["error"] is { } error)
+        {
+            throw new SearchIndexException(
+                error["code"]?.GetValue<int>() ?? RpcErrorCodes.InternalError,
+                error["message"]?.GetValue<string>() ?? "ezt-index 返回未知错误");
+        }
+
+        var result = response["result"] as JsonObject
+            ?? throw new SearchIndexException(
+                RpcErrorCodes.InternalError, "ezt-index search.start 响应缺 result（协议破坏）");
+
+        if (result["ready"] is null)
+        {
+            throw new SearchIndexException(
+                RpcErrorCodes.InternalError, "ezt-index search.start 响应缺 ready 字段（协议破坏）");
+        }
+
+        return new SearchStartResponse(
+            result["ready"]!.GetValue<bool>(),
+            result["totalFiles"]?.GetValue<int>() ?? 0,
+            result["pathFilterAnchored"]?.GetValue<bool>() ?? false,
+            result["pathFilterReason"]?.GetValue<string>());
+    }
+
+    /// <summary>
     /// 查询索引状态（协议 <c>search.status</c>，W3-e-2 起用于取卷清单与**跳过清单**）。
     /// status 无 epoch（不是查询，不参与乱序配对）。
     /// </summary>
@@ -288,7 +339,15 @@ public sealed class SearchIndexClient
             skipped,
             failed,
             result["detectedVolumes"]?.GetValue<int>() ?? 0,
-            ownScopes);
+            ownScopes,
+            // W11-a：用户排除可见性（协议 search.status 的 excludeRules / excludedFrns）。
+            // 白名单式解析会静默吞字段（RI-3）—— 这里与协议层双层各测一次。
+            result["excludeRules"]?.GetValue<int>() ?? 0,
+            result["excludedFrns"]?.GetValue<int>() ?? 0,
+            // W11-b：pathFilter 限定可见性（同上两层纪律）
+            result["pathFilter"]?.GetValue<string>() ?? "",
+            result["pathFilterAnchored"]?.GetValue<bool>() ?? false,
+            result["pathFilterReason"]?.GetValue<string>() ?? "未设置");
     }
 }
 
@@ -302,7 +361,11 @@ public sealed record SkippedVolumeDto(string Volume, string Reason, string Reaso
 public sealed record FailedVolumeDto(
     string Volume, string Kind, int Code, string ReasonText, string Message);
 
-/// <summary>索引状态 DTO（协议 search.status 的宿主消费形态，W3-e-2 扩展）。</summary>
+/// <summary>
+/// 索引状态 DTO（协议 search.status 的宿主消费形态，W3-e-2 扩展；W11-a 排除两字段 +
+/// W11-b 限定三字段 —— ★ sealed record 加字段是破坏性变更，全部构造点已同步
+/// （本文件 StatusAsync 是唯一构造点））。
+/// </summary>
 public sealed record SearchStatusDto(
     bool Ready,
     int TotalFiles,
@@ -311,7 +374,22 @@ public sealed record SearchStatusDto(
     IReadOnlyList<SkippedVolumeDto> Skipped,
     IReadOnlyList<FailedVolumeDto> Failed,
     int DetectedVolumes,
-    IReadOnlyList<OwnScopeDto> OwnScopes);
+    IReadOnlyList<OwnScopeDto> OwnScopes,
+    int ExcludeRules = 0,
+    int ExcludedFrns = 0,
+    string PathFilter = "",
+    bool PathFilterAnchored = false,
+    string PathFilterReason = "未设置");
+
+/// <summary>
+/// search.start 应答 DTO（W11-b）。<see cref="PathFilterAnchored"/>=false ⇒ 限定闸未生效
+/// （D8 fail-open），<see cref="PathFilterReason"/> 说明为什么 —— 调用方（开窗路径）必须让它可见。
+/// </summary>
+public sealed record SearchStartResponse(
+    bool Ready,
+    int TotalFiles,
+    bool PathFilterAnchored,
+    string? PathFilterReason);
 
 /// <summary>
 /// 自有子树作用域状态（P4）。<see cref="Anchored"/>=false ⇒ 该卷本次**没有排除任何条目**，

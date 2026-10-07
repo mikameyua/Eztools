@@ -214,6 +214,22 @@ public sealed class QueryEngine
                     continue;
                 }
 
+                // 用户排除闸（W11-a，与自有子树同款纪律）：全扫路径有缓存 ⇒ 这里的集合可能
+                // 含"缓存落位之后才被排除的条目"（USN 增量补标 / 作用域换新），不判 = 两条路径
+                // 结果不一致（§2.43：断言必须分别覆盖两条路径，删掉这条仍可能全绿）。
+                if (_volumes[ce.Store].Excluded?.Contains(ce.Frn) == true)
+                {
+                    continue;
+                }
+
+                // 用户限定闸（W11-b，`pathFilter`，判据方向与排除**相反**）：
+                // "没命中的踢出去"。子集路径与全扫必须同口径（§2.43 同上）。
+                var include = _volumes[ce.Store].Include;
+                if (include is not null && !include.Contains(ce.Frn))
+                {
+                    continue;
+                }
+
                 int slot = store.FindSlot(ce.Frn);
                 if (slot < 0)
                 {
@@ -251,7 +267,8 @@ public sealed class QueryEngine
                     continue; // 该卷必然 0 命中，整卷跳过
                 }
 
-                ScanStore(si, store, _volumes[si].Own, foldedQuery, mode, limit,
+                ScanStore(si, store, _volumes[si].Own, _volumes[si].Excluded, _volumes[si].Include,
+                    foldedQuery, mode, limit,
                     ref total, ref heap, ref allHits, ref cacheOverflowed, cacheCap);
             }
 
@@ -316,7 +333,8 @@ public sealed class QueryEngine
     // ── 扫描 ──
 
     private void ScanStore(
-        int storeIndex, IndexStore store, OwnScope? own, ReadOnlySpan<char> foldedQuery, MatchMode mode, int limit,
+        int storeIndex, IndexStore store, OwnScope? own, FrScope? excluded, FrScope? include,
+        ReadOnlySpan<char> foldedQuery, MatchMode mode, int limit,
         ref int total, ref MinHeap heap, ref List<CachedEntry>? allHits, ref bool cacheOverflowed, int cacheCap)
     {
         Span<char> nameBuf = stackalloc char[NameBufferChars];
@@ -339,6 +357,22 @@ public sealed class QueryEngine
             // 的自相矛盾（这正是当初否决"只在 Top-K 之后过滤"的原因）。
             // 放在解码之前：被排除的条目连名字都不用解，扫描段反而更省。
             if (own is not null && own.Contains(frns[slot]))
+            {
+                continue;
+            }
+
+            // 用户排除闸（W11-a）：同款位置与同款理由 —— total++ 之前、解码之前。
+            // 全量重建时被摘除的条目已不在 store（墓碑 continue 在更上面）；
+            // 这道闸兜住的是**热启动重算的作用域**与 **USN 增量补标**进来的条目（§4.3 双闸）。
+            if (excluded is not null && excluded.Contains(frns[slot]))
+            {
+                continue;
+            }
+
+            // 用户限定闸（W11-b，`pathFilter`）：方向与排除相反 —— "没命中的踢出去"。
+            // 已锚定的空作用域（非限定卷）⇒ Contains 恒 false ⇒ 整卷不产出（跨卷语义）。
+            // 同样在 total++ / 解码之前：被限定的条目连名字都不用解。
+            if (include is not null && !include.Contains(frns[slot]))
             {
                 continue;
             }
@@ -876,6 +910,7 @@ public sealed record OwnScopeStatus(
 public sealed class SearchService
 {
     private readonly object _gate = new();
+    private readonly QueryOptions _options;
     private QueryEngine _engine;
 
     /// <summary>
@@ -890,7 +925,8 @@ public sealed class SearchService
     {
         Volumes = volumes ?? throw new ArgumentNullException(nameof(volumes));
         Ready = ready;
-        _engine = new QueryEngine(volumes, options);
+        _options = options ?? new QueryOptions();
+        _engine = new QueryEngine(volumes, _options);
     }
 
     /// <summary>
@@ -916,6 +952,19 @@ public sealed class SearchService
             v.Own?.Reason ?? "未标记")).ToArray();
 
     /// <summary>
+    /// 生效的排除规则条数（W11-a，自举写入；<see cref="IndexBootstrap"/> 按解析后的规则集赋值）。
+    /// 0 = 未配置规则（与"配了但一条没命中"是两件事 —— 后者由卷级作用域的 Reason 表达）。
+    /// </summary>
+    public int ExcludeRuleCount { get; set; }
+
+    /// <summary>
+    /// 用户排除作用域内的 FRN 总数（W11-a，跨卷求和；协议 <c>search.status.excludedFrns</c>）。
+    /// 热启动场景下 store 里可能仍有这些条目（重建才瘦身，D1）—— 这道查询期闸就是为它准备的。
+    /// </summary>
+    public int ExcludedFrns =>
+        Volumes.Sum(v => v.Excluded is { Anchored: true } s ? s.Count : 0);
+
+    /// <summary>
     /// 自举完成后热替换卷清单与引擎（W3-b-4：空构造 → 建索引 → 一次交换进入可查询态）。
     /// 置 <see cref="Ready"/>=true。RPC 主循环在交换瞬间可能正拿着旧引擎查询 —— 引擎对象
     /// 不可变引用仍有效，本次查询在旧快照上完成（一致性无损；下一次查询用新引擎）。
@@ -925,9 +974,16 @@ public sealed class SearchService
         lock (_gate)
         {
             Volumes = volumes ?? throw new ArgumentNullException(nameof(volumes));
-            _engine = new QueryEngine(volumes);
+            _engine = new QueryEngine(volumes, _options);
             Ready = true;
         }
+    }
+
+    /// <summary>重建引擎的统一出口（<see cref="ApplyPathFilter"/> 用；options 不再丢失）。</summary>
+    private void ReplaceVolumesLocked(IReadOnlyList<VolumeTarget> volumes)
+    {
+        Volumes = volumes;
+        _engine = new QueryEngine(volumes, _options);
     }
 
     /// <summary>索引内文件总数（诊断用，非查询结果数）。</summary>
@@ -1026,6 +1082,12 @@ public sealed class SearchService
                 // P4：自有子树作用域随增量一起维护（快照之后新建于 DataRoot 下的文件才不会被漏排除）。
                 // **先于 Apply 调用**：只看记录的 (Frn, ParentFrn)，与 store 是否已变无关。
                 target.Own?.Extend(records);
+
+                // W11-a：用户排除作用域同款维护 —— 自举时排除、增量时不排除 = 漏排除（§2.1）。
+                target.Excluded?.Extend(records);
+
+                // W11-b：用户限定作用域同款维护 —— 限定后新建于子树内的文件不补标 = 静默丢失。
+                target.Include?.Extend(records);
                 applier.Apply(records, target.Store);
                 return true;
             }
@@ -1045,4 +1107,108 @@ public sealed class SearchService
             }
         }
     }
+
+    // ── W11-b：pathFilter 限定（查询期"包含闸"的运行期状态机）──
+
+    /// <summary>当前 `pathFilter` 限定状态（<see cref="ApplyPathFilter"/> 写入；协议面回传）。</summary>
+    public PathFilterState PathFilterStatus { get; private set; } = new("", false, "未设置");
+
+    /// <summary>
+    /// 应用 `pathFilter` 限定（W11-b，D3：**下一次 `search.start` 即生效** —— 不重建、不重启）。
+    ///
+    /// <para><b>语义（§4.5）</b>：空串 = 清除限定（全盘可见）；非空 = 只返回落在该子树内的条目。
+    /// **跨卷**：限定 <c>D:\...</c> 时 D: 卷只留该子树，**其他卷整卷不产出**
+    /// （挂"已锚定的空作用域"，否则"限定"名存实亡）。</para>
+    ///
+    /// <para><b>锚定失败（D8）</b>：fail-open —— 包含闸**不生效**（不隐藏任何结果），
+    /// 但 <see cref="PathFilterStatus"/> 必须带 <c>Anchored=false</c> + 原因（宁可宽，不可静默）。</para>
+    ///
+    /// <para>重建引擎 ⇒ 递减管道一并清空（与 search.start 的 ResetPipeline 副作用同向；
+    /// 调用方随后再调一次 ResetPipeline 也不冲突 —— 幂等）。</para>
+    /// </summary>
+    public PathFilterState ApplyPathFilter(string? pathFilter)
+    {
+        lock (_gate)
+        {
+            var filter = (pathFilter ?? "").Trim();
+            if (filter.Length == 0)
+            {
+                ReplaceVolumesLocked(Volumes.Select(v => v with { Include = null }).ToArray());
+                PathFilterStatus = new PathFilterState("", false, "未设置（限定已清除，全盘可见）");
+                return PathFilterStatus;
+            }
+
+            // 卷归属：绝对路径 + 根是"X:\" 形态才能定位到某个已索引卷
+            string? drive = null;
+            try
+            {
+                if (Path.IsPathRooted(filter))
+                {
+                    var root = Path.GetPathRoot(Path.GetFullPath(filter));
+                    if (root is { Length: >= 2 } && root[1] == ':')
+                    {
+                        drive = root[..1].ToUpperInvariant() + ":";
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or System.Security.SecurityException
+                or NotSupportedException or PathTooLongException)
+            {
+                drive = null; // 非法路径 ⇒ 按下方的"不是绝对路径"分支 fail-open
+            }
+
+            // ★ 手写查找而非 FirstOrDefault：VolumeTarget 是 struct，空卷清单时 FirstOrDefault
+            // 返回**默认结构体**（非 null）⇒ "没找到"判不出来 ⇒ null store 会一路漏进锚定
+            //（真进程冒烟抓到过：--no-bootstrap + search.start ⇒ ArgumentNullException 崩进程）。
+            VolumeTarget? target = null;
+            if (drive is not null)
+            {
+                foreach (var v in Volumes)
+                {
+                    if (string.Equals(v.Volume, drive, StringComparison.OrdinalIgnoreCase))
+                    {
+                        target = v;
+                        break;
+                    }
+                }
+            }
+
+            if (drive is null || target is null)
+            {
+                ReplaceVolumesLocked(Volumes.Select(v => v with { Include = null }).ToArray());
+                PathFilterStatus = new PathFilterState(filter, false, drive is null
+                    ? $"pathFilter 不是绝对路径（{filter}）—— 限定不生效"
+                    : $"pathFilter 所在卷 {drive} 不在索引卷清单 —— 限定不生效");
+                return PathFilterStatus;
+            }
+
+            var scope = FrScope.MarkByPath(target.Value.Store, target.Value.Volume, filter);
+            if (!scope.Anchored)
+            {
+                // D8：fail-open —— 不隐藏任何结果，但原因必须可见（协议 + 状态行）
+                ReplaceVolumesLocked(Volumes.Select(v => v with { Include = null }).ToArray());
+                PathFilterStatus = new PathFilterState(filter, false, scope.Reason);
+                return PathFilterStatus;
+            }
+
+            // 限定卷 = 该子树；其他卷 = 已锚定的空作用域 ⇒ 整卷不产出（跨卷负向语义，R16）
+            var suppressed = FrScope.EmptyAnchored(
+                "限定", $"非限定卷 —— pathFilter 在 {drive}，本卷整卷不产出结果");
+            ReplaceVolumesLocked(Volumes
+                .Select(v => string.Equals(v.Volume, drive, StringComparison.OrdinalIgnoreCase)
+                    ? v with { Include = scope }
+                    : v with { Include = suppressed })
+                .ToArray());
+            PathFilterStatus = new PathFilterState(filter, true, scope.Reason);
+            return PathFilterStatus;
+        }
+    }
 }
+
+/// <summary>
+/// `pathFilter` 限定状态（W11-b 观测面；协议 <c>search.status</c> 的
+/// <c>pathFilter / pathFilterAnchored / pathFilterReason</c> 三字段的内存形态）。
+/// <see cref="Anchored"/>=false 时**限定闸不生效**（D8 fail-open：不隐藏任何结果），
+/// <see cref="Reason"/> 说明为什么 —— "没生效"必须可见，不能与"生效了但没声音"同形。
+/// </summary>
+public sealed record PathFilterState(string Filter, bool Anchored, string Reason);

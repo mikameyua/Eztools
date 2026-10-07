@@ -679,7 +679,9 @@ public sealed class SearchWindow : Window
         }
 
         var text = DescribeVolumes(
-            status.Volumes.Count, status.TotalFiles, status.Skipped, status.Failed, status.Paused);
+            status.Volumes.Count, status.TotalFiles, status.Skipped, status.Failed, status.Paused,
+            status.ExcludeRules, status.ExcludedFrns,
+            status.PathFilter, status.PathFilterAnchored, status.PathFilterReason);
 
         // ★ W9 陈旧探测：Ready=true **不等于**索引在更新 —— 自举快照在而核心服务随后退出时，
         //   查询一切正常、USN 增量却无人应用（旧文件搜得到、新文件搜不到且无从察觉）。
@@ -708,8 +710,31 @@ public sealed class SearchWindow : Window
         _volumesLine.Text = text;
         _volumesLine.Opacity = status.Paused ? 1.0 : 0.55;
         _volumesLine.FontWeight = status.Paused ? FontWeights.SemiBold : FontWeights.Normal;
-        _volumesLine.Cursor = status.Paused ? Cursors.Hand : Cursors.Arrow;
-        _volumesLine.ToolTip = status.Paused ? "点击恢复索引更新" : null;
+
+        // ── 卷清单行的可点动作（三态分发，W11-c）────────────────────────────
+        // 暂停态优先（既有出口，缺口①）；其次 W11 重建出口：**Ready=true 时也必须存在**
+        //（W9 教训 —— 出口只在不健康态出现 = 用户最需要它的时刻反而没有）。
+        // 装订条件：配置了排除规则（excludeRules>0）且宿主注入了重建动作；二者缺一 ⇒ 不可点
+        //（没规则时"重建"没有语义，注入缺失时点击无动作 = 假出口）。
+        if (status.Paused)
+        {
+            _volumesRebuildArmed = false;
+            _volumesLine.Cursor = Cursors.Hand;
+            _volumesLine.ToolTip = "点击恢复索引更新";
+        }
+        else if (status.ExcludeRules > 0 && RebuildIndexRequested is not null)
+        {
+            _volumesRebuildArmed = true;
+            _volumesLine.Cursor = Cursors.Hand;
+            _volumesLine.Opacity = 1.0;
+            _volumesLine.ToolTip = RebuildTooltip;
+        }
+        else
+        {
+            _volumesRebuildArmed = false;
+            _volumesLine.Cursor = Cursors.Arrow;
+            _volumesLine.ToolTip = null;
+        }
 
         // 状态行同步：陈旧 ⇒ 提示立即上墙（不等第一次打字）；刚恢复 ⇒ 清掉上一轮的陈旧提示，
         // 否则窗口开着时核心服务回来了，旧提示会一直挂到下次查询才消失（"显示了但显示的是错的"）。
@@ -920,7 +945,8 @@ public sealed class SearchWindow : Window
     }
 
     /// <summary>
-    /// 点卷清单行 = 恢复索引（**只在暂停时可点**）。
+    /// 点卷清单行 = 按**当前装订的动作**分发（W11-c）：暂停态 ⇒ 恢复索引（既有出口，缺口①）；
+    /// 有排除规则 ⇒ 重建索引（D1 的出口 —— 改规则后旧索引残留的可点出路）。
     /// 刻意不做"未暂停时点击即暂停"：那会让误点变成一个**静默**的停更操作 ——
     /// 暂停是低频动作，必须走显式入口（托盘菜单 / CLI），见缺口① 的设计取舍。
     /// </summary>
@@ -931,7 +957,71 @@ public sealed class SearchWindow : Window
             return;
         }
 
+        if (_volumesRebuildArmed)
+        {
+            _ = RunRebuildAsync();
+            return;
+        }
+
         _ = SetPauseAsync(false);
+    }
+
+    /// <summary>
+    /// 重建索引出口的宿主动作（W11-c，由托盘注入）。**由托盘注入**：删索引文件 + 重启索引进程
+    /// 是宿主级编排（同 <see cref="CoreLaunchRequested"/> 的理由）；未注入 ⇒ 重建出口不装订
+    ///（探针未注入的路径就是不可点，不做假出口）。
+    /// </summary>
+    internal Func<Task<(CoreLaunchOutcome Outcome, string Message)>>? RebuildIndexRequested { get; set; }
+
+    /// <summary>重建进行中的互斥（与核心服务启动共用一把 —— 两者都会重建窗口，不能并发）。</summary>
+    private bool _volumesRebuildArmed;
+
+    /// <summary>
+    /// 执行重建（W11-c）。**失败也要把出口留着**（W8 教训同款）—— 用户重试的路不能断；
+    /// 成功路径会在回调里重建窗口 ⇒ 本实例已被关闭（与 LaunchCoreAsync 同款判据）。
+    /// </summary>
+    private async Task RunRebuildAsync()
+    {
+        if (_launchBusy || RebuildIndexRequested is null)
+        {
+            return;
+        }
+
+        _launchBusy = true;
+        try
+        {
+            // 即时反馈：重建是分钟级操作，没有反馈用户会连点
+            _volumesLine.Text = "正在重建索引（停索引进程 → 删索引文件 → 全量重建）…";
+            _volumesLine.ToolTip = null;
+
+            var (outcome, message) = await RebuildIndexRequested().ConfigureAwait(true);
+
+            if (_disposed)
+            {
+                return;   // 成功 ⇒ 托盘已重建窗口，本实例已关闭（往废窗上写字 = 留假证据）
+            }
+
+            _status.Text = message;
+            if (outcome is not (CoreLaunchOutcome.Launched or CoreLaunchOutcome.AlreadyRunning))
+            {
+                // 失败 ⇒ 回滚本行显示并重装卷摘要（重建出口**必须还在** —— W8/W9 同款纪律）
+                RefreshVolumeSummary();
+            }
+        }
+        catch (Exception ex)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _status.Text = $"重建索引失败：{ex.Message}";
+            RefreshVolumeSummary();   // 出口还在（ToolTip 由 ApplyVolumeSummary 重新装订）
+        }
+        finally
+        {
+            _launchBusy = false;
+        }
     }
 
     /// <summary>暂停/恢复索引（托盘与状态行共用）。失败**显式回显**到状态行，不静默。</summary>
@@ -974,9 +1064,14 @@ public sealed class SearchWindow : Window
 
     /// <summary>
     /// 卷清单摘要文案（**纯函数**，探针与 UI 共用 —— 断言文本时验的就是这一份）。
-    /// 三段式：**已索引 / 跳过 / 失败**。有跳过卷时**必须**列出原因：只说"跳过了 1 个卷"
-    /// 等于把问题原样丢回给用户；失败卷同理，而且**必须与跳过分开说** ——
+    /// 多段式：**已索引 / 跳过 / 失败 / 排除（W11-a）/ 限定（W11-b）**。有跳过卷时**必须**列出原因：
+    /// 只说"跳过了 1 个卷"等于把问题原样丢回给用户；失败卷同理，而且**必须与跳过分开说** ——
     /// "没试过"（跳过）与"试了没成"（失败）是两个不同的下一步动作（改配置 vs 修环境）。
+    ///
+    /// <para>W11 三出口之**状态行**（§4.4）：排除段只在配置了规则时出现（<paramref name="excludeRules"/>
+    /// &gt; 0），数字必须与协议/CLI 完全同源（同一份 <see cref="SearchStatusDto"/>）；限定段带
+    /// <paramref name="pathFilter"/> 时必须出现，**未锚定（fail-open）时必须说出原因** ——
+    /// "限定没生效但不说" = 用户以为已限定，结果却搜到范围外的文件（S2 家族）。</para>
     ///
     /// <paramref name="paused"/> = true 时把徽标放在**最前面**：这行有
     /// <see cref="TextTrimming.CharacterEllipsis"/>，放末尾会被卷清单挤掉 ——
@@ -987,7 +1082,12 @@ public sealed class SearchWindow : Window
         int totalFiles,
         IReadOnlyList<SkippedVolumeDto> skipped,
         IReadOnlyList<FailedVolumeDto> failed,
-        bool paused = false)
+        bool paused = false,
+        int excludeRules = 0,
+        int excludedFrns = 0,
+        string pathFilter = "",
+        bool pathFilterAnchored = false,
+        string pathFilterReason = "")
     {
         var text = $"已索引 {indexedCount} 个卷 · {totalFiles:N0} 项";
         if (skipped.Count > 0)
@@ -1004,8 +1104,25 @@ public sealed class SearchWindow : Window
             text += $" · 索引失败 {failed.Count} 个卷（{detail}）";
         }
 
+        if (excludeRules > 0)
+        {
+            // ★ R4/R5 判据来源：这行数字随规则变化 —— 改规则后看不到变化 = 又一次"说假话"
+            text += $" · 排除 {excludeRules} 条规则（{excludedFrns:N0} 条）";
+        }
+
+        if (pathFilter.Length > 0)
+        {
+            text += pathFilterAnchored
+                ? $" · 限定 {pathFilter}"
+                : $" · ⚠ 限定未生效（{pathFilterReason}）";
+        }
+
         return paused ? $"索引已暂停（结果可能过时，点此恢复） · {text}" : text;
     }
+
+    /// <summary>重建出口的悬停提示（D1/R10：代价必须写清 —— 用户有权知道点下去会发生什么）。</summary>
+    internal const string RebuildTooltip =
+        "点击重建索引（先停索引进程并删除索引文件，再全量重建；耗时约数分钟，期间结果暂不可搜）";
 
     /// <summary>可见则隐藏，否则唤出（热键二段语义：再按一次收起）。</summary>
     public void Toggle()
@@ -1554,6 +1671,15 @@ public sealed class SearchWindow : Window
 
     /// <summary>当前卷清单行文本（探针用）。</summary>
     internal string ProbeVolumesLine => _volumesLine.Text;
+
+    /// <summary>探针观测面：卷清单行当前装订的是否为**重建出口**（W11-c；区别于暂停恢复）。</summary>
+    internal bool ProbeVolumesRebuildArmed => _volumesRebuildArmed;
+
+    /// <summary>探针观测面：卷清单行悬停提示原文（重建代价文案的断言面，R10）。</summary>
+    internal string ProbeVolumesToolTip => _volumesLine.ToolTip as string ?? "";
+
+    /// <summary>探针：模拟点击卷清单行出口（按当前装订动作分发 —— 重建或恢复）。</summary>
+    internal void ProbeInvokeVolumesLineClick() => OnVolumesLineClick();
 
     /// <summary>当前左侧状态行文本（探针用 —— 暂停/恢复的回显落在这里）。</summary>
     internal string ProbeStatusText => _status.Text;

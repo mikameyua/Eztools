@@ -304,6 +304,11 @@ public sealed class IndexRpcServer
     {
         var service = _search!;
 
+        // W11-b：pathFilter 处理（协议 §3.1 冻结语义的落地；生效时机 = 本次调用，不重建不重启）。
+        //   - 缺 params.pathFilter ⇒ 只做管道复位（V1.0 存量行为，26.5 幂等断言面）；
+        //   - 空串 ⇒ **清除**限定（开窗即发在配置为空时用它确保无限定 —— 幂等，不是错误）；
+        //   - 非空 ⇒ 校验（类型 / 绝对路径存在）后**真正锚定并挂包含闸**（v1 的"校验后丢弃"缺陷在此修复）。
+        string? pathFilter = null;
         if (request?["params"] is { } p && p["pathFilter"] is { } pfNode)
         {
             if (pfNode is not JsonValue v || !v.TryGetValue<string>(out var pf))
@@ -312,24 +317,36 @@ public sealed class IndexRpcServer
                 return;
             }
 
-            if (!Directory.Exists(pf))
+            if (pf.Trim().Length > 0 && !Directory.Exists(pf))
             {
-                // 错误路径不改变任何状态（协议 §4：保持 ready 原状）—— 管道复位只在成功路径做
+                // 错误路径不改变任何状态（协议 §4：保持 ready 原状）—— 锚定与管道复位只在成功路径做
                 await WriteErrorAsync(
                     id, RpcErrorCodes.SearchBadPathFilter,
                     $"pathFilter 不存在或不可读: {pf}").ConfigureAwait(false);
                 return;
             }
+
+            pathFilter = pf;
         }
 
-        // 副作用（协议 §3.1）：清空递减式管道缓存，之后的 query 从全量扫开始
+        // 成功路径：先应用限定（空串 = 清除），再复位递减管道（协议 §3.1 副作用）
+        var pfState = pathFilter is null ? null : service.ApplyPathFilter(pathFilter);
         service.ResetPipeline();
 
-        await WriteResultAsync(id, new JsonObject
+        var result = new JsonObject
         {
             ["ready"] = service.Ready,
             ["totalFiles"] = service.TotalFiles,
-        }).ConfigureAwait(false);
+        };
+
+        if (pfState is not null)
+        {
+            // 加法扩展（同 paused 先例）：锚定结局随应答回传 —— fail-open 时调用方当场就知道"没生效"
+            result["pathFilterAnchored"] = pfState.Anchored;
+            result["pathFilterReason"] = pfState.Reason;
+        }
+
+        await WriteResultAsync(id, result).ConfigureAwait(false);
     }
 
     private async Task HandleSearchQueryAsync(JsonNode id, JsonNode? request)
@@ -432,6 +449,15 @@ public sealed class IndexRpcServer
             ["failedVolumes"] = FailedVolumesArray(),
             ["detectedVolumes"] = service.DetectedVolumes,
             ["ownScopes"] = OwnScopesArray(),
+            // W11-a：用户排除可见性（§4.4 三出口的协议面）。规则数 = 配置了几条；
+            // 排除数 = 作用域内 FRN 总数（热启动时条目可能还在 store 里，由查询期闸挡住）。
+            ["excludeRules"] = service.ExcludeRuleCount,
+            ["excludedFrns"] = service.ExcludedFrns,
+            // W11-b：pathFilter 限定可见性（§4.4 三出口的协议面）。
+            // Anchored=false ⇒ 闸不生效（D8 fail-open），Reason 说明为什么 —— 不静默。
+            ["pathFilter"] = service.PathFilterStatus.Filter,
+            ["pathFilterAnchored"] = service.PathFilterStatus.Anchored,
+            ["pathFilterReason"] = service.PathFilterStatus.Reason,
             ["lastError"] = service.LastError,
         }).ConfigureAwait(false);
     }

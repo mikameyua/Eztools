@@ -15,6 +15,10 @@ using Eztools.Index;
 //   --data-root <path>    安装根：Core 端点（core.json）与 .ezidx（index/ 子目录）的根。
 //                         缺省 = 进程当前目录（宿主拉起时必须显式传 paths.Root）。
 //   --volumes C:,D:       限定建索引的卷（逗号分隔）；缺省 = 本地全部固定卷（设计方案 q6）。
+//   --exclude <rules>     排除规则（W11-a）：分号分隔的目录名，原样转交自举（IndexBootstrap
+//                         用 Contracts 的同一份解析器解析；解析失败记入 lastError 并按空集继续）。
+//   --path-filter <dir>   初始限定根（W11-b）：自举完成后应用一次 ApplyPathFilter（锚定失败
+//                         fail-open + 诊断可见）；运行期变更走 search.start，不走重启。
 //   --probe-usn C:        同步层实证探针（W3-c-1）：连提权 Core 走 queryJournal/readUsn/
 //                         writeUsnClose 全链路，结果打 JSON 进 stdout 后退出（rc=0/1）。
 //                         需要提权 Core 在跑（`ezt core start --elevate`）；acceptance 断言
@@ -39,6 +43,8 @@ var noBootstrap = false;
 var noIndexSync = false;
 string? dataRoot = null;
 string? probeUsn = null;
+string? excludeRules = null;
+string? pathFilter = null;
 IReadOnlyList<string>? volumes = null;
 
 for (var i = 0; i < args.Length; i++)
@@ -57,12 +63,18 @@ for (var i = 0; i < args.Length; i++)
         case "--probe-usn" when i + 1 < args.Length:
             probeUsn = args[++i];
             break;
+        case "--exclude" when i + 1 < args.Length:
+            excludeRules = args[++i];
+            break;
+        case "--path-filter" when i + 1 < args.Length:
+            pathFilter = args[++i];
+            break;
         case "--volumes" when i + 1 < args.Length:
             volumes = args[++i]
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             break;
         default:
-            await Console.Error.WriteLineAsync($"[ezt-index] 未知参数 '{args[i]}'（支持 --no-bootstrap / --no-index-sync / --data-root <path> / --volumes C:,D: / --probe-usn C:）")
+            await Console.Error.WriteLineAsync($"[ezt-index] 未知参数 '{args[i]}'（支持 --no-bootstrap / --no-index-sync / --data-root <path> / --volumes C:,D: / --exclude <rules> / --path-filter <dir> / --probe-usn C:）")
                 .ConfigureAwait(false);
             return 64;   // rc=64 用法错误（与 uninstall 缺 --yes 的 rc=64 同口径）
     }
@@ -103,10 +115,15 @@ if (!noBootstrap)
                 Volumes = volumes,
                 Diagnostics = Console.Error,
                 UsnSourceFactory = vol => new CoreUsnClient(bootstrapRoot, vol),
+                ExcludeRules = excludeRules,
+                PathFilter = pathFilter,
             }, cts.Token).GetAwaiter().GetResult();
             Console.Error.WriteLine(
                 $"[ezt-index] 自举完成：卷 {report.VolumesTotal}（热启动 {report.VolumesLoaded} / 重建 {report.VolumesBuilt} / "
-                + $"失败 {report.VolumesFailed}）· {report.TotalEntries} 条 · {report.ElapsedMs} ms");
+                + $"失败 {report.VolumesFailed}）· {report.TotalEntries} 条 · {report.ElapsedMs} ms"
+                + (report.ExcludeRuleCount > 0
+                    ? $" · 排除规则 {report.ExcludeRuleCount} 条 / 摘除 {report.PrunedEntries} 条"
+                    : string.Empty));
 
             // ── 实时 tail（W3-c-1/c-2/c-3 闭环）：对账为 Incremental 的卷起常驻泵 ──
             //（游标落在 outcome.NextUsn；applier 按卷持有——pending 配对状态是卷内概念）

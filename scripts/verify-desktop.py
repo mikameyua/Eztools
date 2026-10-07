@@ -464,6 +464,7 @@ def main() -> int:
     # W4-c：宿主设置节 desktop（search/ocr/clip 热键等）以同格式进清单；
     # W6-b：capture.hotkey；W6-c：pick.hotkey + color.format（enum→ComboBox，11 个字段）；
     # W7-b：launcher.providers（string→TextBox，12 个字段）。
+    # W11-a/b（2026-10-04）：index.exclude + search.pathFilter（string→TextBox，16 个字段）。
     # C1/C2（2026-09-30）：keepalive/tasktool 删空 config（解析容忍缺省）、echo/pinfo
     #   加 configHidden=true —— 两者都不再出现在设置窗口 ⇒ 从 expected 移出。
     #   `ezt list --json` 的 configHidden 双展示面断言在 acceptance.sh step 3。
@@ -476,7 +477,8 @@ def main() -> int:
                      "clip.enabled=CheckBox", "clip.hotkey=TextBox", "clip.max-items=TextBox",
                      "clip.image-retention-days=TextBox", "clip.blacklist=TextBox",
                      "capture.hotkey=TextBox", "pick.hotkey=TextBox", "color.format=ComboBox",
-                     "launcher.providers=TextBox", "launcher.usage=CheckBox", "launcher.alias=TextBox"},
+                     "launcher.providers=TextBox", "launcher.usage=CheckBox", "launcher.alias=TextBox",
+                     "index.exclude=TextBox", "search.pathFilter=TextBox"},
         "wordcount": {"countWhitespace=CheckBox", "language=ComboBox", "maxFileSizeMb=TextBox"},
         "filehash": {"algorithm=ComboBox", "uppercase=CheckBox", "chunkSizeKb=TextBox"},
         "preview": {"maxTextBytes=TextBox", "maxLines=TextBox", "binaryProbeBytes=TextBox"},
@@ -835,8 +837,8 @@ def main() -> int:
            (ui.get("volumesLinePaused") or "").startswith("索引已暂停")
            and "点此恢复" in (ui.get("volumesLinePaused") or ""),
            repr(ui.get("volumesLinePaused")))
-        ck("★★ 只有暂停时状态行才可点（未暂停点击**不会**误触发暂停）",
-           ui.get("clickablePaused") is True and ui.get("clickableUnpaused") is False,
+        ck("★★ 卷清单行可点性：暂停 ⇒ 可点（恢复）；未暂停 + 夹具含排除规则 ⇒ 可点（W11 重建出口）",
+           ui.get("clickablePaused") is True and ui.get("clickableUnpaused") is True,
            f"paused={ui.get('clickablePaused')} unpaused={ui.get('clickableUnpaused')}")
         ck("★★ 暂停/恢复**走真协议**（pauseCalls=1 ∧ resumeCalls=1 ∧ 状态复位）",
            ui.get("pauseCalls") == 1 and ui.get("resumeCalls") == 1
@@ -845,6 +847,31 @@ def main() -> int:
            f"pausedAfterResume={ui.get('pausedAfterResume')}")
         ck("★ 恢复后状态行回显'已恢复'（用户看得见操作生效了）",
            "恢复" in (ui.get("pauseText") or ""), repr(ui.get("pauseText")))
+
+        # ── W11 收口（§11.3 ≥7 条）：排除/限定三出口 + 重建出口 ─────────────────
+        #     为什么钉：R4（改规则后旧索引残留，用户看不到变化 = 说假话）+ D8（fail-open
+        #     必须说得出原因）+ W9 教训（出口不能只在不健康态出现）。夹具显式给非零排除
+        #     （探针装配纪律 R7 的镜像面），断言不依赖环境配置。
+        w11 = ui.get("w11") or {}
+        ck("★★ W11 状态行排除段（正向对照：规则数/条数与协议夹具同源，R4/R5）",
+           w11.get("excludeVisible") is True, repr(w11.get("volumesLine")))
+        ck("★★ W11 限定未生效时状态行**说得出原因**（fail-open 不静默 —— M5 的机器侧）",
+           w11.get("pathFilterReasonVisible") is True, repr(w11.get("volumesLine")))
+        ck("★★★ W11 重建出口在 Ready=true 时装订（W9 教训：出口不能只在不健康态出现）",
+           w11.get("rebuildArmed") is True
+           and "重建" in (w11.get("rebuildTooltip") or ""),
+           f"armed={w11.get('rebuildArmed')} tooltip={w11.get('rebuildTooltip')!r}")
+        ck("★★ W11 重建代价写清（R10：'删除索引文件'与耗时量级必须在文案里）",
+           "删除索引文件" in (w11.get("rebuildTooltip") or "")
+           and "分钟" in (w11.get("rebuildTooltip") or ""), repr(w11.get("rebuildTooltip")))
+        ck("★★ W11 重建出口**真的接到宿主动作**（点击计数=1 + 状态行回显，launchClicks 同款判据）",
+           w11.get("rebuildClicks") == 1 and "重建" in (w11.get("rebuildFeedback") or ""),
+           f"clicks={w11.get('rebuildClicks')} feedback={w11.get('rebuildFeedback')!r}")
+        ck("★★ W11 反向：无规则 ⇒ 排除段消失 + 重建出口不装订（防恒真）",
+           "排除" not in (w11.get("noRulesLine") or "排除")
+           and w11.get("rebuildArmedNoRules") is False, repr(w11.get("noRulesLine")))
+        ck("★★ W11 反向：无限定串 ⇒ 不含'限定'字样（防噪声）",
+           "限定" not in (w11.get("noPathFilterLine") or "限定"), repr(w11.get("noPathFilterLine")))
 
         # 反向（结构约束）：UI 侧**不含匹配算法** —— 匹配/打分/高亮区间全在索引进程。
         # 这是"结果集跨进程下发"红线的守卫：UI 一旦自己算分，跨进程契约就废了（R3）。

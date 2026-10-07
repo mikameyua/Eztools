@@ -854,6 +854,10 @@ public sealed class SettingsWindow : Window
         {
             fe.Margin = new Thickness(0, 4, 0, 0);
             fe.MaxWidth = 420;
+            // ★ 2026-10-07 手工 B3 发现：TextBox 按内容自适应宽度 ⇒ **空字符串字段只有
+            //   ~16px 宽、几乎无可见边框**（index.exclude / search.pathFilter / ocr.language
+            //   / clip.blacklist 均如此）—— "完整可见"在空值态不成立。设最小宽度。
+            fe.MinWidth = 260;
             fe.HorizontalAlignment = HorizontalAlignment.Left;
         }
 

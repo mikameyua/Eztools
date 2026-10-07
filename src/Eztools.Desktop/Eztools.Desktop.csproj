@@ -28,6 +28,13 @@
     <ProjectReference Include="..\Eztools.Ocr\Eztools.Ocr.csproj" />
     <!-- W5-b：剪贴板历史面板。存储/捕获/隐私/直贴原语全在类库（UI 归 Desktop 的落位纪律） -->
     <ProjectReference Include="..\Eztools.Clipboard\Eztools.Clipboard.csproj" />
+    <!--
+      W11-c：重建索引出口要删 index/*.ezidx —— 目录名常量取 IndexBootstrap.IndexDirName
+      （单一出口，防两侧漂移）。设计文档 §6.1 本就写了 Desktop → Index 的依赖方向，
+      但 csproj 里从未落过（2026-10-04 W11-c 落地时发现并补上）；与 Cli → Index 同款先例
+      （Index 是 Exe 工程，引用它在 SDK 工程里合法）。
+    -->
+    <ProjectReference Include="..\Eztools.Index\Eztools.Index.csproj" />
   </ItemGroup>
 
   <!--
