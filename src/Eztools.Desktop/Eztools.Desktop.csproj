@@ -22,6 +22,30 @@
     <ApplicationIcon>assets\eztools.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!--
+    ══════════════════════════════════════════════════════════════════════
+    发布形态：自包含 · 非单文件 · 非裁剪
+    ══════════════════════════════════════════════════════════════════════
+    自包含 = 目标机器**不需要预装 .NET**（用户机器上不会碰巧有）。
+      固化在此而非只写在 make-portable.sh 的命令行上，是为了堵住一个洞：
+      任何人直接 `dotnet publish` 都会拿到**框架依赖**产物（体积小 10 倍），
+      而它在开发机上跑得好好的 —— 直到发给没有 .NET 的用户才炸。
+      判据见 scripts/budget.sh 与 make-portable.sh 校验段。
+    ⚠️ 只在 publish 时设置：Debug 构建仍走框架依赖（否则每次 build 都往
+       bin/ 里塞几十 MB 运行时，拖慢迭代、也让 bin/ 体积断言失真）。
+    ══════════════════════════════════════════════════════════════════════
+  -->
+  <PropertyGroup Condition="'$(IsPublishing)' == 'true' or $([System.String]::Copy('$(Configuration)').StartsWith('Release'))">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <!-- 非单文件：LayoutInstaller 按 AppContext.BaseDirectory 找同目录程序集，
+         单文件下该目录是临时解压目录 ⇒ 铺进安装根的 bin/ 会缺文件（实测踩过） -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <!-- 非裁剪：对 WPF 不可用（NETSDK1168），且反射 / JSON 序列化需要完整 BCL -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Eztools.Host\Eztools.Host.csproj" />
     <!-- W4-b：OCR 遮罩窗用的引擎/截图原语（引用链要求本项 TFM 同步升级，见上方注释） -->

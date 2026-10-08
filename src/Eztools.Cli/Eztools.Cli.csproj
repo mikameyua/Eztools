@@ -16,6 +16,20 @@
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
   </PropertyGroup>
 
+  <!--
+    发布形态：自包含 · 非单文件 · 非裁剪（理由与 Desktop 相同，见其csproj 注释）。
+    固化在此而非只写在 make-portable.sh 的命令行上 —— 否则任何人直接
+    `dotnet publish` 都会拿到框架依赖产物，在开发机上跑得好好的，
+    发给没有 .NET 的用户才炸。
+  -->
+  <PropertyGroup Condition="'$(IsPublishing)' == 'true' or $([System.String]::Copy('$(Configuration)').StartsWith('Release'))">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Eztools.Ocr\Eztools.Ocr.csproj" />
     <!--

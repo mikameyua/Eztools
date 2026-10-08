@@ -20,6 +20,19 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!--
+    发布形态：自包含 · 非单文件 · 非裁剪（理由与 Desktop 相同，见其 csproj 注释）。
+    ★Core 是**特权层**：它由提权进程启动，运行时解析路径必须与普通用户进程
+      完全一致 —— 框架依赖形态下"用户有 .NET 但提权路径读不到"这类故障极难排查。
+    -->
+  <PropertyGroup Condition="'$(IsPublishing)' == 'true' or $([System.String]::Copy('$(Configuration)').StartsWith('Release'))">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Eztools.Contracts\Eztools.Contracts.csproj" />
   </ItemGroup>

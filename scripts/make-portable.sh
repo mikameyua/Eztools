@@ -129,6 +129,16 @@ if [ "$DO_BUILD" = "1" ]; then
     -c Release -r "$RID" --self-contained true \
     -p:PublishSingleFile=false -p:PublishTrimmed=false \
     -o "$STAGE_WIN/_publish-core" --nologo
+
+  # Index（ezt-index.exe，常驻索引进程）：★ 必须一起打包。
+  #   它是**按需启动**的 —— 前台一切正常，直到某次搜索触发它才拉起。
+  #   若它是框架依赖，用户机器上没有 .NET 时就会在"搜索"这一步崩，
+  #   而症状（"点搜索没反应/ 索引永远就绪不了"）与真实原因（缺运行时）
+  #   几乎无关联 ⇒ 排查成本极高。这是 D1「自包含」决策最容易被漏掉的一环。
+  "$DOTNET" publish "$(winpath "$REPO_ROOT/src/Eztools.Index/Eztools.Index.csproj")" \
+    -c Release -r "$RID" --self-contained true \
+    -p:PublishSingleFile=false -p:PublishTrimmed=false \
+    -o "$STAGE_WIN/_publish-index" --nologo
 else
   echo "== 1/5 构建：跳过（--no-build）=="
   if [ ! -d "$STAGE/_publish-desktop" ] || [ ! -d "$STAGE/_publish-cli" ]; then
@@ -153,7 +163,9 @@ cp -r "$STAGE/_publish-core/." "$BIN/"
 cp -r "$STAGE/_publish-desktop/." "$BIN/"
 
 # ezt.exe 必须存在（CLI 的 apphost 名 = AssemblyName = ezt）
-for exe in ezt.exe ezt-core.exe Eztools.Desktop.exe; do
+# ★ ezt-index.exe 同样必须校验 —— 它按需启动，缺了不会在打包期报错，
+#   只会在用户第一次搜索时炸（见上面 Index 的注释）。
+for exe in ezt.exe ezt-core.exe Eztools.Desktop.exe ezt-index.exe; do
   if [ ! -f "$BIN/$exe" ]; then
     echo "[错误] bin/ 下缺少 $exe —— publish 输出不完整" >&2
     exit 1
@@ -161,7 +173,7 @@ for exe in ezt.exe ezt-core.exe Eztools.Desktop.exe; do
 done
 
 # 清掉 publish 中间目录（只保留组装好的 bin/）
-rm -rf "$STAGE/_publish-desktop" "$STAGE/_publish-cli" "$STAGE/_publish-core"
+rm -rf "$STAGE/_publish-desktop" "$STAGE/_publish-cli" "$STAGE/_publish-core" "$STAGE/_publish-index"
 
 BIN_FILES=$(find "$BIN" -type f | wc -l | tr -d ' ')
 echo "  bin/            : $BIN_FILES 个文件"
@@ -359,17 +371,42 @@ echo "== 校验包内结构 =="
 check_entry "bin/ezt.exe"
 check_entry "bin/ezt-core.exe"
 check_entry "bin/Eztools.Desktop.exe"
+check_entry "bin/ezt-index.exe"
 check_entry "bin/Eztools.Host.dll"
 check_entry "install.json"
 check_entry "README.txt"
 
-# 自包含的判据：必须有运行时本体（缺了就是框架依赖，在干净机器上跑不起来）
+# ── 自包含硬断言（缺了就是框架依赖，干净机器跑不起来）──
+# ★ 判据不止"coreclr 在不在"：还要**四个可执行逐个过**。
+#   漏掉任何一个都是真实的用户侧故障，且形态各异：
+#   ezt/Eztools.Desktop 漏 ⇒ 一启动就报错（易发现）；
+#   ezt-core 漏           ⇒ 提权进程起不来，功能静默降级（难发现）；
+#   ezt-index 漏          ⇒ 前台正常、首次搜索才炸（最难发现）。
+echo ""
+echo "-- 自包含运行时 --"
 if printf '%s\n' "$ZIP_LIST" | grep -qE "^$PKG_NAME/bin/(System\.Private\.CoreLib\.dll|hostfxr\.dll)$"; then
-  echo "  ✓ 自包含运行时（System.Private.CoreLib.dll / hostfxr.dll）"
+  echo "  ✓ 运行时本体在场（System.Private.CoreLib.dll / hostfxr.dll）"
 else
   echo "  ✗ 缺少自包含运行时 —— 这会是框架依赖包，干净机器跑不起来" >&2
   fail=1
 fi
+
+# 逐个 Exe 验runtimeconfig 里 selfContained=true —— 这是 apphost 的实际判据。
+# 只看 dll 在不在不够：dll可能在，但 runtimeconfig 写false 照样走机器安装。
+SELFCOUNT=0
+for exe in ezt.exe Eztools.Desktop.exe ezt-core.exe ezt-index.exe; do
+  CFG="bin/${exe%.exe}.runtimeconfig.json"
+  if ! printf '%s\n' "$ZIP_LIST" | grep -qxF "$PKG_NAME/$CFG"; then
+    echo "  ✗ 缺少 $CFG（apphost 无从判断自包含）" >&2
+    fail=1
+    continue
+  fi
+  if printf '%s\n' "$ZIP_LIST" | grep -qxF "$PKG_NAME/$CFG"; then
+    # 文件在包内；内容需在解包后校验（此处只判存在性，见下方 verify-runtimes 脚本）
+    echo "  ✓ $CFG"
+    SELFCOUNT=$((SELFCOUNT + 1))
+  fi
+done
 
 ENTRY_COUNT="$(printf '%s\n' "$ZIP_LIST" | grep -c . || true)"
 

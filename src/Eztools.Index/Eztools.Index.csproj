@@ -7,6 +7,26 @@
     <AssemblyName>ezt-index</AssemblyName>
   </PropertyGroup>
 
+  <!--
+    发布形态：自包含 · 非单文件 · 非裁剪（理由与 Desktop 相同，见其 csproj 注释）。
+
+    ★★ 本项目**原先没有自包含配置**，而 make-portable.sh 也**没有 publish 它** ——
+       两处叠加出一个真实缺口：用户机器上没有 .NET 时，前台一切正常，
+       直到某次搜索触发索引进程拉起才崩（ezt-index.exe 是独立进程）。
+       与 Desktop/Cli/Core 的差别正在于此：它是**按需启动**的，
+       所以"自包含"这件事被推迟到运行时才暴露 —— 排查成本远高于启动即崩。
+
+    触发 NETSDK1150的机制：自包含可执行项目**不能引用**非自包含可执行项目。
+      反向（自包含引用自包含）合法 ⇒ 四Exe 现在是一致配置，彼此可引用。
+  -->
+  <PropertyGroup Condition="'$(IsPublishing)' == 'true' or $([System.String]::Copy('$(Configuration)').StartsWith('Release'))">
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
   <ItemGroup>
     <!--
       引用契约层（零第三方依赖纪律与 Contracts 同源）。
