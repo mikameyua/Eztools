@@ -41,10 +41,18 @@ jobs:
     runs-on: windows-latest
 
     env:
-      # ★ 自包含配置只在 Release/publish 生效（见 csproj 条件属性），
+      # ★ 自包含配置只在 Release/publish 生效（见csproj 条件属性），
       #   CI 用 Debug 构建 ⇒ 不塞运行时，保持快速构建。
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 payload/ 里现役的 3.13.x 同major.minor。
+        # 钉住小版本是为了让"运行时部署"这条链路在 CI 上真的被跑到，
+        # 而不是碰巧用系统 Python —— 后者会让 selftest 静默降级。
+        python-version: ['3.13']
 
     steps:
       # ── 1. 检出 ──
@@ -65,11 +73,50 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
 
+      # ── 3b. 装 Python（供make-payload.sh 生成隔离运行时载荷）──
+      #   ★ 必须在"准备载荷"之前。CI runner 自带的 Python 不可重定位
+      #     （记录了解释器绝对路径），make-payload.sh 会拒绝。
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
       # ── 4. 构建（-warnaserror 之外只开增量，避免 --no-incremental 拖慢）──
       - name: 构建
         run: dotnet build Eztools.sln -c Debug --nologo -v minimal
 
-      # ── 5. selftest ──
+      # ── 5. 准备 Python 运行时载荷 ★关键前置 ──
+      #   selftest 会 EnsureRuntimeAsync("python")，从 payload/ 解压隔离运行时。
+      #   **payload/ 被 .gitignore 排除**（14 MB，不入库），克隆体里没有它
+      #   ⇒ 运行时部署失败 ⇒ selftest 在第一项就判 FAIL 并提前返回。
+      #   这是本CI 第一次真跑时实际踩到的（不是预防性假设）。
+      #   选setup-python 而非"跳过依赖运行时的用例"：后者会把真实缺失
+      #   藏进skip 通道，违反本项目「跳过必须计数且不得掩盖缺失」的纪律。
+      - name: 准备 Python 运行时载荷
+        shell: bash
+        run: |
+          set -euo pipefail
+          # setup-python 装的是独立安装（非 venv、非 embeddable zip），
+          # 正好满足 make-payload.sh 的可重定位要求
+          PY_DIR="$(python -c "import sys,os; print(os.path.dirname(sys.executable))")"
+          echo "源Python: $PY_DIR ($(python -V 2>&1))"
+          bash scripts/make-payload.sh "$PY_DIR" payload
+          # ★ 判据：产物文件必须真实存在。
+          #   刻意**不用** `ezt runtime payloads`当判据—— 实测它无论有无
+          #   payload 都返回 rc=0（只打印扫描结果），拿它守门就是恒绿断言。
+          #   名称形态由 make-payload.sh 的 ARCHIVE_NAME 决定：
+          #   python-<版本>-<rid>.tar.gz
+          shopt -s nullglob
+          found=(payload/python-*.tar.gz)
+          if [ ${#found[@]} -eq 0 ]; then
+            echo "::error::make-payload.sh 跑完但payload/ 里没有产物"
+            ls -la payload/ || true
+            exit 1
+          fi
+          ls -la payload/
+          echo "载荷就位：${found[0]}"
+
+      # ── 6. selftest ──
       #   ⚠️ 输出目录带 Windows 平台后缀（Cli 依赖 net10.0-windows 的 Win32 API），
       #   不能写成 net10.0 —— 那是本项目踩过的坑。
       - name: 端到端自检
@@ -82,7 +129,7 @@ jobs:
           & $exe selftest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ── 6. 静态守卫 ──
+      # ── 7. 静态守卫 ──
       - name: 静态守卫 G1~G8
         run: |
           python scripts/review-guards.py
@@ -90,7 +137,7 @@ jobs:
           python scripts/review-guards.py --selftest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ── 7. 文档交叉引用 ──
+      # ── 8. 文档交叉引用 ──
       - name: 文档引用零悬空
         run: |
           python scripts/check-doc-refs.py --strict
