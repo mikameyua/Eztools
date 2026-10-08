@@ -78,7 +78,7 @@ runner 实测耗时（首次跑通，共 93 秒）：
 
 ## 静态守卫（G1~G8）
 
-`scripts/review-guards.py` 挂在验收第 19 步。改动引入下列模式会被拦下：
+`scripts/review-guards.py` 挂在验收脚本里（`scripts/_step19_review_guards.sh`）。改动引入下列模式会被拦下：
 
 | 规则 | 拦什么 |
 |---|---|

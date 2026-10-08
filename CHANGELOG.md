@@ -32,7 +32,8 @@
 
 - 目标框架升级到 `net10.0`（原 net7.0 已于 2024-05-14 终止支持）
 - 特权层 `ezt-core`：命名管道 + 对端令牌校验，低完整性调用方在内核层被拒
-- 静态守卫机制（G1~G8）挂在验收第 20 步，每条规则均经双向突变验证
+- 静态守卫机制（G1~G8）接入验收脚本（`scripts/_step19_review_guards.sh`），每条规则均经双向突变验证
+- **持续集成**（`.github/workflows/ci.yml`）：push / PR 自动跑构建 + `selftest` + 守卫 + 文档引用，约 93 秒。需要真 UAC / 托盘 / 热键的验收层**刻意不进 CI**（在 runner 上会大面积退化为 skip，判别力低），由手工验收承担；失败时自动把诊断归档到 issue（CI 日志在无凭证时不可读）
 - 第三方许可登记：`THIRD-PARTY-NOTICES.md` 收录 vendored 组件（pypdf 6.9.2 / BSD-3-Clause）
 - 开源化整理：新增 `CONTRIBUTING.md` 与本文件；新增 `.gitattributes` 统一行尾
 - 修正验收脚本的本机路径硬编码，改为「环境变量 → `PATH` 探测 → 明确报错」三级解析，并增加 .NET 版本校验

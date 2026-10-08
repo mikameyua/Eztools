@@ -40,6 +40,16 @@ jobs:
     #windows-latest：TFM 是 net10.0-windows*，只能在 Windows 上构建
     runs-on: windows-latest
 
+    # 失败时要把诊断写进 issue（见最后一个 step）。
+    # 为什么需要它：CI 日志的三种取法在**无凭证**时全部不通 ——
+    #   api/actions/runs/*/logs → 403 Must have admin rights
+    #   job 页面 → CSR 壳，日志异步加载
+    #   runs/<id>/logs|steps → 404
+    # 而 issue 内容是匿名可读的 ⇒ 把诊断写进 issue 是唯一无凭证可见的通道。
+    permissions:
+      contents: read
+      issues: write
+
     env:
       # ★ 自包含配置只在 Release/publish 生效（见csproj 条件属性），
       #   CI 用 Debug 构建 ⇒ 不塞运行时，保持快速构建。
@@ -176,3 +186,76 @@ jobs:
         run: |
           python scripts/check-doc-refs.py --strict
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── 9. 失败时把诊断归档到 issue ────────────────────────────────────────
+      # 为什么需要这一步（不是过度设计）：
+      #   本项目排查 CI 失败时遇到一个硬约束 —— **无凭证取不到日志**：
+      #     · api/actions/runs/*/logs  → 403 Must have admin rights
+      #     · job 页面                  → CSR 壳，日志异步加载，抓不到正文
+      #     · runs/<id>/logs 或 /steps  → 404
+      #   而 **issue 内容是匿名可读的** ⇒ 这是唯一无凭证可见的通道。
+      #   实测教训（2026-10-08）：为读一次失败日志白等两轮，直到把诊断
+      #   打进 job 日志由人转贴才定位。自动化这一步后不再依赖人工转贴。
+      #
+      # 复用同一 issue（按 marker 查找），避免每次失败都新开一条。
+      - name: 失败时归档诊断到 issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- ci-failure-digest -->';
+            const RUN_URL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            let digest;
+            try {
+              const log = fs.readFileSync('selftest.log', 'utf8');
+              const lines = log.split(/\r?\n/);
+              const fails = lines.filter(l => l.includes('[FAIL]')).slice(0, 40);
+              digest = [
+                '#### `[FAIL]` 行',
+                '```',
+                fails.length ? fails.join('\n') : '(无 —— 失败可能发生在 selftest 之前)',
+                '```',
+                '#### 输出末尾 60 行',
+                '```',
+                lines.slice(-60).join('\n'),
+                '```',
+              ].join('\n');
+            } catch (e) {
+              digest = '⚠️ 未找到 `selftest.log` —— 失败发生在写入该日志之前（构建 / 载荷步骤）。';
+            }
+
+            const body = [
+              MARKER,
+              '## CI 运行失败诊断',
+              '',
+              `- run: ${RUN_URL}`,
+              `- commit: \`${context.sha}\``,
+              `- 触发: ${context.eventName}`,
+              '',
+              digest,
+              '',
+              '> 本 issue 由 CI 自动维护（复用同一条，只追加评论）。',
+              '> 用途：CI 日志在无凭证时不可读，此处是唯一无凭证可见的通道。',
+            ].join('\n');
+
+            // 查找已有的诊断 issue
+            const existing = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'all', labels: 'ci-digest', per_page: 10,
+            });
+            const found = existing.data.find(i => (i.body || '').includes(MARKER));
+
+            if (found) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: found.number,
+                body: `**新一次失败**（${new Date().toISOString()}）\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: '[CI] 运行失败诊断（自动维护）',
+                labels: ['ci-digest'],
+                body,
+              });
+            }
