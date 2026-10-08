@@ -80,16 +80,51 @@ EZ="$BINDIR/ezt.exe"
 
 if [ ! -f "$EZ" ]; then
   printf '  [错误] 找不到宿主 %s\n' "$EZ" >&2
-  printf '         先构建（本机 SDK 在 D:\\dotnet10）:\n' >&2
-  printf '         D:/dotnet10/dotnet.exe build "D:/01-项目代码/Eztools/Eztools.sln"\n' >&2
+  printf '         先构建本仓库（需要 .NET 10 SDK）：\n' >&2
+  printf '           dotnet build "%s/Eztools.sln"\n' "$REPO" >&2
+  printf '           # 若 dotnet 不在 PATH，用便携 SDK：\n' >&2
+  printf '           DOTNET_ROOT=/path/to/dotnet "/path/to/dotnet/dotnet.exe" build Eztools.sln\n' >&2
   exit 2
 fi
 
-# 🔴 DOTNET_ROOT 必须指到便携 SDK。
-#    ezt.exe 是**框架依赖**应用，apphost 只在两处找运行时：DOTNET_ROOT，或注册表里的默认安装位置
-#    （C:\Program Files\dotnet —— 那里只有 7.x）。**它不看 PATH**，实测 PATH 前置无效。
+# 🔴 DOTNET_ROOT 必须指到 .NET 运行时**根目录**（不是 dotnet.exe 本身）。
+#    ezt.exe 是**框架依赖**应用，apphost 只在两处找运行时：DOTNET_ROOT，或注册表里的默认安装位置。
+#    **它不扫 PATH**，实测把dotnet 目录前置到 PATH 无效。
 #    不设会直接报 "You must install or update .NET to run this application."
-export DOTNET_ROOT="${DOTNET_ROOT:-D:/dotnet10}"
+#
+#    解析顺序：已设的 DOTNET_ROOT → dotnet 所在目录 → 常见的系统安装位置。
+#    ⚠️ 刻意**不设默认值为某个便携路径**（那是本机约定，不该泄漏给其他克隆者）。
+if [ -z "${DOTNET_ROOT:-}" ] && command -v dotnet >/dev/null 2>&1; then
+  _dotnet_bin="$(command -v dotnet)"
+  # 解析符号链接（Linux/macOS 下 dotnet 常是指向真身的软链）
+  if command -v readlink >/dev/null 2>&1; then
+    _dotnet_real="$(readlink -f "$_dotnet_bin" 2>/dev/null || echo "$_dotnet_bin")"
+  else
+    _dotnet_real="$_dotnet_bin"
+  fi
+  # ⚠️ DOTNET_ROOT 是**含 shared/ 的那层**（= dotnet.exe 的父目录），不是父父目录 ——
+  #    apphost 会在 $DOTNET_ROOT/shared/Microsoft.NETCore.App/<ver>/ 下找运行时。
+  DOTNET_ROOT="$(dirname "$_dotnet_real")"
+  export DOTNET_ROOT
+fi
+if [ -z "${DOTNET_ROOT:-}" ]; then
+  printf '  [错误] 未能定位 .NET 运行时根目录（apphost 不扫 PATH）。\n' >&2
+  printf '         请显式指定，例如：DOTNET_ROOT=/d/dotnet10 bash %s\n' "$0" >&2
+  exit 2
+fi
+
+# 🔴 探测到的可能是**版本过旧**的 dotnet（本机PATH 上是 7.x 很常见，
+#    而本仓要net10.0）。此时 apphost 报的是含糊的 "You must install or update .NET"，
+#    排查成本高—— 在这里直接把版本说清楚。
+if [ -d "$DOTNET_ROOT/shared/Microsoft.NETCore.App" ]; then
+  _have="$(ls "$DOTNET_ROOT/shared/Microsoft.NETCore.App" 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+' | sort -V | tail -1)"
+  case "${_have%%.*}" in
+    '' | 1| 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9)
+      printf '  [错误] DOTNET_ROOT=%s 下的运行时最高只有 %s.x，本仓需要 .NET 10。\n' "$DOTNET_ROOT" "${_have:-未知}" >&2
+      printf '         装好 .NET 10 SDK 后显式指定：DOTNET_ROOT=/path/to/dotnet bash %s\n' "$0" >&2
+      exit 2;;
+  esac
+fi
 
 # 🔴 PYTHONUTF8=1：所有 python 子进程强制 UTF-8 模式（2026-09-24 实测四连 FAIL 教训）。
 #    用户终端的 Python 默认按系统 locale（中文 Windows = GBK）写 stdout/重定向文件：
@@ -867,7 +902,9 @@ env = dict(os.environ,
            EZTOOLS_INSTALL_ROOT=root,
            EZTOOLS_CONFIG_ROOT=os.path.join(root, "..", "config"),
            EZTOOLS_INDEX_EXE=os.path.join(root, "bin", "ezt-index.exe"),
-           DOTNET_ROOT=os.environ.get("DOTNET_ROOT", r"D:\dotnet10"))
+           # 外层已确保 DOTNET_ROOT 非空（见上方探测块）；这里仍兜底，
+           # 避免 KeyError 变成一条难以定位的失败。
+           DOTNET_ROOT=os.environ.get("DOTNET_ROOT", ""))
 r = subprocess.run([exe, "--probe-search", "--no-prompt", "--out", out],
                    capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
 if not os.path.exists(out):

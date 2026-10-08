@@ -42,8 +42,24 @@ PowerToys/
 # ── 本地记忆与工具配置（含项目级 memory / 自动化，不入库）──
 .workbuddy/
 
-# ── 兜底：散落的构建产物 ──
-*.dll
+# ── 原生二进制（构建产物）──
+# ⚠️ 这里**刻意不写 *.dll / *.so / *.dylib / *.pyd 全局忽略**，原因：
+#本仓采用「vendor 第三方依赖进仓」模式（先例：tools/preview/Lib/pypdf/，
+#   见 THIRD-PARTY-NOTICES.md  §1）。若按扩展名全盘忽略，将来某个工具 vendor
+#   一个带原生扩展的第三方库（.pyd/.dll）会被**静默吞掉**——`git add` 不报错、
+#   提交也不报错，本机跑得通（文件还在磁盘上），换台机器克隆才炸。
+#   这类"仓库里没有但本机有"的缺失最难排查，远比多提交几个二进制更贵。
+#
+#   ⇒ 因此改为**按构建输出路径拦截**（bin/ obj/ dist/ runtimes/ 已在上面各自声明）。
+#   真正需要排除的散落构建产物，用下面这几条按目录/扩展点名，比全盘拦截精确：
 *.pdb
-*.so
-*.dylib
+*.ezidx
+*.db
+*.sqlite
+*.sqlite3
+# 例外兜底：显式点名 src/tools 下的构建输出（正常已被bin/ obj/ 覆盖，
+#   此处防的是有人把输出目录改名的情形）
+src/**/bin/
+src/**/obj/
+tools/**/bin/
+tools/**/obj/

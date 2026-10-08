@@ -23,7 +23,7 @@
 #     scripts/make-portable.sh [--out <目录>] [--rid win-x64] [--no-build] [--keep-stage]
 #
 #     例：
-#       scripts/make-portable.sh                      # → dist/Eztools-0.1.0-win-x64.zip
+#       scripts/make-portable.sh                      # → dist/Eztools-0.11.0-win-x64.zip
 #       scripts/make-portable.sh --no-build           # 复用上次 publish 输出，只重打包
 # ============================================================================
 set -euo pipefail
@@ -66,8 +66,21 @@ while [ $# -gt 0 ]; do
 done
 
 # ── 0. 环境 ─────────────────────────────────────────────────────────────────
-# 本仓的 .NET 10 是**便携安装**在 D:/dotnet10（系统 dotnet 是 7.x，不支持本仓 TFM）。
-DOTNET="${DOTNET_EXE:-D:/dotnet10/dotnet.exe}"
+# 本仓需要 .NET 10 SDK（net10.0）。解析顺序：DOTNET_EXE → PATH 里的 dotnet。
+# ⚠️ 刻意不写死便携路径（那是本机约定，不该泄漏给其他克隆者）。
+DOTNET="${DOTNET_EXE:-}"
+if [ -z "$DOTNET" ]; then
+  if command -v dotnet >/dev/null 2>&1; then
+    DOTNET="$(command -v dotnet)"
+  else
+    echo "[错误] 找不到 .NET 10 SDK。" >&2
+    echo "       本仓需要 .NET 10（net10.0），系统默认的 dotnet 可能是更旧的版本。" >&2
+    echo "       两种做法二选一：" >&2
+    echo "         1) 安装 .NET 10 SDK并加入 PATH：https://dotnet.microsoft.com/download/dotnet/10.0" >&2
+    echo "         2) 用便携版，并显式指定：DOTNET_EXE=/path/to/dotnet/dotnet.exe $0 ..." >&2
+    exit 3
+  fi
+fi
 if [ ! -x "$DOTNET" ] && [ ! -f "$DOTNET" ]; then
   echo "[错误] 找不到 $DOTNET（本仓需要 .NET 10；可用环境变量 DOTNET_EXE 覆盖）" >&2
   exit 3

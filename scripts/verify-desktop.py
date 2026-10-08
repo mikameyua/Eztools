@@ -23,6 +23,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -306,7 +307,15 @@ def main() -> int:
         print(f"[FAIL] 未找到 {desktop}（先构建 Eztools.sln）")
         return 1
 
-    env = dict(os.environ, DOTNET_ROOT=os.environ.get("DOTNET_ROOT", r"D:\dotnet10"))
+    # 框架依赖应用的运行时定位：apphost 只看 DOTNET_ROOT 与注册表默认安装位置，**不扫 PATH**。
+    # 刻意不写死便携路径（那是本机约定）；调用方需保证 DOTNET_ROOT 已设或 dotnet 在 PATH 上。
+    # ⚠️ DOTNET_ROOT 是**含 shared/ 的那层**（= dotnet.exe 的父目录），不是它的父父目录 ——
+    #    apphost 会在 $DOTNET_ROOT/shared/Microsoft.NETCore.App/<ver>/ 下找运行时。
+    env = dict(os.environ)
+    if not env.get("DOTNET_ROOT"):
+        _dotnet = shutil.which("dotnet")
+        if _dotnet:
+            env["DOTNET_ROOT"] = os.path.dirname(os.path.realpath(_dotnet))
     img = "Eztools.Desktop.exe"
 
     # ★★ 必须把工具源钉到**仓库里**，否则本机 `%LOCALAPPDATA%\Eztools\tools\` 的
@@ -2110,7 +2119,8 @@ def main() -> int:
     long_hint = "已记录 1 个文件。打开 托盘 → 面板 → 速览 查看；面板开着时按『刷新』换下一个文件"
     payload = {
         "recorded": 1,
-        "paths": ["D:/01-项目代码/Eztools/" + "很长的路径片段" * 30 + "/README.md"],
+        # 用中性路径占位（这里只需"足够长的字符串"，与任何真实机器无关）
+        "paths": ["C:/some/quite/long/placeholder/path/" + "很长的路径片段" * 30 + "/README.md"],
         "hint": long_hint,
     }
     d2 = desc.describe(payload)

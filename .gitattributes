@@ -1,0 +1,62 @@
+# ══════════════════════════════════════════════════════════════════════
+#  行尾归一 —— 本仓两项硬约束使它成为必需品，不是可选项：
+#
+#  ① 52 个中文文件名（docs/W3-极速文件搜索-设计方案.md 等）
+#     在core.quotepath 默认转义下，部分工具链（老版本 Git for Windows、
+#     某些 CI 镜像、部分编辑器插件）会把它们按字节拆坏或改名。
+#     text=auto 让 Git 自己做内容判定与转义规范化，避免逐个文件手工干预。
+#  ② 15 个 .sh + .py 脚本：Windows 提交时若被改成 CRLF，
+#     bash 会报「/usr/bin/bash^M: No such file or directory」——
+#     表现为"脚本在我机器上是好的"，跨机全挂，且极易误判成代码 bug。
+#
+#  规则优先级：后面的行覆盖前面的行；匹配不到的自然回落* text=auto。
+#══════════════════════════════════════════════════════════════════════
+
+# ── 默认：自动探测文本、仓库内统一 LF ──
+*                    text=auto eol=lf
+
+# ──必须在 LF 的：shell / python 脚本（CRLF 会直接执行失败）──
+*.sh                 text eol=lf
+*.bash               text eol=lf
+*.py                 text eol=lf
+
+# ── 必须在 CRLF 的：Windows 原生脚本（cmd/PowerShell 对 LF 兼容性差）──
+*.ps1                text eol=crlf
+*.cmd                text eol=crlf
+*.bat                text eol=crlf
+
+# ── 源码与数据：统一 LF，禁CRLF（编译期字面量混入 \r 是隐性 bug 源）──
+*.cs                 text eol=lf
+*.csproj             text eol=lf
+*.sln                text eol=crlf
+*.props              text eol=lf
+*.json               text eol=lf
+*.md                 text eol=lf
+*.txt                text eol=lf
+*.yml                text eol=lf
+*.yaml               text eol=lf
+
+# ── 必须 LF 且不可被任何工具再改写：配置契约 ──
+.gitignore           text eol=lf
+.gitattributes       text eol=lf
+
+# ── 二进制：禁行尾转换、禁 diff、禁合并 ──
+*.png                binary
+*.jpg                binary
+*.jpeg               binary
+*.gif                binary
+*.ico                binary
+*.bmp                binary
+*.exe                binary
+*.dll                binary
+*.pdb                binary
+*.so                 binary
+*.dylib              binary
+*.pyd                binary
+*.zip                binary
+*.gz                 binary
+*.tar                binary
+*.ezidx              binary
+*.db                 binary
+*.sqlite             binary
+*.sqlite3            binary

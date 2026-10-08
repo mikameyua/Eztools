@@ -44,7 +44,14 @@ import time
 RESULTS = []          # (name, status ∈ {PASS,FAIL,SKIP}, detail)
 ENV = dict(os.environ)
 if not ENV.get("DOTNET_ROOT"):
-    ENV["DOTNET_ROOT"] = r"D:\dotnet10"   # 框架依赖应用的运行时定位（本机约定）
+    # 框架依赖应用的运行时定位：apphost 只看 DOTNET_ROOT 与注册表默认安装位置，**不扫 PATH**。
+    # 这里刻意**不写死便携路径**（那是本机约定，不该泄漏给其他克隆者）——
+    # 改为从 PATH 上的 dotnet 反推其运行时根目录；仍拿不到就交给调用方显式指定。
+    # ⚠️ DOTNET_ROOT 是**含 shared/ 的那层**（= dotnet.exe 的父目录），不是父父目录 ——
+    #    apphost 会在 $DOTNET_ROOT/shared/Microsoft.NETCore.App/<ver>/ 下找运行时。
+    _dotnet = shutil.which("dotnet")
+    if _dotnet:
+        ENV["DOTNET_ROOT"] = os.path.dirname(os.path.realpath(_dotnet))
 
 
 def ck(name, ok, detail=""):

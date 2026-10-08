@@ -62,12 +62,42 @@ EZ="$BINDIR/ezt.exe"
 
 if [ ! -f "$EZ" ]; then
   printf '[错误] 找不到宿主 %s\n' "$EZ" >&2
-  printf '       先构建：D:/dotnet10/dotnet.exe build "D:/01-项目代码/Eztools/Eztools.sln"\n' >&2
+  printf '       先构建本仓库（需要 .NET 10 SDK）：\n' >&2
+  printf '         dotnet build "%s/Eztools.sln"\n' "$REPO" >&2
   exit 2
 fi
 
-# 🔴 DOTNET_ROOT 必须指到便携 SDK（apphost 不扫 PATH，理由见 acceptance.sh）
-export DOTNET_ROOT="${DOTNET_ROOT:-D:/dotnet10}"
+# 🔴 DOTNET_ROOT 必须指到 .NET 运行时**根目录**（不是 dotnet.exe 本身）；
+#    apphost 不扫 PATH，理由与探测方式见 acceptance.sh 同名注释块。
+if [ -z "${DOTNET_ROOT:-}" ] && command -v dotnet >/dev/null 2>&1; then
+  _dotnet_bin="$(command -v dotnet)"
+  if command -v readlink >/dev/null 2>&1; then
+    _dotnet_real="$(readlink -f "$_dotnet_bin" 2>/dev/null || echo "$_dotnet_bin")"
+  else
+    _dotnet_real="$_dotnet_bin"
+  fi
+  # ⚠️ DOTNET_ROOT 是**含 shared/ 的那层**（= dotnet.exe 的父目录），不是父父目录 ——
+  #    apphost 会在 $DOTNET_ROOT/shared/Microsoft.NETCore.App/<ver>/ 下找运行时。
+  DOTNET_ROOT="$(dirname "$_dotnet_real")"
+  export DOTNET_ROOT
+fi
+if [ -z "${DOTNET_ROOT:-}" ]; then
+  printf '[错误] 未能定位 .NET 运行时根目录。\n' >&2
+  printf '       请显式指定，例如：DOTNET_ROOT=/d/dotnet10 bash %s\n' "$0" >&2
+  exit 2
+fi
+
+#🔴 探测到的可能版本过旧（本仓要 net10.0，而PATH 上常见的系统 dotnet 是 7.x）。
+#   此时 apphost 报的是含糊的 "You must install or update .NET"，在这里说清楚。
+if [ -d "$DOTNET_ROOT/shared/Microsoft.NETCore.App" ]; then
+  _have="$(ls "$DOTNET_ROOT/shared/Microsoft.NETCore.App" 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+' | sort -V | tail -1)"
+  case "${_have%%.*}" in
+    '' | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9)
+      printf '[错误] DOTNET_ROOT=%s 下运行时最高只有 %s.x，本仓需要 .NET 10。\n' "$DOTNET_ROOT" "${_have:-未知}" >&2
+      printf '       显式指定：DOTNET_ROOT=/path/to/dotnet bash %s\n' "$0" >&2
+      exit 2;;
+  esac
+fi
 
 # 🔴 计时**不能用 shell 的 date**。
 #    本环境是 MSYS：每次 `date` 都是一次进程启动（实测约 200 ms）。

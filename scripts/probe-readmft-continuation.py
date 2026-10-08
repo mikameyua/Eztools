@@ -10,7 +10,7 @@ probe-readmft-continuation.py —— W3-a-3 验收① 的提权正例手工探�
 selftest 已用假 reader 验证过 VolumeWorker 的消化逻辑；本探针验证的是**真卷 + 真提权 + 真游标**。
 
 用法（普通终端即可，推荐路径 A）：
-  set DOTNET_ROOT=D:\\dotnet10
+  set DOTNET_ROOT=D:\\dotnet10    ← 换成你自己的 .NET 10 运行时根目录
   src\\Eztools.Cli\\bin\\Debug\\net10.0-windows10.0.19041.0\\ezt.exe core start --elevate   ← UAC 确认，启动提权 Core
   src\\Eztools.Cli\\bin\\Debug\\net10.0-windows10.0.19041.0\\ezt.exe core status            ← 确认 提权=True
   python scripts\\probe-readmft-continuation.py
@@ -73,8 +73,8 @@ def main() -> int:
 
     ezt = Path(ns.ezt)
     if not ezt.is_file():
-        log(f"[环境错误] 找不到 {ezt} —— 先构建（DOTNET_ROOT=D:/dotnet10 时 "
-            f"dotnet build Eztools.sln --no-incremental）或用 --ezt 指定已安装路径")
+        log(f"[环境错误] 找不到 {ezt} —— 先构建（dotnet build Eztools.sln "
+            f"--no-incremental）或用 --ezt 指定已安装路径")
         return 2
 
     log(f"探针开始：volume={ns.volume} maxRecords={ns.max_records} ezt={ezt}")
