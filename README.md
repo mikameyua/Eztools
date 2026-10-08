@@ -1,5 +1,9 @@
 # Eztools
 
+[![CI](https://github.com/mikameyua/Eztools/actions/workflows/ci.yml/badge.svg)](https://github.com/mikameyua/Eztools/actions/workflows/ci.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg)](https://dotnet.microsoft.com/download/dotnet/10.0)
+
 类似 PowerToys 的一体化 Windows 工具集合：统一安装、统一设置界面、统一托盘入口。
 
 **不是插件平台，不是第三方生态** —— 工具全部由自己编写。这条定位决定了大量设计取舍，详见 [`docs/Eztools-设计方案.md`](docs/Eztools-设计方案.md)（项目唯一权威设计文档）。

@@ -53,18 +53,26 @@ python scripts/verify-desktop.py --repo .
 
 ### 持续集成
 
-`.github/workflows/ci.yml` 在每次 push / PR 自动跑**第 1~3 层**（构建 + selftest + 守卫 + 文档引用），约 40 秒。
+`.github/workflows/ci.yml` 在每次 push / PR 自动跑**第 1~3 层**（构建 + selftest + 守卫 + 文档引用）。
 
 **故意不跑第 4 层**（`acceptance.sh` / `verify-desktop.py`）：它们需要真 UAC 提权、托盘窗口与真实热键，CI 环境里关键项会大面积退化为 skip —— 那时判别力很低，只制造"红了不知道为什么"的噪声。这两层由**手工验收**承担，见 `docs/W*-手工验收清单.md`。
 
-| CI 步骤 | 实测耗时 |
-|---|---|
-| 构建（.sln 全解） | ~11s |
-| `ezt selftest` | ~28s |
-| 守卫 + 守卫自测 | ~5s |
-| 文档引用 | ~1s |
+runner 实测耗时（首次跑通，共 93 秒）：
 
-`global.json` 用 `rollForward: latestFeature` 钉住 SDK 大版本，避免 runner 默认版本漂移导致的构建差异。
+| 步骤 | 耗时 |
+|---|---|
+| 构建（.sln 全解） | 30s |
+| 准备 Python 运行时载荷 | 10s |
+| `ezt selftest` | 32s |
+| 守卫 + 守卫自测 | 3s |
+| 文档引用 | 1s |
+| 其余（检出 / 装 SDK / 缓存） | 17s |
+
+> `payload/` **不入库**（`.gitignore` 排除），而 selftest 启动时要从它部署
+> Python 运行时 ⇒ CI 必须先 `make-payload.sh` 生成一次。跳过这步会让
+> selftest 在第一项就 FAIL 并提前返回，后续 300+ 项根本不执行。
+
+`global.json` 用 `rollForward: latestFeature` 钉住 SDK 大版本，避免 runner 默认版本漂移导致的构建差异。CI 另设 `PYTHONUTF8=1`：本仓脚本大量输出中文，而 Python 默认按系统 locale 编码 stdout，英文 locale 的 runner 上会抛 `UnicodeEncodeError`（脚本侧已各自加 `reconfigure` 兜底，此为环境级双保险）。
 
 ---
 
