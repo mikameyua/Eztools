@@ -36,5 +36,7 @@ __all__ = [
     "encode_frame",
 ]
 
-__version__ = "0.1.0"
+# 与 Directory.Build.props 的 <Version> 保持一致（主版本.次版本 = 功能波次序号）。
+# ⚠️ 改这里必须同时改 Directory.Build.props，否则 SDK 报出的版本会与宿主不一致。
+__version__ = "0.11.0"
 SDK_VERSION = __version__

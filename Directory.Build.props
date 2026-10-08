@@ -25,7 +25,12 @@
     <NeutralLanguage>zh-Hans</NeutralLanguage>
     <Product>Eztools</Product>
     <Company>Eztools</Company>
-    <Version>0.1.0</Version>
+    <!--
+      版本号语义：主版本号.次版本号（W3~W11 = 功能波次序号）。
+      0.11.0 = W11 全波闭环（2026-10-07）。W3~W11 尚未进正式打包流程，
+      见README「已知限制 · 分发形态」——对外可分发包仍是手工作业。
+    -->
+    <Version>0.11.0</Version>
     <Copyright>Eztools</Copyright>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
