@@ -119,15 +119,42 @@ jobs:
       # ── 6. selftest ──
       #   ⚠️ 输出目录带 Windows 平台后缀（Cli 依赖 net10.0-windows 的 Win32 API），
       #   不能写成 net10.0 —— 那是本项目踩过的坑。
+      #
+      #   ★ 失败时把完整输出打出来：只留一句"exit 1"会让人完全无从下手
+      #     （本项目已因此多花一轮）。判据仍是 rc，非 0 即失败。
       - name: 端到端自检
+        shell: pwsh
         run: |
           $exe = "src/Eztools.Cli/bin/Debug/net10.0-windows10.0.19041.0/ezt.exe"
           if (-not (Test-Path $exe)) {
             Write-Error "找不到自检宿主 $exe —— 构建输出路径与预期不符"
             exit 1
           }
-          & $exe selftest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # 诊断信息：失败时最需要的是"哪一项FAIL"与"运行时从哪来"
+          "DOTNET_ROOT      = $env:DOTNET_ROOT"
+          "PYTHON_HOME      = $env:PYTHON_HOME"
+          "PYTHONPATH       = $env:PYTHONPATH"
+          "PYTHONUTF8= $env:PYTHONUTF8"
+          ""
+          # ★ 编码：ezt 输出是 UTF-8，Windows 控制台默认按 GBK 解码 ⇒ 必须显式
+          #   指定，否则日志里的中文全成乱码，诊断信息等于没有。
+          #   [Console]::OutputEncoding 管读，-Encoding 管写，两处都要设。
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $env:PYTHONUTF8 = '1'
+
+          & $exe selftest 2>&1 | Out-File -FilePath selftest.log -Encoding utf8
+          $rc = $LASTEXITCODE
+          Get-Content selftest.log -Encoding utf8 | Select-Object -Last 30
+          if ($rc -ne 0) {
+            ""
+            "==================== 失败诊断 ===================="
+            "---- [FAIL] 行 ----"
+            Select-String -Path selftest.log -Pattern '[FAIL]' -SimpleMatch -Encoding utf8 | ForEach-Object { $_.Line }
+            "---- 末尾 40 行 ----"
+            Get-Content selftest.log -Encoding utf8 -Tail 40
+            exit $rc
+          }
 
       # ── 7. 静态守卫 ──
       - name: 静态守卫 G1~G8
