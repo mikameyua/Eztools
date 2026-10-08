@@ -2,7 +2,7 @@
 
 > | | |
 > |---|---|
-> | **本文档写什么** | **面向使用者**：怎么装、怎么跑、工程结构在哪、怎么加一个自己的工具。 |
+> | **本文档写什么** | **面向使用者**：有什么功能、怎么装、怎么跑、工程结构在哪、怎么加一个自己的工具。 |
 > | **本文档不写什么** | **设计与实现决策一律不进这里** —— 那是 `docs/` 的职责。 |
 > | **开发者入口** | [`docs/README.md`](docs/README.md) —— **全项目文档的唯一索引**（分类、权威层级、引用规则）。 |
 
@@ -16,55 +16,54 @@
 
 ---
 
-## Wave 3 · 极速文件搜索（**W3-a~e 基本收官**）
+## 功能一览（已交付）
 
-Everything 类的毫秒级文件名搜索。**索引 / 查询 / 同步 / 搜索窗 / 边界五层已落地**，
-`acceptance.sh` 全量验收 + `ezt selftest`（**184 条**）全绿：
+所有功能共用同一套底座：全局热键唤起、托盘入口、清单驱动发现（新增工具零 UI 代码）、
+面板 `nodes[]` 原生 WPF 渲染、特权层 `ezt-core`。
 
-| 阶段 | 状态 |
-|---|---|
-| W3-a 索引核心（MFT 全量 + `.ezidx` 落盘 + 热启动） | ✅ |
-| W3-b 查询核心（前缀/子串/模糊 + Top-K + 管道缓存） | ✅ |
-| W3-c 同步层（USN 增量 + journal 对账 + 有界化） | ✅ |
-| W3-d 搜索窗（原生 WPF + 全局热键 + 高亮 + 三动作 + 虚拟化） | ✅（d-4 VS Code 适配器为可选支线，未排期） |
-| W3-e 边界（后台 IO 优先级 / 暂停 / 多卷分类 / 边界用例） | ✅ |
+| 波次 | 功能 | 说明 | 对标 |
+|---|---|---|---|
+| W3 | **极速文件搜索** | Everything 类毫秒级文件名搜索：MFT 全量索引 + USN 增量同步 + 全局热键唤起 + 前缀/子串/模糊 + Top-K | Everything / PowerToys 速览 |
+| W4 | **屏幕 OCR** | 区域文字识别（`Windows.Media.Ocr`），多屏混合缩放坐标对齐 | PowerOCR / Text-Grab |
+| W5 | **剪贴板历史** | SQLite + FTS5 持久化、唤出面板、Enter 直贴闭环、图片捕获 + OCR 提字、隐私黑名单 + 暂停 | CopyQ / Ditto |
+| W6 | **取色 + 区域截图** | 共用屏幕遮罩窗：屏幕取色（多格式复制）、区域截图 | Snipaste / 取色器 |
+| W7 | **统一启动器 Launcher** | 文件 / 应用 / 计算 / 单位换算 / 编码 / 剪贴板 / 系统命令 合一入口；空查询零往返、最近使用排序 | PowerToys Run / Flow.Launcher |
+| W8 | **可用性回填** | 修复索引状态误报（Core 未跑却显示"正在建索引"）、启动器配置热生效 | — |
+| W9 | **陈旧索引提示** | Core 缺席时提示索引陈旧并给启动入口（修复"沉默不可用"） | — |
+| W10 | **剪贴板搜索 + 命令** | 启动器内搜剪贴板历史（`图片`/`img` 触发图片提字）；`>` / `cmd:` 前缀触发系统命令（锁屏 / 休眠 / 清空回收站） | — |
+| W11 | **索引范围与排除** | 目录排除规则（整棵子树不进索引）、`pathFilter` 查询期包含闸、状态/重建可见出口 | — |
 
-| 文档 | 内容 |
-|---|---|
-| [`docs/W3-极速文件搜索-设计方案.md`](docs/W3-极速文件搜索-设计方案.md) | **架构权威**：索引 / 存储 / 查询 / 同步 / 交互 / 边界六层 + 坑位清单 + 落地偏差登记 |
-| [`docs/W3-极速文件搜索-分步实施计划.md`](docs/W3-极速文件搜索-分步实施计划.md) | **执行权威**：阶段顺序 · 验收断言 · 风险表 · 里程碑 · 三个停手点 |
-
-> ✅ **决策已全部收敛，无阻塞项。**
-> - **G1 交互通道** → 方案 ①：面板 **`input` 节点**（协议 V1.2 → V1.3）。
-> - **N2** → 补齐 `weight: full` 的"独立进程组"语义（崩溃隔离）。
-> - **G2 通道延迟** ✅ **已实测并关闭**（2026-09-25）：搜索窗走**原生 WPF 直连 `ezt-index`（stdio）**，
->   判据**三段拆**；传输段热态 P95 实测 **前缀 1 ms / 子串 4 ms**（208 万条）。回退方案（新窗型号）**无需启用**。
->
-> 收口与遗留见 [`docs/未完成项与待决清单.md`](docs/未完成项与待决清单.md) 与
-> [`docs/W3-手工验收清单.md`](docs/W3-手工验收清单.md)（剩余手工项：热键实测 G1 / 提权 Core 首建索引路径）。
+> 设计细节、协议字段、未决项台账一律进 `docs/`（见 [`docs/未完成项与待决清单.md`](docs/未完成项与待决清单.md)）。
+> 每个波次都有配套的「设计方案 + 手工验收清单」，**全部验收脚本 + 真机手工项均通过**后才算收官。
 
 ---
 
-## 当前状态：P0 ~ P4 全部落地（P4 收官）
+## 当前状态
 
-宿主骨架、清单驱动发现、工具进程管理、嵌入式运行时部署四件事已端到端跑通；
-**配置中心**（P1a）可读写、可校验、可从损坏中恢复；
-**托盘入口**（P2）已可运行 —— 菜单由 `tool.json` 自动合成，新增工具零 UI 代码；
-**设置窗口**（P1b，WPF + iNKORE.UI.WPF.Modern）schema 驱动渲染，新增工具零 UI 代码。
-**特权层**（P3，`ezt-core.exe`）命名管道 + 对端令牌校验，首批 5 个原语。
-**工具间协作**（P4 Wave 1）`host.invokeTool` + `weight` 档位闸门；
-**内部事件总线**（Wave 2a）· **便携分发 / 更新 / 卸载**（Wave 2b，`scripts/make-portable.sh`）·
-**面板贡献点 `panels`**（Wave 2c）：工具只返回 `nodes[]` 数据、宿主用**原生 WPF** 渲染
-（6 种声明式节点 + 按钮复用 `tool.invoke`，`weight: full` 才可用，协议见
-[`docs/P4-Wave2c-面板协议.md`](docs/P4-Wave2c-面板协议.md)）。
-**两种形态都验证过**：从仓库运行（开发形态）与装到安装根后运行（已安装形态）。
-`scripts/acceptance.sh` 一键复现，**169 项全绿**
-（85 基线 + P4 12 + 工程尾巴 7 + Wave 2a 1 + Wave 2b 19 + Wave 2c 24 + 托盘渲染 10
-+ 热键注入 4 + 速览 1；速览选中项另有 2 条**环境依赖**断言，桌面被占用时自动跳过并打印现场）。
+**W3 ~ W11 全部收官**（2026-10-07 W11 全波闭环）。宿主骨架、配置中心、托盘入口、设置窗口、
+特权层、工具间协作、内部事件总线、便携分发、面板贡献点均已端到端跑通。
 
-> 想自己验一遍？看 **[`docs/P0-验证手册.md`](docs/P0-验证手册.md)**：
-> 三档验证路径（10 秒冒烟 / 25 秒一键 / 手工分步）、反向验证（故意弄坏看宿主如何报错）、
-> 退出码表、实测基准数字、以及**尚未落地的边界清单**。
+验收基线（最新）：
+
+| 套件 | 结果 |
+|---|---|
+| `ezt selftest` | **336/0** |
+| `scripts/acceptance.sh` | **541/0**（满额，环境占用的热键自动跳过并计数） |
+| `python scripts/verify-desktop.py` | **274/0** |
+
+**规划中（W12，设计已拍板 · 待实施）**：启动器空查询「最近使用」视图、触发词发现性提示、
+工具动作接回（`filehash` / `wordcount` / `preview`）。详见 [`docs/W12-Launcher第二波-设计方案.md`](docs/W12-Launcher第二波-设计方案.md)。
+
+**已知限制**（使用者关心的）：
+
+- **分发形态**：当前以「源码 + 便携脚本」形态运行（`scripts/make-portable.sh` 齐备）；
+  官方可分发包版本号尚停在 `0.1.0`（W3~W11 尚未进打包流程），对外装包待补「重打 + 版本推进」流程。自用无碍。
+- **索引范围**：隐藏 / 系统文件当前不进索引（排除机制不基于文件属性位，系设计取舍）。
+- **触发词发现性**：启动器部分触发词（如 `图片` / `>`）UI 暂无提示，正在 W12 补充。
+
+---
+
+## 快速开始
 
 ```bash
 # 本机 .NET 10 SDK 是**便携安装**（C:\Program Files\dotnet 不可写，没并入系统），
@@ -79,41 +78,28 @@ $E runtime install
 $E list                # 看有哪些工具
 $E invoke echo.echo --text 你好
 $E selftest            # 端到端自检
-bash scripts/acceptance.sh        # 功能验收（18 步）：满额 225，实跑 222~225（速览"选中项"3 条依赖空闲桌面，跳过会显式打出）
+bash scripts/acceptance.sh        # 功能验收（18 步，满额 541，环境占用项自动跳过并计数）
 bash scripts/budget.sh            # 轻量化预算：9 项断言（体积 / 内存 / 启动耗时），超限即非零退出
-python scripts/verify-desktop.py --repo .   # 托盘/面板：53 项（含热键直达面板与气泡正文真值；3 条依赖空闲桌面）
+python scripts/verify-desktop.py --repo .   # 托盘/面板：274 项
 python scripts/verify-preview.py --repo .   # 速览内容判定：33 项（编码 / PDF·Office 文字层 / 图片节点）
-bash scripts/audit-tool-sources.sh          # 审计：工具源是否显式钉住（防"靠环境恰好如此"，S11）
+bash scripts/audit-tool-sources.sh          # 审计：工具源是否显式钉住（防"靠环境恰好如此"）
 python scripts/check-doc-refs.py            # 文档交叉引用：§N.M 与文件路径是否有悬空
 $E doctor              # 体检：安装与来源 + 运行时 + 清单诊断
 
-# 配置中心（P1a）
+# 配置中心
 $E config list         # 看各工具有哪些配置项、哪些已落盘
 $E config list echo    # 看某个工具的有效值（标注 默认值 / 已设置）
 $E config set echo uppercase true   # 设置（会校验类型/枚举/上下限）
-$E config schema echo  # 打印 schema —— 将来设置页的输入就是它
+$E config schema echo  # 打印 schema —— 设置页的输入就是它
 
-# 托盘（P2）
-$E tray                # 菜单会长什么样（不必启动 GUI）
-$E tray --json         # 结构化输出（验收脚本用它断言）
-$E tray --check        # 静态检查：托盘项引用的命令能否解析
-```
-
-### 托盘（日常使用入口）
-
-双击 `Eztools.Desktop.exe`，图标出现在任务栏通知区域（**可能在溢出区**，点小三角可看到；
-首次运行会提示一次）。右键就是工具菜单 —— 条目由 `contributes.menus` 自动合成，
-**新增工具零 UI 代码**。
-
-```bash
-DESKTOP="src/Eztools.Desktop/bin/Debug/net10.0-windows/Eztools.Desktop.exe"
+# 托盘（日常使用入口）
 $DESKTOP                # 常驻：图标进通知区域，右键出菜单
 $DESKTOP --selfcheck    # 只自检（建宿主 + 建菜单 + 读图标）后退出
 $DESKTOP --click 0      # 程序化触发第 0 个菜单项（自动化验证链路用）
 ```
 
 > 菜单项**点击后能不能跑通**由契约保证：能进托盘的命令必须"零参可执行 **或** 声明了
-> `input: clipboard`"（宿主读剪贴板注入 `args["input"]`，工具自己映射到 `text` / `path`）。
+> `input: clipboard`（宿主读剪贴板注入 `args["input"]`，工具自己映射到 `text` / `path`）。
 > 这条规则静态校验不了，由 `acceptance.sh` 第 9/10 步用具体输入真调一次来守。
 
 ---
@@ -124,8 +110,12 @@ $DESKTOP --click 0      # 程序化触发第 0 个菜单项（自动化验证链
 Eztools.sln
 ├── src/
 │   ├── Eztools.Contracts/     契约层：清单模型 · 校验器 · 协议方法名 · 帧模型（零第三方依赖）
-│   ├── Eztools.Host/          宿主框架库：路径 · 日志 · 运行时部署 · 清单发现 · 注册表 · 进程管理
-│   └── Eztools.Cli/           命令行宿主 ezt（P1 的设置应用将引用同一个 Eztools.Host）
+│   ├── Eztools.Host/          宿主框架库：路径 · 日志 · 运行时部署 · 清单发现 · 注册表 · 进程管理 · Launcher
+│   ├── Eztools.Index/         极速搜索索引进程（MFT/USN · 查询 · 排除规则）
+│   ├── Eztools.Core/          特权层 ezt-core.exe：命名管道 + 对端令牌校验的原语（MFT 枚举等）
+│   ├── Eztools.Ocr/           屏幕 OCR 遮罩窗 + 取色/截图
+│   ├── Eztools.Clipboard/     剪贴板历史监听 + 持久化
+│   └── Eztools.Cli/           命令行宿主 ezt
 ├── sdk/python/
 │   ├── eztools/               Python SDK（协议、主循环、宿主回调）
 │   └── template/              新工具模板（复制即用）
@@ -133,15 +123,17 @@ Eztools.sln
 │   ├── echo/                  回显：协议/编码/大 payload 的基准探针
 │   ├── wordcount/             文本统计：四类贡献点 + 配置 schema 示范
 │   ├── filehash/              文件校验：校验下载文件哈希（纯标准库）
+│   ├── preview/               速览：PDF/Office/图片 内容判定（vendored pypdf，BSD）
 │   └── probe/                 诊断探针：环境可见性 + 崩溃/挂起自检钩子
 ├── payload/                   运行时载荷（python-<版本>-<rid>.tar.gz，不入库，由脚本生成）
-├── scripts/
-│   ├── make-payload.sh        把一份独立 CPython 打成可部署载荷
-│   └── acceptance.sh          P0 验收（可重复、可进 CI）
+├── scripts/                   验收 / 预算 / 便携打包 / 文档引用校验
 ├── spike/                     技术验证（已完成使命，保留作历史依据与实测数据出处）
-├── docs/                      设计文档
+├── docs/                      设计文档（唯一索引 = docs/README.md）
 └── PowerToys/                 参照克隆（看它怎么做，以及哪里不该那么做）
 ```
+
+> 注：W3~W11 的功能以「宿主 / 索引 / 剪贴板 / OCR 进程」形式集成，并非都落在 `tools/` 目录；
+> `tools/` 下是可独立编写、清单驱动发现的内置工具。
 
 ## 真实安装目录（用户机器上）
 
@@ -157,7 +149,7 @@ Eztools.sln
 └── cache\                           临时解压
 
 %APPDATA%\Eztools\                   用户数据，与程序目录分离
-├── config\<toolId>.json             工具配置（P1 配置中心）
+├── config\<toolId>.json             工具配置
 └── state.json                       启用/禁用、热键覆盖
 ```
 
@@ -177,7 +169,7 @@ ezt invoke my-tool.run --text hello
 ```
 
 宿主从 `tool.json` 自动获得：命令入口、动作、全局热键、托盘菜单项、进程生命周期、
-以及配置 schema（P1 将据此渲染设置页）。详见 [`sdk/python/template/README.md`](sdk/python/template/README.md)。
+以及配置 schema（将据此渲染设置页）。详见 [`sdk/python/template/README.md`](sdk/python/template/README.md)。
 
 需要第三方依赖时不要 `pip install` 到全局，也不建议打包：
 
@@ -194,10 +186,8 @@ pip install --target "tools/my-tool/Lib" --only-binary=:all: pillow
   脚本里的 TFM 抽成了 `EZTOOLS_TFM` 变量。`LangVersion` 仍固定 11，放开到 C# 14 请单独决定。
 - **源码为 UTF-8 无 BOM**，`Directory.Build.props` 里显式设了 `CodePage=65001`，
   否则中文注释在非英文区域设置下可能被按 ANSI 解出乱码。
-- **在 WorkBuddy 里跑命令要注意**：写真实磁盘（`%LOCALAPPDATA%` 等）会被沙箱静默拦截
-  （exit 0 但文件没动），需要显式关闭沙箱；Git Bash 的 `pwd` 给 POSIX 路径，
-  传给 .NET 可执行文件会被解析成当前盘符根下的 `D:\d\...`，脚本里一律用 `pwd -W`。
 - 遇到诡异问题时先跑 `ezt doctor`（看清单诊断与资源冲突）和 `ezt selftest`（看链路是否完好）。
+- 文档引用有机器校验：`python scripts/check-doc-refs.py` 必须 0 悬空（CI 门禁之一）。
 
 ---
 
