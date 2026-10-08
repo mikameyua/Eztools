@@ -39,7 +39,7 @@
 **已知限制**：
 
 - **仅支持 Windows**：依赖 MFT / USN Journal / `Windows.Media.Ocr` / WPF，无跨平台路径。
-- **分发形态**：提供**自包含便携包** —— 解压即用，目标机器**无需安装 .NET**。`bash scripts/make-portable.sh` 产出 `Eztools-<版本>-win-x64.zip`（约 90 MB，含 .NET 与 Python 两套运行时）。用户流程：解压 → `bin\ezt.exe install --from .` → `bin\ezt.exe runtime install` → `bin\Eztools.Desktop.exe`。⚠️ 正式发布流程尚未建立（版本号手改、非 CI 推进），GitHub Release 也未发布。
+- **分发形态**：提供**自包含便携包** —— 解压即用，目标机器**无需安装 .NET**。已发布 [`v0.11.0` Release](https://github.com/mikameyua/Eztools/releases/tag/v0.11.0)（附 `Eztools-0.11.0-win-x64.zip`，约 90 MB，含 .NET 与 Python 两套运行时）。用户流程：解压 → `bin\ezt.exe install --from .` → `bin\ezt.exe runtime install` → `bin\Eztools.Desktop.exe`。自行打包用 `bash scripts/make-portable.sh`（版本号手改、非 CI 推进）。
 - **索引范围**：隐藏 / 系统文件当前不进索引（排除机制不基于文件属性位，系设计取舍）。
 - **触发词发现性**：启动器部分触发词（如 `图片` / `>`）UI 暂无提示，正在 W12 补充。
 - **索引重建**：改排除规则需重启托盘才带新值，重建才回收磁盘。
@@ -121,7 +121,11 @@ DOTNET_ROOT=/d/dotnet10 bash scripts/acceptance.sh
 
 ### 便携包分发（给不想装 SDK 的人）
 
-若你只想用 Eztools 而不想在本机装 .NET SDK，可以让维护者提供**自包含便携包**：
+若你不想在本机装 .NET SDK，直接下载已发布的
+[`v0.11.0` Release](https://github.com/mikameyua/Eztools/releases/tag/v0.11.0) —— 附
+`Eztools-0.11.0-win-x64.zip`（约 90 MB，已 sha256 校验并实测可在未装 .NET 的环境启动）。
+
+自行打包或验证：
 
 ```bash
 # 维护者侧：产出 dist/Eztools-<版本>-win-x64.zip（约 90 MB）

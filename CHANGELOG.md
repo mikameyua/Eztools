@@ -64,4 +64,7 @@
 
 ---
 
-> **Release 链接暂缺** —— `v0.11.0` 这个 tag 还没打（打包流程未建立，见上），等 tag 存在后再补 `compare` / `releases/tag` 链接，避免留下 404 死链。
+> **Release**：[v0.11.0](https://github.com/mikameyua/Eztools/releases/tag/v0.11.0) —— 附便携包
+> `Eztools-0.11.0-win-x64.zip`（89.22 MiB，sha256 `81a235f5…`）。
+> 该包已下载回验：字节数与 sha256 与本地产物逐位一致，并在清空 `DOTNET_ROOT` 的隔离环境里
+> 逐个启动 `ezt.exe` / `Eztools.Desktop.exe` / `ezt-core.exe` / `ezt-index.exe` 全部通过（20/0）。
