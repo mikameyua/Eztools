@@ -241,6 +241,14 @@ pip install --target "tools/my-tool/Lib" --only-binary=:all: pillow
 
 ---
 
+## 参与贡献
+
+欢迎参与。开始之前：
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) —— 四层验证流程、静态守卫 G1~G8、代码纪律
+- [`docs/README.md`](docs/README.md) —— 全项目文档索引，§0 读者导航按目的给出切入路径
+- 提交会触发 CI（构建 + 自检 + 守卫 + 文档引用，约 40 秒）；涉及 UAC / 托盘 / 热键的验收需手工跑
+
 ## 许可
 
 本项目采用 **[GNU General Public License v3.0 or later](LICENSE)**（SPDX：`GPL-3.0-or-later`）。

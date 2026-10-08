@@ -1,0 +1,97 @@
+# ============================================================================
+#  CI —— 构建 + 三层机器验证
+#
+#  跑什么、为什么不跑其余的（这是设计决策，不是遗漏）：
+#
+#    ✅ 构建          dotnet build（.sln 全解）
+#    ✅ selftest      336 项端到端断言 · 纯托管· 无需特权 · 约 30s
+#    ✅ review-guards G1~G8 静态规则 · 纯文本分析 · 约 5s
+#    ✅ check-doc-refs 文档交叉引用 0悬空 · 约 1s
+#
+#    ❌ acceptance.sh    **排除**：需真UAC 提权、托盘窗口、真实热键注册。
+#                      脚本自身对环境依赖项有skip 计数，但在 CI 里
+#                      大量关键项会退化为skip —— 那时它的判别力很低，
+#                      反而制造"红了不知道为什么"的噪声。改由手工验收承担
+#                      （见 docs/W*-手工验收清单.md）。
+#    ❌ verify-desktop.py **排除**：同理，需真实桌面会话（当前 runner 无 GUI）。
+#    ❌ verify-runtimes   **排除**：它要真跑自包含产物，耗时且需先publish。
+#                      发布前的验证由 make-portable.sh +手工跑该脚本承担。
+#
+#  ★ 判据一律「FAIL=0」，不是"命令没报错"。
+# ============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # 手动触发（Actions 页左侧 Run workflow）
+  workflow_dispatch:
+
+# 同一分支的新push 取消旧构建，避免排队浪费
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-verify:
+    name: 构建 + 验证
+    #windows-latest：TFM 是 net10.0-windows*，只能在 Windows 上构建
+    runs-on: windows-latest
+
+    env:
+      # ★ 自包含配置只在 Release/publish 生效（见 csproj 条件属性），
+      #   CI 用 Debug 构建 ⇒ 不塞运行时，保持快速构建。
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+
+    steps:
+      # ── 1. 检出 ──
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ── 2. 装 SDK（用 global.json 钉住，避免 runner 默认版本漂移）──
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # ── 3. 缓存 NuGet（依赖少但每次全解会慢）──
+      - name: 缓存 NuGet 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # ── 4. 构建（-warnaserror 之外只开增量，避免 --no-incremental 拖慢）──
+      - name: 构建
+        run: dotnet build Eztools.sln -c Debug --nologo -v minimal
+
+      # ── 5. selftest ──
+      #   ⚠️ 输出目录带 Windows 平台后缀（Cli 依赖 net10.0-windows 的 Win32 API），
+      #   不能写成 net10.0 —— 那是本项目踩过的坑。
+      - name: 端到端自检
+        run: |
+          $exe = "src/Eztools.Cli/bin/Debug/net10.0-windows10.0.19041.0/ezt.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "找不到自检宿主 $exe —— 构建输出路径与预期不符"
+            exit 1
+          }
+          & $exe selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── 6. 静态守卫 ──
+      - name: 静态守卫 G1~G8
+        run: |
+          python scripts/review-guards.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/review-guards.py --selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── 7. 文档交叉引用 ──
+      - name: 文档引用零悬空
+        run: |
+          python scripts/check-doc-refs.py --strict
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

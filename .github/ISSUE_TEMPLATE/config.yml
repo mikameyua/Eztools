@@ -1,0 +1,9 @@
+# 让"提问"不落到issue 列表里 —— 未定性的问题更适合讨论区。
+blank_issues_enabled: false
+contact_links:
+  - name: 提问 / 讨论
+    url: https://github.com/mikameyua/Eztools/discussions
+    about: 安装、用法、配置等未定性的问题，请到讨论区
+  - name: 已知限制
+    url: https://github.com/mikameyua/Eztools#当前状态
+    about: 先看README「当前状态 · 已知限制」，里面列了当前不支持的东西

@@ -51,6 +51,21 @@ python scripts/verify-desktop.py --repo .
 
 断言总数随功能增长，**热键被其他程序占用时会自动跳过并计数** —— 判据是「环境项扣除后 FAIL=0」，不要求绝对数满额。
 
+### 持续集成
+
+`.github/workflows/ci.yml` 在每次 push / PR 自动跑**第 1~3 层**（构建 + selftest + 守卫 + 文档引用），约 40 秒。
+
+**故意不跑第 4 层**（`acceptance.sh` / `verify-desktop.py`）：它们需要真 UAC 提权、托盘窗口与真实热键，CI 环境里关键项会大面积退化为 skip —— 那时判别力很低，只制造"红了不知道为什么"的噪声。这两层由**手工验收**承担，见 `docs/W*-手工验收清单.md`。
+
+| CI 步骤 | 实测耗时 |
+|---|---|
+| 构建（.sln 全解） | ~11s |
+| `ezt selftest` | ~28s |
+| 守卫 + 守卫自测 | ~5s |
+| 文档引用 | ~1s |
+
+`global.json` 用 `rollForward: latestFeature` 钉住 SDK 大版本，避免 runner 默认版本漂移导致的构建差异。
+
 ---
 
 ## 静态守卫（G1~G8）
