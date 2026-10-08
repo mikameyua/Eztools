@@ -34,6 +34,14 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+# ── 强制 stdout/stderr 用 UTF-8（环境无关）──────────────────────────────────
+# 本脚本输出中文，而 Python 默认按系统 locale 编码 stdout
+# （英文 Windows = cp1252）⇒ 英文 locale 机器上 print 中文会抛
+# UnicodeEncodeError 崩溃。显式归 UTF-8 即可环境无关。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── 四个可执行：漏掉任何一个都是真实故障，且**发现难度递增** ──
 #   ezt               漏 ⇒ 一启动就报错（易发现）
 #   Eztools.Desktop   漏 ⇒ 托盘起不来（中等）

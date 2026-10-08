@@ -40,6 +40,14 @@ import sys
 import threading
 import time
 
+# ── 强制 stdout/stderr 用 UTF-8（环境无关）──────────────────────────────────
+# 本脚本输出中文，而 Python 默认按系统 locale 编码 stdout
+# （英文 Windows = cp1252）⇒ 英文 locale 机器上 print 中文会抛
+# UnicodeEncodeError 崩溃。显式归 UTF-8 即可环境无关。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── 全局 ────────────────────────────────────────────────────────────────────
 RESULTS = []          # (name, status ∈ {PASS,FAIL,SKIP}, detail)
 ENV = dict(os.environ)

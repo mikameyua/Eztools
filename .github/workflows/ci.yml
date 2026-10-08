@@ -45,6 +45,13 @@ jobs:
       #   CI 用 Debug 构建 ⇒ 不塞运行时，保持快速构建。
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
+      # ★★ 必须：本仓的验收脚本大量 print 中文，而 Python 默认按**系统 locale**
+      #    编码 stdout —— runner 是英文 locale（cp1252），print 中文会直接抛
+      #    UnicodeEncodeError **崩溃**（不是乱码，是崩）。
+      #    实测：CI 首次跑时守卫就栽在这里（本机中文系统一直掩盖着）。
+      #    脚本侧已各自 reconfigure 兜底（环境无关），此处再设一层是为了
+      #    覆盖将来新增的、可能忘了加保护的脚本。
+      PYTHONUTF8: '1'
 
     strategy:
       fail-fast: false

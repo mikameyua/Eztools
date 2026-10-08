@@ -56,6 +56,16 @@ import shutil
 import sys
 import tempfile
 
+# ── 强制 stdout/stderr 用 UTF-8（环境无关）──────────────────────────────────
+# 本脚本输出大量中文。Python 默认按**系统 locale** 编码 stdout
+# （英文 Windows = cp1252、中文 Windows = GBK）⇒ 在英文 locale 机器上
+# print 中文会直接抛 UnicodeEncodeError 崩溃（不是乱码，是**崩**）。
+# 实测：CI（英文 locale）上本守卫因此 FAIL，而本机中文系统一直掩盖着它
+# —— 2026-10-08 CI 首次跑绿前抓到的真问题。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ── 语料范围 ────────────────────────────────────────────────────────────────
 SRC_EXT = {".cs", ".xaml", ".py", ".sh", ".ps1", ".cmd", ".bat",
            ".json", ".csproj", ".props", ".targets", ".xml", ".js", ".ts"}
