@@ -72,7 +72,20 @@ runner 实测耗时（首次跑通，共 93 秒）：
 > Python 运行时 ⇒ CI 必须先 `make-payload.sh` 生成一次。跳过这步会让
 > selftest 在第一项就 FAIL 并提前返回，后续 300+ 项根本不执行。
 
-`global.json` 用 `rollForward: latestFeature` 钉住 SDK 大版本，避免 runner 默认版本漂移导致的构建差异。CI 另设 `PYTHONUTF8=1`：本仓脚本大量输出中文，而 Python 默认按系统 locale 编码 stdout，英文 locale 的 runner 上会抛 `UnicodeEncodeError`（脚本侧已各自加 `reconfigure` 兜底，此为环境级双保险）。
+`global.json` 用 `rollForward: latestFeature` 钉住 SDK 大版本，避免 runner 默认版本漂移导致的构建差异。
+
+#### CI 环境相关的两项设置
+
+| 变量 | 作用 |
+|---|---|
+| `PYTHONUTF8=1` | 本仓脚本大量输出中文，而 Python 默认按系统 locale 编码 stdout，英文 locale 的 runner 上会抛 `UnicodeEncodeError`（脚本侧已各自加 `reconfigure` 兜底，此为环境级双保险） |
+| `EZTOOLS_PERF_SCALE=20` | selftest 含性能红线（扫描 100 万条 ≤ 200 ms）。Debug 下已按 ×10 放宽，但 **runner 比开发机慢约 2.3 倍**（实测 P50：本机 96.5 ms vs runner 219 ms），200 ms 预算是**临界波动**（同代码一次过、一次红）。×20 ⇒ 400 ms，给 runner 约 1.8 倍余量 |
+
+> ⚠️ 放宽性能预算**不是关掉断言** —— 断言仍在跑、仍能抓"退化到荒谬"，且 selftest 会**显式打印** `[perf]` 放宽声明（不静默）。真性能红线由开发机上的 Release 验收承担（`#if DEBUG` 分支，见 `SelfTestCommand.cs`）。
+
+#### 失败时怎么排查
+
+CI 日志在**无凭证时不可读**（`api/actions/runs/*/logs` 返 403、job 页面是 CSR 壳、`runs/<id>/logs` 返 404）。因此流程末尾有一个 `if: failure()` 步骤，把 `selftest.log` 的 `[FAIL]` 行与末尾 60 行写入一条**固定复用的 issue**（label `ci-digest`）—— issue 内容是匿名可读的，这是唯一无凭证可见的通道。
 
 ---
 

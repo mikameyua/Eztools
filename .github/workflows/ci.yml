@@ -62,6 +62,15 @@ jobs:
       #    脚本侧已各自 reconfigure 兜底（环境无关），此处再设一层是为了
       #    覆盖将来新增的、可能忘了加保护的脚本。
       PYTHONUTF8: '1'
+      # ★ selftest 含性能红线断言（扫描 100 万条 ≤ 200 ms）。Debug 构建下
+      #   已按 ×10 放宽（无 JIT 优化），但 **runner 比开发机慢约 2.3 倍**
+      #   （实测扫描段 P50：本机 96.5 ms vs runner 219 ms）⇒ 200 ms 预算
+      #   在 runner 上**临界波动**（同代码一次过、一次红，2026-10-08 实测）。
+      #   ×20 ⇒ 400 ms 预算，给 runner 约 1.8 倍余量（与本机余量相当）。
+      #   ⚠️ 这不是"把断言关掉"：断言仍在跑，阈值仍在守"没退化到荒谬"，
+      #   而且 selftest 会**显式打印**放宽声明（见 [perf] 行）。
+      #   真性能红线由开发机上的 Release 验收承担。
+      EZTOOLS_PERF_SCALE: '20'
 
     strategy:
       fail-fast: false

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -2113,10 +2114,24 @@ internal static class SelfTestCommand
             // 优化/内联，扫描段实测 ~6 倍（96/99/248 ms），按 Release 预算判必红。Debug 放宽
             // 10 倍只守"没退化到荒谬"（断言仍在、仍能红）；真红线由 Release 验收跑同组断言。
 #if DEBUG
-            const double perfScale = 10.0;
+            double perfScale = 10.0;
 #else
-            const double perfScale = 1.0;
+            double perfScale = 1.0;
 #endif
+            // 允许环境变量进一步放宽。为什么需要（2026-10-08，CI 首次跑通时实测）：
+            //   GitHub runner 比开发机慢，Debug×10 的预算（200 ms）在 runner 上实测
+            //   219 ms ⇒ 断言**临界波动**（同代码一次过、一次红）。
+            //   这类失败不是回归（功能完全正常），但会让 CI 长期不稳定。
+            // ⚠️ 放宽**必须显式声明**（下面打印一行），不得静默 —— 否则等于把
+            //    "性能守不住"藏起来。默认值不变 ⇒ 本机与 Release 验收行为零变化。
+            var perfOverride = Environment.GetEnvironmentVariable("EZTOOLS_PERF_SCALE");
+            if (double.TryParse(perfOverride, NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var perfScaleOverride) && perfScaleOverride > 0)
+            {
+                perfScale = perfScaleOverride;
+                ConsoleUi.Info($"[perf] 性能预算按 EZTOOLS_PERF_SCALE={perfScale} 放宽"
+                    + "（默认：Debug 10 / Release 1；用于慢速 CI runner，非本机判据）");
+            }
             double bPrefix = 20 * perfScale;   // 前缀扫描段 P50 预算
             double bSub = 25 * perfScale;      // 子串（偏差登记 §5.5：全名 IndexOf 无提前退出）
             double bFuzzy = 80 * perfScale;    // 模糊（设计 §5.1 自留 30~80）
