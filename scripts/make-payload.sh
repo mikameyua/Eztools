@@ -135,9 +135,20 @@ echo "== 打包 =="
 START=$(date +%s)
 
 # 先写 .partial 再改名：避免中断时留下一个看起来可用的半成品载荷
+#
+# ★★ -h（--dereference）是**必须的**，不是可选优化 ★★
+#   源 Python 目录里可能含**符号链接**（GitHub Actions 的 setup-python 就是：
+#   hostedtoolcache 下的 python.exe 等是指向绝对路径的链接）。
+#   不加 -h 时 tar 原样存链接，宿主解压时报：
+#     Extracting the Tar entry '...' would have resulted in a link target
+#     outside the specified destination directory
+#   —— 因为链接目标是宿主机绝对路径（如 /c/hostedtoolcache/...），落在解压
+#   目录之外，.NET 的 TarFile 出于路径穿越防护**直接拒绝**。
+#   后果极具误导性：载荷在打包机上看完全正常，只有**换机器部署**才炸。
+#   -h 让 tar 存实际文件内容 ⇒ 解压后是普通文件，可重定位。
 (
   cd "$OUT_DIR"
-  tar -czf "$ARCHIVE_NAME.partial" -C "$SRC_ABS" "${EXCLUDES[@]}" .
+  tar -czhf "$ARCHIVE_NAME.partial" -C "$SRC_ABS" "${EXCLUDES[@]}" .
   mv -f "$ARCHIVE_NAME.partial" "$ARCHIVE_NAME"
 )
 ARCHIVE="$OUT_DIR/$ARCHIVE_NAME"
@@ -155,6 +166,28 @@ EXE_ENTRIES="$(printf '%s\n' "$ARCHIVE_LIST" | grep -cE '^\./(python\.exe|bin/py
 
 if [ "$EXE_ENTRIES" -lt 1 ]; then
   echo "[错误] 载荷根目录下没有解释器（python.exe / bin/python3），宿主解压后会拒绝安装" >&2
+  exit 1
+fi
+
+# ── 4b. 断言：载荷里不得含符号链接 ──────────────────────────────────────────
+# 与上面 tar 的 -h 配对：-h 负责解引用，这里负责**证明它真的生效了**。
+# 为什么值得单独一条断言：删掉 -h 后本脚本在打包机上一路绿灯（载荷看起来
+# 完全正常），只有**宿主在另一台机器上解压**时才炸，且错误信息
+# （"link target outside the specified destination directory"）不会指向根因。
+# 这类"打包期看不出来、部署期才暴露"的问题必须在这里拦下。
+#
+# 判据用 tar -tvf 的**类型位**（首列第 1 字符）：'l' = 符号链接。
+# 代价：多读一次归档（41 MB 约 1~3s）。换来的是一条能真红的防线，值。
+ARCHIVE_TV="$(tar -tvzf "$ARCHIVE")" || {
+  echo "[错误] 载荷无法读取（tar -tv 解不开）" >&2
+  exit 1
+}
+LINK_COUNT="$(printf '%s\n' "$ARCHIVE_TV" | grep -cE '^l' || true)"
+
+if [ "$LINK_COUNT" -gt 0 ]; then
+  echo "[错误] 载荷内含 $LINK_COUNT 个符号链接 —— 宿主解压会拒绝（跨目录链接目标）" >&2
+  echo "       这通常意味着 tar 的 -h（解引用）没生效。示例：" >&2
+  printf '%s\n' "$ARCHIVE_TV" | grep -E '^l' | head -3 >&2
   exit 1
 fi
 
